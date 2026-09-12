@@ -16,7 +16,9 @@ authority. `tools/trusted_admission.py` implements the inert enrollment and
 policy-binding contract. `tools/service_runtime.py` adds authenticated GitHub
 ingress, exact App/installation admission, approved-policy retrieval and atomic
 binding persistence; `tools/service_entrypoint.py` requires an enabled profile,
-a same-user 0600 external registry and descriptor-delivered credentials. These
+a same-user external registry with mode exactly 0600 outside source, checkout,
+state and proof roots (re-read on every delivery and tick), and
+descriptor-delivered credentials. These
 sources are not deployed. A general client API and delivery outbox remain **not
 implemented**; do not expose the legacy internal-event CLI as an API. A registry
 document is service configuration and must never be committed here or read from

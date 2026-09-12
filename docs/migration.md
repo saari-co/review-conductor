@@ -30,7 +30,9 @@ configuration. The build excludes all historical profiles and legacy launchers.
 1. Trusted enrollment, approved base-policy loading and policy-hash binding now
    have an authenticated source integration (`tools/service_runtime.py`) and an
    inactive entrypoint. Still open: provision the external registry, add the
-   target manifest to an approved base commit, and activate an isolated service.
+   target manifest to an approved base commit, materialize the admitted manifest
+   as the effective engine profile (today the two must agree exactly or binding
+   fails closed), and activate an isolated service.
 2. Replace x-api `bin/smoky`/host-relative integration with qualified external
    adapters. The copied compatibility modules still describe the existing pilot;
    tests inject transports. They are not a portable activated service yet.

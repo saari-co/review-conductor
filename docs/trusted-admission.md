@@ -113,10 +113,16 @@ against the registry, where it is never current and cannot be re-admitted.
 
 The inert library itself performs no I/O. `tools/service_runtime.py` composes it
 with authenticated webhook ingress, GitHub approved-policy transport and atomic
-SQLite binding persistence. One exact tuple keeps exactly one binding: a later
-delivery that would bind the same tuple to a different policy is refused and
-rolled back, so a promoted policy applies only to a newly admitted head/epoch.
-That source is inactive until an external 0600 service registry with at least
-one enrollment, credentials, an enabled profile and an HTTPS edge exist. No event
+SQLite binding persistence. Only the accepted `pull_request` delivery that
+established a head binds it; `workflow_run` deliveries and closed/duplicate
+pull-request deliveries never create bindings. One exact tuple keeps exactly one
+binding, so a promoted policy applies only to a newly admitted head or review
+epoch (for example `ready_for_review` or `reopened`), and the binding table
+refuses a conflicting rebinding outright. Before binding, the admitted manifest
+must agree with the engine profile's repository, default branch, CI workflow,
+quiet period and merge policy. That source is inactive until an external
+service registry (mode exactly 0600, outside source, checkout, state and proof
+roots, re-read on every delivery and tick) with at least one enrollment,
+credentials, an enabled profile and an HTTPS edge exist. No event
 outbox, deployment, live check publication, adjudication or merge behaviour is
 activated; the packaged scaffold still exposes only `validate-manifest`.

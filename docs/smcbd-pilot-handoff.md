@@ -36,13 +36,22 @@ activation.**
 
 ## Service-owned files and selectors
 
-The live enrollment registry is an external same-user regular file, mode `0600`,
-never a target-repository file. It must contain exactly the repository/name/ID,
+The live enrollment registry is an external same-user regular file with mode
+exactly `0600`, never a target-repository file. The entrypoint refuses a registry
+located inside this source tree, the target checkout, or the state/proof roots,
+and re-reads and re-validates the file on every delivery and worker tick, so a
+promotion or revocation takes effect without restart and a registry that stops
+validating fails every delivery and tick closed. It must contain exactly the repository/name/ID,
 App/installation/account and an owner-promoted default-branch policy commit plus
 the SHA-256 of the exact `.review-conductor.json` bytes. The loader accepts only
 the two owner-approved repository names; the initial deployed registry should
 contain SMCBD only. `dinkuskit/blocks` is added after the pilot under a separate
 installation and migration decision.
+
+The engine still reads its rules from the core profile. A policy binds only when
+the admitted manifest's repository, default branch, CI workflow name/path, quiet
+period and merge policy agree exactly with that profile; promoting a manifest that
+changes any of them requires the matching profile change first.
 
 Non-secret credential selectors are already isolated in the inactive profile:
 

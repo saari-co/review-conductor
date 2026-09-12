@@ -151,15 +151,16 @@ class ServiceFixture:
             connection.close()
 
 
-class RegistrySpy:
-    """Stands in for the registry to prove nothing consults enrollment before auth."""
+class RegistrySpy(admission.Registry):
+    """A real (empty) registry that fails the test if enrollment is consulted before auth."""
 
     def __init__(self, test):
-        self.test = test
-        self.calls = 0
+        super().__init__(enrollments=())
+        object.__setattr__(self, "test", test)
+        object.__setattr__(self, "calls", 0)
 
     def lookup(self, *_args):
-        self.calls += 1
+        object.__setattr__(self, "calls", self.calls + 1)
         self.test.fail("enrollment lookup ran before webhook authentication")
 
 
@@ -290,25 +291,39 @@ class AdmissionIngressTests(unittest.TestCase):
             connection.close()
         with self.assertRaises(core.ContractError):
             service.require_current_bindings(self.fx.app_config(), promoted_registry)
-        # A fresh delivery for the same exact tuple cannot silently rebind it to the promoted
-        # policy: the conflicting binding is refused, the delivery rolls back and the head
-        # stays blocked until a new head/epoch is admitted under the promoted policy.
+        # A duplicate delivery of the same exact tuple never rebinds it: the stale binding
+        # stays, the head stays blocked, and only a new head or review epoch admitted under
+        # the promoted policy unblocks it.
         self.fx.policy = promoted
         redelivered = self.fx.payload()
         redelivered["pull_request"]["updated_at"] = "2026-08-30T20:10:30Z"
-        with self.assertRaises(core.ContractError):
-            self.fx.ingest("after-promotion", redelivered, registry=promoted_registry)
+        self.assertEqual(self.fx.ingest("after-promotion", redelivered, registry=promoted_registry)["result"], "duplicate")
         rows = self.fx.binding_rows()
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["policy_sha256"], hashlib.sha256(self.fx.policy[:-1]).hexdigest())
+        self.assertEqual([(row["review_epoch"], row["policy_sha256"]) for row in rows],
+                         [(0, hashlib.sha256(promoted[:-1]).hexdigest())])
+        with self.assertRaises(core.ContractError):
+            service.require_current_bindings(self.fx.app_config(), promoted_registry)
+        # The exact-tuple table itself refuses a conflicting rebinding even if a caller
+        # constructs one directly.
+        conflicting = admission.admit(promoted_registry, {
+            "repository": REPOSITORY, "repository_id": REPOSITORY_ID, "app_id": APP_ID,
+            "installation_id": INSTALLATION_ID, "pr_number": 7, "base_sha": BASE, "head_sha": HEAD,
+            "review_epoch": 0, "policy_commit": POLICY_COMMIT}, self.fx.read)
         connection = core.open_database(self.fx.state, REPOSITORY)
         try:
-            self.assertEqual(
-                [row[0] for row in connection.execute("SELECT delivery_id FROM deliveries").fetchall()],
-                ["initial"],
-            )
+            with self.assertRaises(core.ContractError):
+                service._persist_binding(connection, conflicting)
+            connection.rollback()
         finally:
             connection.close()
+        ready = self.fx.payload()
+        ready["action"] = "ready_for_review"
+        ready["pull_request"]["updated_at"] = "2026-08-30T20:11:00Z"
+        receipt = self.fx.ingest("ready", ready, registry=promoted_registry)
+        self.assertEqual((receipt["result"], receipt["review_epoch"]), ("accepted", 1))
+        self.assertEqual([(row["review_epoch"], row["policy_sha256"]) for row in self.fx.binding_rows()],
+                         [(0, hashlib.sha256(promoted[:-1]).hexdigest()), (1, hashlib.sha256(promoted).hexdigest())])
+        service.require_current_bindings(self.fx.app_config(), promoted_registry)
 
     def test_registry_file_requires_same_user_mode_0600(self):
         document = {
@@ -324,24 +339,221 @@ class AdmissionIngressTests(unittest.TestCase):
         }
         path = self.fx.root / "registry.json"
         path.write_text(json.dumps(document))
-        for mode in (0o600, 0o400, 0o700):
+        path.chmod(0o600)
+        loaded = entrypoint.read_service_registry(path)
+        self.assertEqual(loaded.enrollments[0].app_id, APP_ID)
+        # The documented contract is exactly 0600: not merely owner-only bits.
+        for mode in (0o400, 0o700, 0o640, 0o604, 0o660, 0o644, 0o666, 0o610, 0o601, 0o200):
             path.chmod(mode)
-            loaded = entrypoint.read_service_registry(path)
-            self.assertEqual(loaded.enrollments[0].app_id, APP_ID)
-        for mode in (0o640, 0o604, 0o660, 0o644, 0o666, 0o610, 0o601):
-            path.chmod(mode)
-            with self.subTest(mode=oct(mode)), self.assertRaises(core.ContractError):
+            with self.subTest(mode=oct(mode)), self.assertRaises(core.ContractError) as ctx:
                 entrypoint.read_service_registry(path)
+            self.assertIn("mode 0600 exactly", str(ctx.exception))
         path.chmod(0o600)
         link = self.fx.root / "registry-link.json"
         link.symlink_to(path)
         relative = Path("registry.json")
-        for candidate in (link, relative, self.fx.root, self.fx.root / "missing.json"):
+        for candidate in (link, relative, self.fx.root, self.fx.root / "missing.json", str(path)):
             with self.subTest(candidate=str(candidate)), self.assertRaises(core.ContractError):
                 entrypoint.read_service_registry(candidate)
         path.write_text(json.dumps({**document, "enrollments": []}))
         with self.assertRaises(core.ContractError):
             entrypoint.read_service_registry(path)
+
+    def test_registry_cannot_live_in_source_checkout_state_or_proof_roots(self):
+        document = json.loads(json.dumps({
+            "schema": admission.REGISTRY_SCHEMA,
+            "enrollments": [{
+                "repository": REPOSITORY, "repository_id": REPOSITORY_ID,
+                "github_app": {"id": APP_ID, "installation_id": INSTALLATION_ID,
+                               "installation_account": "saari-co"},
+                "approved_policy": {"commit": POLICY_COMMIT,
+                                    "sha256": hashlib.sha256(self.fx.policy).hexdigest()},
+            }],
+        }))
+        root = self.fx.root.resolve()
+        checkout = root / "Developer/review-conductor/openclaw-smcbd-suite"
+        state = root / ".local/state/review-conductor"
+        proof = root / ".local/share/review-conductor/proof"
+        config = {"paths": {
+            "blocks_checkout": str(checkout), "state_root": str(state), "proof_root": str(proof),
+        }}
+        roots = entrypoint.forbidden_registry_roots(config)
+        self.assertIn(entrypoint.ROOT, roots)
+        forbidden = [
+            checkout / ".review-conductor-registry.json",
+            checkout / "config/registry.json",
+            state / "registry.json",
+            proof / "registry.json",
+            proof / "inbox/openclaw/registry.json",
+            checkout / "nested/../registry.json",
+        ]
+        for candidate in forbidden:
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            candidate.write_text(json.dumps(document))
+            candidate.chmod(0o600)
+            with self.subTest(candidate=str(candidate.relative_to(root))), \
+                    self.assertRaises(core.ContractError) as ctx:
+                entrypoint.read_service_registry(candidate, roots)
+            self.assertIn("service-owned", str(ctx.exception))
+        # This repository's own tree is never a registry location, even with a valid file.
+        with tempfile.NamedTemporaryFile("w", dir=ROOT, prefix=".tmp-registry-", suffix=".json",
+                                         delete=False) as handle:
+            handle.write(json.dumps(document))
+        in_source = Path(handle.name)
+        self.addCleanup(in_source.unlink)
+        in_source.chmod(0o600)
+        with self.assertRaises(core.ContractError):
+            entrypoint.read_service_registry(in_source, roots)
+        # A sibling service-owned location outside every root is accepted.
+        allowed = root / ".config/review-conductor/registry.json"
+        allowed.parent.mkdir(parents=True)
+        allowed.write_text(json.dumps(document))
+        allowed.chmod(0o600)
+        self.assertEqual(entrypoint.read_service_registry(allowed, roots).enrollments[0].app_id, APP_ID)
+
+    def test_registry_provider_observes_promotion_and_revocation_without_restart(self):
+        path = self.fx.root.resolve() / "registry.json"
+
+        def write_registry(policy):
+            document = {
+                "schema": admission.REGISTRY_SCHEMA,
+                "enrollments": [{
+                    "repository": REPOSITORY, "repository_id": REPOSITORY_ID,
+                    "github_app": {"id": APP_ID, "installation_id": INSTALLATION_ID,
+                                   "installation_account": "saari-co"},
+                    "approved_policy": {"commit": POLICY_COMMIT,
+                                        "sha256": hashlib.sha256(policy).hexdigest()},
+                }],
+            }
+            path.write_text(json.dumps(document))
+            path.chmod(0o600)
+
+        write_registry(self.fx.policy)
+        provider = entrypoint.registry_provider(path, {
+            "paths": {key: str(self.fx.root.resolve() / key) for key in (
+                "blocks_checkout", "state_root", "proof_root")},
+            "github_app": self.fx.app_config()["github_app"],
+        })
+        receipt = self.fx.ingest("initial", self.fx.payload(), registry=provider)
+        self.assertEqual(receipt["result"], "accepted")
+        service.require_current_bindings(self.fx.app_config(), provider)
+        # Promotion written to the registry file is observed by the next tick and delivery.
+        promoted = self.fx.policy + b"\n"
+        write_registry(promoted)
+        with self.assertRaises(core.ContractError):
+            service.require_current_bindings(self.fx.app_config(), provider)
+        self.fx.policy = promoted
+        fresh = self.fx.payload()
+        fresh["pull_request"]["head"]["sha"] = "e" * 40
+        fresh["pull_request"]["updated_at"] = "2026-08-30T20:11:00Z"
+        receipt = self.fx.ingest("promoted-head", fresh, registry=provider)
+        self.assertEqual(receipt["result"], "accepted")
+        self.assertEqual(self.fx.binding_rows()[-1]["policy_sha256"], hashlib.sha256(promoted).hexdigest())
+        service.require_current_bindings(self.fx.app_config(), provider)
+        # Revocation or corruption of the registry fails every later delivery and tick closed,
+        # never falling back to the previously loaded approval.
+        path.chmod(0o644)
+        with self.assertRaises(core.ContractError):
+            service.require_current_bindings(self.fx.app_config(), provider)
+        newer = self.fx.payload()
+        newer["pull_request"]["head"]["sha"] = "f" * 40
+        newer["pull_request"]["updated_at"] = "2026-08-30T20:12:00Z"
+        with self.assertRaises(core.ContractError):
+            self.fx.ingest("revoked", newer, registry=provider)
+        self.assertEqual([row["head_sha"] for row in self.fx.binding_rows()], [HEAD, "e" * 40])
+        for bad in (object(), lambda: {"enrollments": []}, None):
+            with self.subTest(bad=type(bad).__name__), self.assertRaises(core.ContractError):
+                service.resolve_registry(bad)
+
+    def test_workflow_run_deliveries_never_create_bindings(self):
+        self.fx.ingest("pr", self.fx.payload())
+        first = self.fx.binding_rows()
+        self.assertEqual(len(first), 1)
+        reads = len(self.fx.reads)
+        core_config = json.loads(self.fx.config_path.read_text())
+
+        def ci_run(run_id, head, *, created="2026-08-29T20:15:00Z"):
+            payload = copy.deepcopy(legacy.ci_payload(7, run_id, head))
+            payload["repository"] = {"full_name": REPOSITORY, "id": REPOSITORY_ID}
+            payload["installation"] = {"id": INSTALLATION_ID}
+            payload["workflow"] = {"name": core_config["ci"]["workflow_name"], "path": core_config["ci"]["workflow_path"]}
+            payload["workflow_run"]["created_at"] = created
+            payload["workflow_run"]["updated_at"] = "2026-08-29T20:20:00Z"
+            return payload
+
+        def claw_run(run_id, head):
+            payload = copy.deepcopy(legacy.claw_workflow_payload(run_id))
+            payload["repository"] = {"full_name": REPOSITORY, "id": REPOSITORY_ID}
+            payload["installation"] = {"id": INSTALLATION_ID}
+            payload["workflow"] = {"name": core_config["clawsweeper"]["workflow_name"],
+                                  "path": core_config["clawsweeper"]["workflow_path"]}
+            payload["workflow_run"]["head_sha"] = head
+            payload["workflow_run"]["pull_requests"] = [{"number": 7, "base": {"ref": "main", "sha": BASE},
+                                                       "head": {"sha": head}}]
+            return payload
+
+        def ingest(delivery, payload):
+            body, signature = self.fx.signed(payload)
+            return service.ingest_service_delivery(
+                config_path=self.fx.config_path, state_root=self.fx.state, event_type="workflow_run",
+                delivery_id=delivery, signature=signature, body=body, secret=SECRET,
+                registry=self.fx.registry(), read_policy=self.fx.read, service_config=self.fx.app_config(),
+            )
+
+        # Exact-head CI, a ClawSweeper dispatch naming the current head, a ClawSweeper
+        # dispatch naming an unrelated head, and stale CI are all engine evidence only.
+        results = [
+            ingest("ci-exact", ci_run(1001, HEAD))["result"],
+            ingest("claw-current", claw_run(2001, HEAD))["result"],
+            ingest("claw-unrelated", claw_run(2002, "9" * 40))["result"],
+            ingest("ci-stale", ci_run(1002, "9" * 40))["result"],
+        ]
+        self.assertEqual(results, ["accepted", "accepted", "accepted", "stale"])
+        self.assertEqual(self.fx.binding_rows(), first)
+        self.assertEqual(len(self.fx.reads), reads)
+        # Closing the PR is recorded even when the registry has since promoted the policy,
+        # and a closed head is not a live head demanding a binding.
+        promoted_registry = self.fx.registry(policy=self.fx.policy + b"\n")
+        self.fx.policy = self.fx.policy + b"\n"
+        closed = self.fx.payload()
+        closed["action"] = "closed"
+        closed["pull_request"]["state"] = "closed"
+        closed["pull_request"]["updated_at"] = "2026-08-30T20:11:00Z"
+        self.assertEqual(self.fx.ingest("closed", closed, registry=promoted_registry)["result"], "accepted")
+        self.assertEqual(self.fx.binding_rows(), first)
+        service.require_current_bindings(self.fx.app_config(), promoted_registry)
+
+    def test_admitted_policy_must_match_the_engine_profile(self):
+        manifest = json.loads(self.fx.policy)
+        variants = {
+            "quiet_seconds": lambda m: m["review"].__setitem__("quiet_seconds", 900),
+            "default_branch": lambda m: m.__setitem__("default_branch", "release"),
+            "workflow_name": lambda m: m["ci"].__setitem__("workflow_name", "Other pipeline"),
+            "workflow_path": lambda m: m["ci"].__setitem__("workflow_path", ".github/workflows/other.yml"),
+        }
+        for label, mutate in variants.items():
+            mutated = copy.deepcopy(manifest)
+            mutate(mutated)
+            raw = json.dumps(mutated, indent=2).encode() + b"\n"
+            self.fx.policy = raw
+            with self.subTest(label=label), self.assertRaises(core.ContractError) as ctx:
+                self.fx.ingest(f"mismatch-{label}", self.fx.payload(), registry=self.fx.registry(policy=raw))
+            self.assertIn("contradicts the engine profile", str(ctx.exception))
+            connection = core.open_database(self.fx.state, REPOSITORY)
+            try:
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM heads").fetchone()[0], 0)
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0], 0)
+            finally:
+                connection.close()
+        # Whitespace-only reformatting of an agreeing manifest still binds.
+        agreeing = json.dumps(manifest, indent=4).encode()
+        self.fx.policy = agreeing
+        self.assertEqual(self.fx.ingest("agreeing", self.fx.payload(), registry=self.fx.registry(policy=agreeing))["result"], "accepted")
+        with self.assertRaises(core.ContractError):
+            service.require_policy_matches_profile(
+                admission.load_approved_policy(self.fx.registry().enrollments[0], POLICY_COMMIT, self.fx.read),
+                {**json.loads(self.fx.config_path.read_text()), "merge_policy": "auto"},
+            )
 
     def test_real_bounded_http_ingress_admits_replays_and_rejects_bad_deliveries(self):
         config = self.fx.app_config()
@@ -503,8 +715,42 @@ class EntrypointTests(unittest.TestCase):
         with patch.object(userland, "read_inherited_value", side_effect=AssertionError("credentials were read")):
             code, stderr = self.run_main(registry)
         self.assertEqual(code, 2)
-        self.assertIn("group/world accessible", stderr)
+        self.assertIn("mode 0600 exactly", stderr)
         self.assertFalse((self.home / ".local").exists())
+
+    def test_failed_ingress_bind_never_starts_the_worker(self):
+        self.enable_profile()
+        registry = self.root / "registry.json"
+        registry.write_text(json.dumps({
+            "schema": admission.REGISTRY_SCHEMA,
+            "enrollments": [{
+                "repository": REPOSITORY, "repository_id": REPOSITORY_ID,
+                "github_app": {"id": APP_ID, "installation_id": INSTALLATION_ID,
+                               "installation_account": "saari-co"},
+                "approved_policy": {"commit": POLICY_COMMIT,
+                                    "sha256": hashlib.sha256((ROOT / "examples/smcbd.review-conductor.json").read_bytes()).hexdigest()},
+            }],
+        }))
+        registry.chmod(0o600)
+        ticked = threading.Event()
+
+        class Client:
+            def read_policy(self, *_):
+                raise AssertionError("policy transport ran during failed startup")
+
+        def bind_failure(*_args, **_kwargs):
+            raise OSError("address already in use")
+
+        with patch.object(userland, "read_inherited_value", return_value="fixture-secret"), \
+                patch.object(userland, "build_client", return_value=Client()), \
+                patch.object(userland, "OpenClawNotifier", return_value=object()), \
+                patch.object(service, "run_service_tick", side_effect=lambda *a, **k: ticked.set()), \
+                patch.object(runtime, "BoundedHTTPServer", side_effect=bind_failure):
+            code, stderr = self.run_main(registry)
+        self.assertEqual(code, 2)
+        self.assertIn("address already in use", stderr)
+        self.assertFalse(ticked.wait(1.0), "worker ran a tick although ingress never bound")
+        self.assertNotIn("review-conductor-service", [thread.name for thread in threading.enumerate()])
 
     def test_apply_flag_and_arguments_are_mandatory(self):
         for argv in [[], ["--profile", str(self.profile), "--registry", str(self.root)],
@@ -569,8 +815,8 @@ MUTANTS = [
     (
         "skip the service enrollment check in the entrypoint",
         "tools/service_entrypoint.py",
-        "    except admission.AdmissionError as exc:\n        raise service.ServiceError(\n            \"runtime profile is not enrolled in the service registry\"\n        ) from exc\n",
-        "    except admission.AdmissionError:\n        pass\n",
+        "        except admission.AdmissionError as exc:\n            raise service.ServiceError(\n                \"runtime profile is not enrolled in the service registry\"\n            ) from exc\n",
+        "        except admission.AdmissionError:\n            pass\n",
         "EntrypointTests.test_enabled_profile_still_requires_registry_agreement_before_credentials",
     ),
     (
@@ -581,11 +827,46 @@ MUTANTS = [
         "EntrypointTests.test_shipped_candidate_profile_is_refused_before_registry_or_credentials",
     ),
     (
-        "accept a group-readable registry",
+        "accept any owner-only registry mode",
         "tools/service_entrypoint.py",
+        "    if stat.S_IMODE(metadata.st_mode) != REGISTRY_MODE:\n",
         "    if metadata.st_mode & 0o077:\n",
-        "    if metadata.st_mode & 0o007:\n",
         "AdmissionIngressTests.test_registry_file_requires_same_user_mode_0600",
+    ),
+    (
+        "accept a registry inside a checkout or state root",
+        "tools/service_entrypoint.py",
+        "        if resolved == root or resolved.is_relative_to(root):\n",
+        "        if False:\n",
+        "AdmissionIngressTests.test_registry_cannot_live_in_source_checkout_state_or_proof_roots",
+    ),
+    (
+        "cache the registry instead of re-reading it",
+        "tools/service_entrypoint.py",
+        "    def provide() -> admission.Registry:\n        registry = read_service_registry(path, roots)\n",
+        "    cached = read_service_registry(path, roots)\n\n    def provide() -> admission.Registry:\n        registry = cached\n",
+        "AdmissionIngressTests.test_registry_provider_observes_promotion_and_revocation_without_restart",
+    ),
+    (
+        "bind on workflow_run deliveries",
+        "tools/service_runtime.py",
+        '            event_type != "pull_request"\n',
+        '            event_type not in {"pull_request", "workflow_run"}\n',
+        "AdmissionIngressTests.test_workflow_run_deliveries_never_create_bindings",
+    ),
+    (
+        "bind without checking the policy against the engine profile",
+        "tools/service_runtime.py",
+        "        require_policy_matches_profile(bound.policy, config)\n",
+        "        pass\n",
+        "AdmissionIngressTests.test_admitted_policy_must_match_the_engine_profile",
+    ),
+    (
+        "start the worker before ingress binds",
+        "tools/service_entrypoint.py",
+        "    server = None\n    try:\n",
+        "    server = None\n    worker.start()\n    try:\n",
+        "EntrypointTests.test_failed_ingress_bind_never_starts_the_worker",
     ),
 ]
 

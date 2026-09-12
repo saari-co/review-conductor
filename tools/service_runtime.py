@@ -10,20 +10,38 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Union
 
 import review_conductor as core
 import review_conductor_runtime as runtime
 import trusted_admission as admission
-from target_manifest import unique_object
+from target_manifest import unique_object, validate_manifest
 
 
 BINDING_TABLE_SCHEMA = "review-conductor.service-policy-binding.v1"
 PolicyReader = Callable[[str, str], bytes]
+RegistrySource = Union[admission.Registry, Callable[[], admission.Registry]]
 
 
 class ServiceError(core.ContractError):
     """A service-owned identity, enrollment or policy boundary failed closed."""
+
+
+def resolve_registry(source: RegistrySource) -> admission.Registry:
+    """Return the current validated registry; a provider re-reads it every time.
+
+    Passing a provider means promotion or revocation in the service-owned registry
+    is observed by the next delivery or worker tick without a restart, and a
+    registry that stops validating fails every delivery and tick closed.
+    """
+    if isinstance(source, admission.Registry):
+        return source
+    if not callable(source):
+        raise ServiceError("service registry source must be a Registry or a provider")
+    value = source()
+    if not isinstance(value, admission.Registry):
+        raise ServiceError("service registry provider did not return a validated registry")
+    return value
 
 
 def _strict_payload(body: bytes) -> dict[str, Any]:
@@ -62,21 +80,53 @@ def preflight_enrollment(
     return enrolled
 
 
-def _event_pr_number(event_type: str, payload: dict[str, Any]) -> int | None:
-    if event_type == "pull_request":
-        pull = core.require_object(payload.get("pull_request"), "payload pull_request")
-        return core.require_positive_int(pull.get("number"), "pull_request number")
-    run = core.require_object(payload.get("workflow_run"), "payload workflow_run")
-    pulls = run.get("pull_requests")
-    if not isinstance(pulls, list):
-        raise ServiceError("workflow_run pull_requests must be a list")
-    if not pulls:
-        # ClawSweeper workflow_dispatch is bound later by its exact terminal artifact.
-        return None
-    if len(pulls) != 1:
-        raise ServiceError("workflow_run must identify at most one pull request")
-    pull = core.require_object(pulls[0], "workflow_run pull request")
-    return core.require_positive_int(pull.get("number"), "workflow_run pull request number")
+def _pull_request_tuple(payload: dict[str, Any]) -> tuple[int, str]:
+    pull = core.require_object(payload.get("pull_request"), "payload pull_request")
+    head = core.require_object(pull.get("head"), "pull_request head")
+    return (
+        core.require_positive_int(pull.get("number"), "pull_request number"),
+        core.require_sha(head.get("sha"), "pull_request head sha"),
+    )
+
+
+def require_policy_matches_profile(policy: admission.AdmittedPolicy, config: dict[str, Any]) -> None:
+    """Refuse to bind a policy the engine profile would not actually enforce.
+
+    The legacy engine still reads its rules from the core profile. Until the
+    admitted manifest is materialized as that profile, every policy-controlled
+    field must agree exactly, otherwise a promoted manifest would be recorded as
+    bound while deliveries ran under different rules.
+    """
+    try:
+        manifest = validate_manifest(policy.manifest_bytes)
+    except ValueError as exc:
+        raise ServiceError("admitted policy manifest is not valid") from exc
+    review_policy = core.require_object(config.get("review_policy"), "core review_policy")
+    ci = core.require_object(config.get("ci"), "core ci")
+    expected = {
+        "repository": config.get("repository"),
+        "default_branch": config.get("default_branch"),
+        "ci.workflow_name": ci.get("workflow_name"),
+        "ci.workflow_path": ci.get("workflow_path"),
+        "review.quiet_seconds": review_policy.get("quiet_seconds"),
+        "merge_policy": config.get("merge_policy"),
+    }
+    admitted = {
+        "repository": manifest["repository"],
+        "default_branch": manifest["default_branch"],
+        "ci.workflow_name": manifest["ci"]["workflow_name"],
+        "ci.workflow_path": manifest["ci"]["workflow_path"],
+        "review.quiet_seconds": manifest["review"]["quiet_seconds"],
+        "merge_policy": manifest["merge_policy"],
+    }
+    if (
+        policy.default_branch != admitted["default_branch"]
+        or policy.quiet_seconds != admitted["review.quiet_seconds"]
+    ):
+        raise ServiceError("admitted policy fields contradict its manifest bytes")
+    for key, value in admitted.items():
+        if type(expected[key]) is not type(value) or expected[key] != value:
+            raise ServiceError("approved policy contradicts the engine profile")
 
 
 def _ensure_binding_table(connection: sqlite3.Connection) -> None:
@@ -152,12 +202,22 @@ def _admission_hook(
         payload: dict[str, Any],
         outcome: dict[str, Any],
     ) -> dict[str, Any] | None:
-        pr_number = _event_pr_number(event_type, payload)
-        if pr_number is None or outcome.get("result") not in {"accepted", "duplicate"}:
+        # Only the accepted pull_request delivery that established a head may bind it.
+        # workflow_run deliveries (CI or ClawSweeper) never create bindings: their
+        # head_sha is engine evidence, not admission, and the head they refer to is
+        # either already bound by its own delivery or must not become bound by them.
+        if (
+            event_type != "pull_request"
+            or outcome.get("result") != "accepted"
+            or payload.get("action") == "closed"
+        ):
             return None
+        pr_number, event_head = _pull_request_tuple(payload)
         row = core.current_head(connection, enrolled.repository, pr_number)
         if row is None:
             raise ServiceError("accepted delivery has no current exact review tuple")
+        if row["head_sha"] != event_head:
+            raise ServiceError("accepted delivery head is not the current exact review tuple")
         request = {
             "repository": enrolled.repository,
             "repository_id": enrolled.repository_id,
@@ -173,6 +233,7 @@ def _admission_hook(
             bound = admission.admit(registry, request, read_policy)
         except admission.AdmissionError as exc:
             raise ServiceError("approved policy could not be bound to the exact review tuple") from exc
+        require_policy_matches_profile(bound.policy, config)
         _persist_binding(connection, bound)
         return {
             "schema": BINDING_TABLE_SCHEMA,
@@ -192,15 +253,16 @@ def ingest_service_delivery(
     signature: str,
     body: bytes,
     secret: str,
-    registry: admission.Registry,
+    registry: RegistrySource,
     read_policy: PolicyReader,
     service_config: dict[str, Any],
 ) -> dict[str, Any]:
     """Authenticate, admit and ingest one GitHub App delivery atomically."""
-    # Authentication must precede JSON parsing, registry lookup and policy I/O.
+    # Authentication must precede JSON parsing, registry resolution, lookup and policy I/O.
     core.verify_github_signature(body, signature, secret)
     payload = _strict_payload(body)
     core_config = core.load_config(config_path)
+    registry = resolve_registry(registry)
     enrolled = preflight_enrollment(service_config, registry, payload)
     if (
         core_config["repository"] != enrolled.repository
@@ -223,7 +285,7 @@ def build_service_http_handler(
     config: dict[str, Any],
     *,
     secret: str,
-    registry: admission.Registry,
+    registry: RegistrySource,
     read_policy: PolicyReader,
 ):
     """Build the loopback handler placed behind the separately owned HTTPS edge."""
@@ -271,8 +333,9 @@ def binding_for_current_head(
     return dict(row)
 
 
-def require_current_bindings(config: dict[str, Any], registry: admission.Registry) -> None:
+def require_current_bindings(config: dict[str, Any], registry: RegistrySource) -> None:
     """Block every worker/projection tick if any live head lacks current policy."""
+    registry = resolve_registry(registry)
     connection = core.open_database(
         Path(config["paths"]["state_root"]), config["github_app"]["repository"]
     )
@@ -296,7 +359,7 @@ def require_current_bindings(config: dict[str, Any], registry: admission.Registr
 
 def run_service_tick(
     config: dict[str, Any],
-    registry: admission.Registry,
+    registry: RegistrySource,
     client: Any,
     notifier: Any,
     *,

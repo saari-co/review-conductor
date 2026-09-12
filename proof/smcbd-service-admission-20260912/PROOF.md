@@ -73,15 +73,52 @@
 - The Blocks legacy permission map, denied list, CLI route and profile bytes
   are unchanged.
 
-## Verification at this head (local CPython 3.14.6, macOS arm64)
+## Review repair after head `fe7e5f37` (Copilot, six findings)
+
+The results recorded for `fe7e5f374569de02d98a6bf26ab0818e42d16c2b` (local
+PASS; hosted run 34693364110 success) are historical for that head only. The
+follow-up commit repairs every finding; none was dismissed:
+
+1. **Registry inside checkouts (critical).** `read_service_registry` now takes
+   forbidden roots; `serve` passes this source tree, the profile's target
+   checkout, state root and proof root (which hold the reviewer inboxes). A
+   valid 0600 registry inside any of them, including `nested/../` forms and a
+   file in this repository, is refused.
+2. **Registry never re-read (critical).** `registry_provider` re-reads and
+   re-validates the file (and the profile's own enrollment) on every delivery
+   and worker tick via `service_runtime.resolve_registry`. Promotion is
+   observed by the next tick/delivery without restart; a registry that stops
+   validating fails every later delivery and tick closed rather than reusing
+   the previously loaded approval.
+3. **ClawSweeper `workflow_run` binding (critical).** Bindings are created only
+   by the accepted `pull_request` delivery that established the head, and only
+   when its event head equals the current head. `workflow_run` deliveries
+   (exact-head CI, ClawSweeper naming the current head, ClawSweeper naming an
+   unrelated head, stale CI) and closed/duplicate pull-request deliveries never
+   bind or read policy. Re-admission under a promoted policy happens through a
+   new head or review epoch (`ready_for_review`, `reopened`).
+4. **Mode exactly 0600 (moderate).** `stat.S_IMODE(...) == 0o600`; `0400` and
+   `0700` are now rejected with the other modes.
+5. **Worker before bind (moderate).** The handler and `BoundedHTTPServer` are
+   constructed first; the worker starts only after a successful bind, inside the
+   same cleanup path. A bind failure exits 2 with no worker thread and no tick.
+6. **Policy not enforced against engine config (moderate).**
+   `require_policy_matches_profile` re-parses the admitted manifest bytes and
+   requires repository, default branch, CI workflow name/path, quiet period and
+   merge policy to equal the core profile before binding; mismatch rolls the
+   delivery back. Materializing the manifest as the engine profile remains
+   listed as open work in `docs/migration.md`.
+
+## Verification at the repaired head (local CPython 3.14.6, macOS arm64)
 
 - `make check` — PASS: legacy engine/activation/userland/profile suites,
-  scaffold and repository guards, trusted admission (18), service runtime (16,
+  scaffold and repository guards, trusted admission (18), service runtime (21,
   including the mutation harness), launcher transport, workflow contract,
   extraction provenance (14 files) and Python compilation, `git diff --check`.
 - `make build` — PASS; the packaged zipapp still excludes service, admission
   and runtime modules.
 - `python3 -m compileall -q tools tests scripts` — PASS.
+- `scripts/check_whitespace.py <base> <head>` — PASS (recorded in the PR).
 
 Executable disposable-copy mutants (`MutationTests`, bounded subprocess, each
 must fail its named test and only that test):
@@ -95,7 +132,12 @@ must fail its named test and only that test):
 7. allow reading any repository content path;
 8. skip the service enrollment check in the entrypoint;
 9. serve an inactive profile;
-10. accept a group-readable registry.
+10. accept any owner-only registry mode;
+11. accept a registry inside a checkout or state root;
+12. cache the registry instead of re-reading it;
+13. bind on `workflow_run` deliveries;
+14. bind without checking the policy against the engine profile;
+15. start the worker before ingress binds.
 
 Only CPython 3.14 was exercised locally; 3.11/3.12 evidence comes from hosted
 exact-head CI on the PR, recorded in the PR conversation, not here.

@@ -32,9 +32,12 @@ credential selectors, reviewer identity overrides, or install/state roots.
 `tools/trusted_admission.py` implements the inert contract. The source-only
 `tools/service_runtime.py` authenticates before parsing, rejects unknown App /
 installation / numeric repository tuples, retrieves only the approved manifest
-path at the pinned commit, and persists the policy binding in the same SQLite
-transaction as the engine delivery. Worker/check projection is blocked if a
-current head lacks a current binding. See [trusted admission](trusted-admission.md).
+path at the pinned commit, requires the admitted manifest to agree with the
+engine profile, and persists the policy binding in the same SQLite transaction
+as the accepted `pull_request` delivery that established the head. `workflow_run`
+deliveries never create bindings. Worker/check projection is blocked if a
+current head lacks a current binding; the registry is re-read on every delivery
+and tick. See [trusted admission](trusted-admission.md).
 No live registry, credential, HTTPS edge or deployment exists, so this is
 qualified source behavior, not live admission.
 
