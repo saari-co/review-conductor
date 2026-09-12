@@ -346,17 +346,19 @@ class ServiceCoreTests(unittest.TestCase):
         path = allowed_dir / "registry.json"
         path.write_text(json.dumps(self.fx.registry_document()) + "\n", encoding="utf-8")
         path.chmod(0o600)
-        self.assertEqual(registry_io.read_service_registry(path).enrollments[0].app_id, APP_ID)
+        with self.assertRaises(TypeError):
+            registry_io.read_service_registry(path)
+        self.assertEqual(registry_io.read_service_registry(path, []).enrollments[0].app_id, APP_ID)
 
         path.chmod(0o640)
         with self.assertRaises(service.ServiceError):
-            registry_io.read_service_registry(path)
+            registry_io.read_service_registry(path, [])
         path.chmod(0o600)
 
         link = allowed_dir / "registry-link.json"
         link.symlink_to(path)
         with self.assertRaises(service.ServiceError):
-            registry_io.read_service_registry(link)
+            registry_io.read_service_registry(link, [])
         with self.assertRaises(service.ServiceError):
             registry_io.read_service_registry(path, [allowed_dir])
 

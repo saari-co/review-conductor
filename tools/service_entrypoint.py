@@ -162,7 +162,7 @@ def _registry_bytes(
         os.close(descriptor)
 
 
-def read_service_registry(path: Path, forbidden_roots: Iterable[Path] = ()) -> admission.Registry:
+def read_service_registry(path: Path, forbidden_roots: Iterable[Path]) -> admission.Registry:
     if not isinstance(path, Path) or not path.is_absolute():
         raise service.ServiceError("service enrollment registry must be an absolute regular file")
     try:
@@ -176,7 +176,9 @@ def read_service_registry(path: Path, forbidden_roots: Iterable[Path] = ()) -> a
         metadata = os.stat(parent)
     except (OSError, RuntimeError) as exc:
         raise service.ServiceError("service enrollment registry is unavailable") from exc
-    raw = _registry_bytes(parent, path.name, tuple(forbidden_roots), (metadata.st_dev, metadata.st_ino))
+    raw = _registry_bytes(
+        parent, path.name, (ROOT, *tuple(forbidden_roots)), (metadata.st_dev, metadata.st_ino)
+    )
     try:
         registry = admission.load_registry(raw)
     except admission.AdmissionError as exc:
