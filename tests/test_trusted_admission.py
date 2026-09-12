@@ -278,6 +278,13 @@ class BindingTests(unittest.TestCase):
         same_commit_new_hash["enrollments"][0]["approved_policy"]["sha256"] = sha(promoted)
         self.assertFalse(ta.policy_is_current(admission, self.fx.registry(same_commit_new_hash)))
 
+    def test_equivalent_direct_construction_preserves_binding_identity(self):
+        admitted = ta.admit(self.registry, request(), self.fx.read)
+        reconstructed = ta.Admission(dataclasses.replace(admitted.review), admitted.installation_id,
+                                     dataclasses.replace(admitted.policy))
+        self.assertIsNot(admitted, reconstructed)
+        self.assertEqual(admitted.binding_id, reconstructed.binding_id)
+
     def test_directly_constructed_incoherent_objects_fail_closed(self):
         good = ta.admit(self.registry, request(), self.fx.read)
         smcbd_policy = ta.admit(self.registry, request(repository=SMCBD, repository_id=1366416798,
@@ -353,7 +360,6 @@ class BindingTests(unittest.TestCase):
         self.assertEqual(good.revalidate(), good)
         # A policy that is genuinely approved for SMCBD is still not current for a Blocks tuple.
         self.assertFalse(ta.policy_is_current(crafted[0], self.registry))
-        self.assertNotEqual(good.binding_id, ta.Admission(good.review, BLOCKS_INSTALL, good.policy).binding_id + "x")
 
     def test_library_is_inert_in_packaged_scaffold_and_cli(self):
         for name in ["tools/conductor_cli.py", "scripts/build.py", "bin/review-conductor"]:
