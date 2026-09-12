@@ -14,7 +14,7 @@
     "bind_host": "127.0.0.1",
     "bind_port": 9444,
     "path": "/github/webhook",
-    "public_hostname": "unprovisioned-smcbd-suite.invalid",
+    "public_hostname": "smcbd-suite-review-1366416798.ztoned.com",
     "max_body_bytes": 1048576,
     "request_timeout_seconds": 10
   },
@@ -39,12 +39,12 @@
     "permissions": {
       "actions": "write",
       "checks": "write",
+      "contents": "read",
       "metadata": "read",
       "pull_requests": "write"
     },
     "denied_permissions": [
       "administration",
-      "contents",
       "deployments",
       "issues",
       "members",
@@ -106,7 +106,7 @@
   "tunnel": {
     "cloudflared_path": "/opt/homebrew/bin/cloudflared",
     "tunnel_id": null,
-    "tunnel_name": null
+    "tunnel_name": "review-conductor-smcbd-suite-1366416798"
   },
   "notifications": {
     "openclaw_path": "/opt/homebrew/bin/openclaw",

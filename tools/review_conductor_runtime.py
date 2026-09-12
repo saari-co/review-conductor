@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
+import copy
 import contextlib
 import datetime as dt
 import hashlib
@@ -48,6 +50,10 @@ APP_PERMISSIONS = {
     "metadata": "read",
     "pull_requests": "write",
 }
+STANDALONE_APP_PERMISSIONS = {
+    **APP_PERMISSIONS,
+    "contents": "read",
+}
 DENIED_PERMISSIONS = {
     "administration",
     "contents",
@@ -59,9 +65,13 @@ DENIED_PERMISSIONS = {
     "secrets",
     "workflows",
 }
+STANDALONE_DENIED_PERMISSIONS = DENIED_PERMISSIONS - {"contents"}
 APP_EVENTS = ["pull_request", "workflow_run"]
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 API_VERSION = "2022-11-28"
+# GitHub statuses that describe a transient upstream condition rather than a
+# rejected operation; callers may retry without changing the request.
+TRANSIENT_STATUSES = frozenset({429, 500, 502, 503, 504})
 FIXED_GIT = Path("/usr/bin/git")
 
 
@@ -72,6 +82,31 @@ class RuntimeError(core.ContractError):
 
 class GitHubApiError(RuntimeError):
     """A fixed GitHub API operation failed without exposing response material."""
+
+
+class GitHubTransientError(GitHubApiError):
+    """The transport or GitHub itself failed transiently; the same call may be retried."""
+
+
+class RetryableIngestError(Exception):
+    """A dependency failed transiently before any state was written.
+
+    Deliberately not a ContractError: the delivery was neither malformed nor
+    foreign, so the HTTP edge answers 503 and leaves the delivery redeliverable
+    from GitHub's delivery log or API (GitHub does not retry automatically).
+    """
+
+
+def assert_authority(client: Any, operation: str) -> None:
+    """Run the client's admission authority guard before a non-GitHub side effect.
+
+    Worker phases that act outside the GitHub client (OpenClaw dispatch,
+    notifications) call this so the same per-side-effect fence applies to them.
+    Clients without a guard (legacy route, dry runs) are unaffected.
+    """
+    check = getattr(client, "assert_authority", None)
+    if check is not None:
+        check(operation)
 
 
 def require_absolute_path(value: Any, label: str) -> Path:
@@ -133,7 +168,7 @@ def urllib_transport(
     except urllib.error.HTTPError as exc:
         return int(exc.code), b""
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise GitHubApiError("GitHub API transport failed") from exc
+        raise GitHubTransientError("GitHub API transport failed") from exc
 
 
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -240,12 +275,27 @@ class GitHubAppClient:
         transport: Transport = urllib_transport,
         artifact_transport: ArtifactTransport | None = None,
         clock: Callable[[], float] = time.time,
+        signer: Callable[[int, str, int], str] | None = None,
     ) -> None:
         core.require_enabled({"review_policy": config.get("review_policy", {})})
-        app = config["github_app"]
+        # Snapshot the caller's map: the token request is derived from this object
+        # later, so a caller mutating its own config after construction must not
+        # be able to change the permissions the adapter validated here.
+        app = copy.deepcopy(config["github_app"])
+        # The adapter derives its token request from this map, so it must be exactly
+        # the closed allowlist the profile kind authorizes: only generalized
+        # (standalone) profiles may request Contents read for approved-policy
+        # retrieval; a legacy profile is held to the legacy allowlist.
+        expected_permissions = STANDALONE_APP_PERMISSIONS if config.get("review_policy") else APP_PERMISSIONS
+        if app.get("permissions") != expected_permissions:
+            raise GitHubApiError("GitHub App permissions are outside the profile's closed allowlist")
         if config.get("review_policy") and not config.get("clawsweeper"):
             raise RuntimeError("generalized profile requires its own ClawSweeper adapter")
-        self._clawsweeper = config.get("clawsweeper", {"workflow_id": "clawsweeper-native-canary.yml", "ref": "main"})
+        # Same for the ClawSweeper map: _allow() and dispatch derive the authorized
+        # workflow endpoint from it.
+        self._clawsweeper = copy.deepcopy(
+            config.get("clawsweeper", {"workflow_id": "clawsweeper-native-canary.yml", "ref": "main"})
+        )
         self._strict_adapter = bool(config.get("review_policy"))
         if app["app_id"] is None or app["installation_id"] is None:
             raise RuntimeError("GitHub App IDs are not configured")
@@ -261,8 +311,25 @@ class GitHubAppClient:
             or (lambda url, headers, timeout: transport("GET", url, headers, None, timeout))
         )
         self._clock = clock
+        self._signer = signer or sign_app_jwt
         self._token: str | None = None
         self._token_expires = 0.0
+        self._authority_guard: Callable[[str, str], None] | None = None
+
+    def set_authority_guard(self, guard: Callable[[str, str], None] | None) -> None:
+        """Install a check that runs before every mutating GitHub call.
+
+        The service uses it to re-validate current admission (registry, reviewer
+        actors, profile digest) immediately before each side effect of a tick, so
+        a revocation or profile edit after the tick's opening gate cannot leave
+        the remainder of that tick dispatching or publishing.
+        """
+        self._authority_guard = guard
+
+    def assert_authority(self, operation: str) -> None:
+        """Run the installed guard for a side effect that is not a GitHub call."""
+        if self._authority_guard is not None:
+            self._authority_guard("SIDE_EFFECT", operation)
 
     @property
     def repository(self) -> str:
@@ -274,6 +341,19 @@ class GitHubAppClient:
             ("POST", rf"/app/installations/{self._app['installation_id']}/access_tokens", "installation-token"),
             ("POST", rf"/repos/{repository}/check-runs", "check-create"),
             ("PATCH", rf"/repos/{repository}/check-runs/[1-9][0-9]*", "check-update"),
+            # Approved-policy retrieval is a generalized-profile capability; the
+            # legacy allowlist never reaches repository contents.
+            *(
+                (
+                    (
+                        "GET",
+                        rf"/repos/{repository}/contents/\.review-conductor\.json\?ref=[0-9a-f]{{40}}",
+                        "approved-policy-read",
+                    ),
+                )
+                if self._strict_adapter
+                else ()
+            ),
             ("POST", rf"/repos/{repository}/issues/[1-9][0-9]*/labels", "label-add"),
             ("DELETE", rf"/repos/{repository}/issues/[1-9][0-9]*/labels/.+", "label-remove"),
             (
@@ -344,17 +424,25 @@ class GitHubAppClient:
         if payload is not None:
             body = core.canonical_json(payload).encode()
             headers["Content-Type"] = "application/json"
+        # Fence immediately before the mutating request itself: token minting above
+        # is a separate call, and authority may have been revoked while it ran.
+        if self._authority_guard is not None and method != "GET":
+            self._authority_guard(method, path)
         status, raw = self._transport(
             method, self._app["api_base"] + path, headers, body, 15.0
         )
         if status not in expected:
+            if status in TRANSIENT_STATUSES:
+                raise GitHubTransientError(
+                    f"allowlisted GitHub API operation failed transiently ({operation})"
+                )
             raise GitHubApiError(f"allowlisted GitHub API operation failed ({operation})")
         return operation, raw
 
     def _installation_token(self) -> str:
         if self._token is not None and self._clock() < self._token_expires - 60:
             return self._token
-        app_jwt = sign_app_jwt(
+        app_jwt = self._signer(
             self._app["app_id"], self._private_key, int(self._clock())
         )
         response = self._call(
@@ -363,7 +451,9 @@ class GitHubAppClient:
             {
                 "repositories": [self.repository.split("/", 1)[1]],
                 "permissions": {
-                    name: level for name, level in APP_PERMISSIONS.items() if name != "metadata"
+                    name: level
+                    for name, level in self._app["permissions"].items()
+                    if name != "metadata"
                 },
             },
             expected={201},
@@ -380,6 +470,32 @@ class GitHubAppClient:
         self._token = token
         self._token_expires = expiry
         return token
+
+    def read_policy(self, repository: str, commit: str) -> bytes:
+        if repository != self.repository:
+            raise GitHubApiError("approved policy repository is outside the installation")
+        core.require_sha(commit, "approved policy commit")
+        _operation, raw = self._call_raw(
+            "GET",
+            f"/repos/{self.repository}/contents/.review-conductor.json?ref={commit}",
+            None,
+            expected={200},
+        )
+        try:
+            response = core.require_object(json.loads(raw), "approved policy response")
+            if response.get("encoding") != "base64" or not isinstance(response.get("content"), str):
+                raise GitHubApiError("approved policy response is not base64 file content")
+            encoded = response["content"]
+            if re.fullmatch(r"[A-Za-z0-9+/=\r\n]+", encoded) is None:
+                raise GitHubApiError("approved policy response is not canonical base64")
+            content = base64.b64decode(
+                encoded.replace("\r", "").replace("\n", ""), validate=True
+            )
+        except (binascii.Error, ValueError, UnicodeError, json.JSONDecodeError, core.ContractError) as exc:
+            raise GitHubApiError("approved policy response is malformed") from exc
+        if not content or len(content) > 16384:
+            raise GitHubApiError("approved policy content has an invalid bounded size")
+        return content
 
     def create_check(self, name: str, head_sha: str, external_id: str, state: str) -> int:
         if name not in CHECK_NAMES:
@@ -1255,6 +1371,10 @@ def drain_actions(
                 claim_owner="cp1-worker",
                 claim_lease_seconds=config["worker"]["claim_lease_seconds"],
             )
+            # Each OpenClaw dispatch is an external side effect; fence it like a
+            # GitHub write so revoked authority stops the whole drain here instead
+            # of being recorded as an adapter rejection of this one action.
+            assert_authority(client, f"openclaw.enqueue:{action['action_id']}")
             try:
                 with service_transport_environment(config):
                     outcomes.append(core.dispatch_action(args))
@@ -1741,6 +1861,8 @@ def handle_webhook_request(
             "result": receipt["result"],
             "merge_dispatched": False,
         }
+    except RetryableIngestError:
+        return HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "reason": "dependency_unavailable"}
     except core.ContractError:
         return HTTPStatus.BAD_REQUEST, {"ok": False, "reason": "request_rejected"}
     except sqlite3.Error:

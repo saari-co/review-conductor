@@ -21,6 +21,7 @@ from target_manifest import unique_object, validate_manifest
 
 
 BINDING_TABLE_SCHEMA = "review-conductor.service-policy-binding.v1"
+PROFILE_DIGEST_SCHEMA = "review-conductor.engine-profile-digest.v1"
 MAX_STAGED_POLICIES = 8
 
 # Approved policy bytes keyed by (repository, commit, sha256). Content is
@@ -62,10 +63,10 @@ def staged_policy(enrolled: admission.Enrollment) -> bytes | None:
 def stage_approved_policy(enrolled: admission.Enrollment, read_policy: PolicyReader) -> bytes:
     """Fetch the approved policy bytes outside any SQLite write transaction.
 
-    Transport is injected and never runs while the engine holds
-    ``BEGIN IMMEDIATE``. Failures stay inside the source-only ``ServiceError``
-    boundary; live retry classification belongs to the separately reviewed
-    adapter layer.
+    Remote I/O never runs while the engine holds ``BEGIN IMMEDIATE``. Transient
+    transport failures surface as ``RetryableIngestError`` (HTTP 503, nothing
+    written) instead of a rejected delivery; every other failure stays a
+    ``ServiceError``.
     """
     key = _staged_key(enrolled)
     staged = staged_policy(enrolled)
@@ -73,6 +74,8 @@ def stage_approved_policy(enrolled: admission.Enrollment, read_policy: PolicyRea
         return staged
     try:
         raw = read_policy(enrolled.repository, enrolled.approved_policy_commit)
+    except runtime.GitHubTransientError as exc:
+        raise runtime.RetryableIngestError("approved policy transport failed transiently") from exc
     except Exception as exc:
         raise ServiceError("approved policy content is unavailable") from exc
     if not isinstance(raw, (bytes, bytearray)) or len(raw) > admission.MAX_BYTES:
@@ -112,8 +115,8 @@ def resolve_registry(source: RegistrySource) -> admission.Registry:
     """Return the current validated registry; a provider re-reads it every time.
 
     Passing a provider means promotion or revocation in the service-owned registry
-    is observed by the next delivery without a restart, and a registry that stops
-    validating fails later admission closed.
+    is observed by the next delivery or worker tick without a restart, and a
+    registry that stops validating fails every delivery and tick closed.
     """
     if isinstance(source, admission.Registry):
         return source
@@ -123,30 +126,6 @@ def resolve_registry(source: RegistrySource) -> admission.Registry:
     if not isinstance(value, admission.Registry):
         raise ServiceError("service registry provider did not return a validated registry")
     return value
-
-
-def require_profile_enrolled(
-    config: dict[str, Any],
-    registry: admission.Registry,
-    core_config: dict[str, Any] | None = None,
-) -> admission.Enrollment:
-    """Require exact App/install/repository/reviewer agreement for admission."""
-    app = core.require_object(config.get("github_app"), "service GitHub App config")
-    try:
-        enrolled = registry.lookup(
-            app.get("repository"), app.get("repository_id"),
-            app.get("app_id"), app.get("installation_id"),
-        )
-    except admission.AdmissionError as exc:
-        raise ServiceError("runtime profile is not enrolled in the service registry") from exc
-    if core_config is None:
-        core_config = core.load_config(Path(config["core_config"]))
-    review_policy = core.require_object(core_config.get("review_policy"), "core review_policy")
-    if review_policy.get("enabled") is not True:
-        raise ServiceError("runtime core profile is not enabled")
-    if review_policy.get("reviewers") != enrolled.reviewers:
-        raise ServiceError("runtime reviewer identities contradict service enrollment")
-    return enrolled
 
 
 def _strict_payload(body: bytes) -> dict[str, Any]:
@@ -237,6 +216,49 @@ def require_policy_matches_profile(policy: admission.AdmittedPolicy, config: dic
             raise ServiceError("approved policy contradicts the engine profile")
 
 
+def profile_policy_digest(core_config: dict[str, Any], service_config: dict[str, Any]) -> str:
+    """Digest of every profile field that governs what the admitted policy reviews.
+
+    Covers the engine fields the policy pins (repository, default branch, CI
+    workflow, quiet period, merge policy) and the adapter authority fields that
+    select the review producer and its artifact namespace (ClawSweeper workflow
+    id/name/path/ref/publish and the adapter contract/artifact prefix). Stored
+    with each binding and recompared on every tick, so a profile edited after
+    admission (for example across a restart) cannot keep an old binding
+    unlocking projection under rules the admitted policy never approved.
+    """
+    review_policy = core.require_object(core_config.get("review_policy"), "core review_policy")
+    ci = core.require_object(core_config.get("ci"), "core ci")
+    clawsweeper = core.require_object(core_config.get("clawsweeper"), "core clawsweeper")
+    openclaw = core.require_object(core_config.get("openclaw"), "core openclaw")
+    adapter = service_config.get("adapter")
+    if adapter is not None:
+        adapter = core.require_object(adapter, "service adapter")
+    canonical = json.dumps(
+        {
+            "schema": PROFILE_DIGEST_SCHEMA,
+            "repository": core_config.get("repository"),
+            "repository_id": core_config.get("repository_id"),
+            "default_branch": core_config.get("default_branch"),
+            "ci": {"workflow_name": ci.get("workflow_name"), "workflow_path": ci.get("workflow_path")},
+            "clawsweeper": {
+                key: clawsweeper.get(key)
+                for key in ("workflow_id", "workflow_name", "workflow_path", "ref", "publish")
+            },
+            "adapter": None if adapter is None else {
+                "contract": adapter.get("contract"), "artifact_prefix": adapter.get("artifact_prefix")
+            },
+            "openclaw": {
+                key: openclaw.get(key) for key in ("operator_id", "transport", "remote_worktree_shelf")
+            },
+            "quiet_seconds": review_policy.get("quiet_seconds"),
+            "merge_policy": core_config.get("merge_policy"),
+        },
+        sort_keys=True, separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _ensure_binding_table(connection: sqlite3.Connection) -> None:
     connection.execute(
         """
@@ -254,6 +276,7 @@ def _ensure_binding_table(connection: sqlite3.Connection) -> None:
           binding_id TEXT NOT NULL,
           reviewer_openclaw TEXT NOT NULL,
           reviewer_clawsweeper TEXT NOT NULL,
+          profile_digest TEXT NOT NULL,
           created_at TEXT NOT NULL,
           PRIMARY KEY (repository, pr_number, base_sha, head_sha, review_epoch)
         )
@@ -265,6 +288,7 @@ def _persist_binding(
     connection: sqlite3.Connection,
     value: admission.Admission,
     enrolled: admission.Enrollment,
+    profile_digest: str,
 ) -> None:
     _ensure_binding_table(connection)
     identity = (
@@ -277,7 +301,7 @@ def _persist_binding(
     prior = connection.execute(
         """
         SELECT app_id, installation_id, policy_commit, policy_sha256, policy_id, binding_id,
-               reviewer_openclaw, reviewer_clawsweeper
+               reviewer_openclaw, reviewer_clawsweeper, profile_digest
         FROM service_policy_bindings
         WHERE repository=? AND pr_number=? AND base_sha=? AND head_sha=? AND review_epoch=?
         """,
@@ -292,6 +316,7 @@ def _persist_binding(
         value.binding_id,
         enrolled.reviewer_openclaw,
         enrolled.reviewer_clawsweeper,
+        profile_digest,
     )
     if prior is not None and tuple(prior) != expected:
         raise ServiceError("exact review tuple already has a conflicting policy binding")
@@ -301,8 +326,8 @@ def _persist_binding(
           repository, pr_number, base_sha, head_sha, review_epoch,
           app_id, installation_id, policy_commit, policy_sha256,
           policy_id, binding_id, reviewer_openclaw, reviewer_clawsweeper,
-          created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          profile_digest, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (*identity, *expected, core.utc_now()),
     )
@@ -363,7 +388,7 @@ def _admission_hook(
         except admission.AdmissionError as exc:
             raise ServiceError("approved policy could not be bound to the exact review tuple") from exc
         require_policy_matches_profile(bound.policy, config)
-        _persist_binding(connection, bound, enrolled)
+        _persist_binding(connection, bound, enrolled, profile_policy_digest(config, service_config))
         return {
             "schema": BINDING_TABLE_SCHEMA,
             "binding_id": bound.binding_id,
@@ -421,7 +446,7 @@ def ingest_service_delivery(
             )
         except PolicyNotStaged as pending:
             stage_approved_policy(pending.enrolled, read_policy)
-    raise ServiceError("approved policy staging raced registry changes")
+    raise runtime.RetryableIngestError("approved policy staging raced registry or cache changes")
 
 
 def build_service_http_handler(
@@ -439,3 +464,156 @@ def build_service_http_handler(
         )
 
     return runtime.build_http_handler(config, secret, ingestor=ingestor)
+
+
+def binding_for_current_head(
+    connection: sqlite3.Connection,
+    registry: admission.Registry,
+    repository: str,
+    pr_number: int,
+    core_config: dict[str, Any],
+    service_config: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return the current binding only while every authority it was admitted under holds.
+
+    The registry must still approve the same policy commit/hash and name the same
+    reviewer actors, and the engine profile must still digest to what it was at
+    admission; otherwise the tuple must be re-admitted under a new head/epoch.
+    """
+    head = core.current_head(connection, repository, pr_number)
+    if head is None:
+        return None
+    # Read-only: the gate may run while a worker phase holds the write lock, so
+    # it never creates the table; a database without it simply has no bindings.
+    if connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='service_policy_bindings'"
+    ).fetchone() is None:
+        return None
+    row = connection.execute(
+        """
+        SELECT * FROM service_policy_bindings
+        WHERE repository=? AND pr_number=? AND base_sha=? AND head_sha=? AND review_epoch=?
+        """,
+        (repository, pr_number, head["base_sha"], head["head_sha"], head["review_epoch"]),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        enrolled = registry.lookup(
+            row["repository"], admission.INITIAL_ENROLLMENT_SCOPE[row["repository"]],
+            row["app_id"], row["installation_id"],
+        )
+    except (admission.AdmissionError, KeyError):
+        return None
+    if (
+        enrolled.approved_policy_commit != row["policy_commit"]
+        or enrolled.approved_policy_sha256 != row["policy_sha256"]
+    ):
+        return None
+    if (
+        enrolled.reviewer_openclaw != row["reviewer_openclaw"]
+        or enrolled.reviewer_clawsweeper != row["reviewer_clawsweeper"]
+    ):
+        return None
+    if profile_policy_digest(core_config, service_config) != row["profile_digest"]:
+        return None
+    return dict(row)
+
+
+def require_profile_enrolled(
+    config: dict[str, Any],
+    registry: admission.Registry,
+    core_config: dict[str, Any] | None = None,
+) -> admission.Enrollment:
+    """The runtime profile must be the registry's enrollment, reviewers included.
+
+    The registry, not the profile, is the authority for App/installation/
+    repository identity and for the OpenClaw/ClawSweeper reviewer actors the
+    engine trusts. A profile that names different reviewers cannot serve, tick
+    or accept deliveries.
+    """
+    app = core.require_object(config.get("github_app"), "service GitHub App config")
+    try:
+        enrolled = registry.lookup(
+            app.get("repository"), app.get("repository_id"), app.get("app_id"), app.get("installation_id")
+        )
+    except admission.AdmissionError as exc:
+        raise ServiceError("runtime profile is not enrolled in the service registry") from exc
+    if core_config is None:
+        core_config = core.load_config(Path(config["core_config"]))
+    review_policy = core.require_object(core_config.get("review_policy"), "core review_policy")
+    # A profile deactivated after startup must fail every provider read, delivery
+    # and tick closed, not merely stop admitting new heads.
+    if review_policy.get("enabled") is not True:
+        raise ServiceError("runtime core profile is not enabled")
+    if review_policy.get("reviewers") != enrolled.reviewers:
+        raise ServiceError("runtime reviewer identities contradict service enrollment")
+    return enrolled
+
+
+def _gate_connection(state_root: Path) -> sqlite3.Connection | None:
+    """A read-only view of the engine database for the admission gate.
+
+    The gate also runs from the per-side-effect authority guard while a worker
+    phase may hold the engine's write transaction (WAL mode), so it must never
+    take the write lock or migrate; a database that does not exist yet has no
+    live heads to gate.
+    """
+    database = core.ensure_state_root(Path(state_root)) / "review-conductor.sqlite3"
+    if not database.exists():
+        return None
+    connection = sqlite3.connect(database, timeout=10)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def require_current_bindings(config: dict[str, Any], registry: RegistrySource) -> None:
+    """Block every worker/projection tick if any live head lacks current policy."""
+    registry = resolve_registry(registry)
+    core_config = core.load_config(Path(config["core_config"]))
+    require_profile_enrolled(config, registry, core_config)
+    connection = _gate_connection(Path(config["paths"]["state_root"]))
+    if connection is None:
+        return
+    try:
+        rows = connection.execute(
+            """
+            SELECT repository, pr_number FROM heads
+            WHERE repository=? AND is_current=1 AND state NOT IN ('closed', 'closed_merged')
+            ORDER BY pr_number
+            """,
+            (config["github_app"]["repository"],),
+        ).fetchall()
+        for row in rows:
+            if binding_for_current_head(
+                connection, registry, row["repository"], row["pr_number"], core_config, config
+            ) is None:
+                raise ServiceError("current review tuple lacks a current approved-policy binding")
+    finally:
+        connection.close()
+
+
+def run_service_tick(
+    config: dict[str, Any],
+    registry: RegistrySource,
+    client: Any,
+    notifier: Any,
+    *,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """Run the legacy-compatible worker only behind current admission bindings.
+
+    The opening gate is re-run before every mutating GitHub call the tick makes
+    (check creation/update, ClawSweeper dispatch) through the client's authority
+    guard, so a registry revocation or profile edit after the gate stops the
+    remainder of the tick instead of letting it publish under stale authority.
+    """
+    require_current_bindings(config, registry)
+    import review_conductor_userland as userland
+
+    if not dry_run:
+        install = getattr(client, "set_authority_guard", None)
+        if install is None:
+            raise ServiceError("tick client cannot carry the admission authority guard")
+        install(lambda _method, _path: require_current_bindings(config, registry))
+    return userland.run_tick(config, client, notifier, dry_run=dry_run)

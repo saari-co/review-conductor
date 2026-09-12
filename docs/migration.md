@@ -5,11 +5,11 @@
 - Allowlisted source extraction from x-api commit
   `48036abf1649a6fbd1738d68b23fc235893e0b68` on
   `openclaw/review-conductor-generalization-managed`.
-- Five Python engine/adapter modules and four profiles were initially copied.
-  The launcher has a standalone anonymous-descriptor transport/cleanup repair.
-  The engine now accepts an injected admission hook, and the inactive SMCBD
-  profile records the verified App/installation identity; the provenance ledger
-  records those adaptations. Legacy live adapter behavior remains unchanged.
+- Five Python engine/adapter modules and four profiles were initially copied
+  byte-for-byte. The launcher now has a standalone anonymous-descriptor
+  transport/cleanup repair. The runtime, userland loader and inactive SMCBD
+  profile are now explicitly adapted for trusted policy transport and the
+  verified App/installation candidate; the Blocks profiles remain unchanged.
 - Four regression suites relocated, with root/fixture path adjustments; one
   synthetic key marker is assembled from bytes with the same runtime value for
   source hygiene. The versioned extraction/provenance ledger records these adaptations.
@@ -27,17 +27,18 @@ configuration. The build excludes all historical profiles and legacy launchers.
 
 ## Not completed / prerequisites for migration
 
-1. Trusted enrollment, injected approved-policy loading, authenticated ingress,
-   and atomic tuple/epoch binding exist as inactive source modules. Still open:
-   live registry provisioning, credential transport, a qualified policy reader,
-   and materializing approved policy as effective engine configuration.
+1. Trusted enrollment, approved base-policy loading and policy-hash binding now
+   have an authenticated source integration (`tools/service_runtime.py`) and an
+   inactive entrypoint. Still open: provision the external registry, add the
+   target manifest to an approved base commit, materialize the admitted manifest
+   as the effective engine profile (today the two must agree exactly or binding
+   fails closed), and activate an isolated service.
 2. Replace x-api `bin/smoky`/host-relative integration with qualified external
    adapters. The copied compatibility modules still describe the existing pilot;
    tests inject transports. They are not a portable activated service yet.
-3. Add the separately reviewed executable service/client surface and event
-   outbox. No Gateway plugin, Smoky dependency, webhook registration, scheduler,
-   live token minting, check publication, checkout hydration, reviewer dispatch,
-   or notification send is present in this slice.
+3. Implement/version the general authenticated client surface and event outbox.
+   GitHub webhook ingress exists; no Gateway plugin, Smoky dependency, webhook
+   registration or scheduler is added.
 4. Obtain exact-head external reviews of this new repo. It is not self-enrolled;
    CI success is not OpenClaw/ClawSweeper clearance.
 5. Separately authorize each target's manifest commit, installation and isolated
