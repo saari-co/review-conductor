@@ -16,7 +16,7 @@ credential selectors, reviewer identity overrides, or install/state roots.
 `validate-manifest` performs syntax/policy checks offline. A valid manifest is
 **not enrollment, identity verification, review PASS, or activation approval**.
 
-## Trusted admission (contract; transport not implemented yet)
+## Trusted admission (library implemented; transport not implemented)
 
 1. Resolve repository numeric ID and installation from the service-owned registry.
 2. Read policy from the registry's approved base commit and content hash, not
@@ -29,9 +29,11 @@ credential selectors, reviewer identity overrides, or install/state roots.
    then comprehensive OpenClaw, then comprehensive ClawSweeper. A missing or
    skipped rail is not PASS; no result authorizes merge.
 
-The registry, authenticated policy loader, and policy-hash binding are next-step
-work. The legacy engine does not yet ingest these manifests. Do not claim the
-manifest validator enforces live admission.
+`tools/trusted_admission.py` implements steps 1-4 offline: see
+[trusted-admission.md](trusted-admission.md). Transport, the authenticated
+service surface and the live registry are still absent; the legacy engine does
+not yet ingest these manifests. Do not claim the manifest validator or the
+admission library enforces live admission.
 
 ## Service-owned enrollment
 

@@ -35,13 +35,15 @@ merge, or credential commands.
 | --- | --- |
 | `tools/review_conductor*.py` | Extracted engine and compatibility adapters |
 | `tools/conductor_cli.py`, `tools/target_manifest.py` | Independent offline CLI and target contract |
+| `tools/trusted_admission.py` | Service-owned enrollment registry, approved base-policy loader and tuple/epoch policy binding (library only; not packaged, no transport) |
 | `contracts/target-manifest.schema.json` | Versioned repository manifest schema |
 | `contracts/review-conductor/` | Unchanged historical profile fixtures, not deployment configuration |
 | `tests/` | Blocks compatibility, isolated SMCBD, manifest and packaged-build coverage |
 | `docs/` | Architecture, integration, migration and source provenance |
 
 [Architecture](docs/architecture.md) · [Integration contract](docs/integration-contract.md)
-· [Migration status](docs/migration.md) · [Proof](proof/scaffold-20260911/PROOF.md)
+· [Trusted admission](docs/trusted-admission.md) · [Migration status](docs/migration.md)
+· [Proof](proof/scaffold-20260911/PROOF.md)
 
 No open-source license is assigned by this scaffold; licensing remains an owner
 choice. Do not infer redistribution permission from the source extraction.

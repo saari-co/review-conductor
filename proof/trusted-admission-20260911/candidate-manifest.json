@@ -1,0 +1,16 @@
+{
+  "starting_head": "dadcf07c8c714e2437c7957bdafd1b93b04347ef",
+  "base": "c01a44382bfa66c0e3be39905dd2b9f47c6c7333",
+  "captured_utc": "2026-09-12T00:48:33.527965+00:00",
+  "files": {
+    "Makefile": "db1b251ee00b7e025103d5d1e08f94a5554c88e1e33ca5d6e1dcf9dc819309cf",
+    "README.md": "f2b941af84319f455e48195e2c1a44149d523b1e8e5018272aeb75b921281497",
+    "SECURITY.md": "67e9cf6324b9567c0c0b797b1c46818703bbc2597b34a89b413aa7a3547328a5",
+    "docs/bootstrap.md": "d64cb5942a3e027e72aa3f2ab05c238e10302dd837b587815e11d8a21fc30691",
+    "docs/integration-contract.md": "e1ba496f120397662576f06d5e59b69dcb193df94a82f9fbf2599fa4e6769de9",
+    "docs/migration.md": "26f6c48bfe4e0057b71bdc7e834a4bf4573a00184cbda820a1c153a99faf2906",
+    "docs/trusted-admission.md": "fefc4d7bfce34a657722d26c799cb053f254134ff222d04e48a4ed96e3865bad",
+    "tests/test_trusted_admission.py": "fb70d4b60aef6fbfab9d43e1b264e7c603febd27025c6a5682957c6e9c2f5bf3",
+    "tools/trusted_admission.py": "c5b540a67658def578a74147335462540dd8149a26ae347efa909b12390443cd"
+  }
+}
