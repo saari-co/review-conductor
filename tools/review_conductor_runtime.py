@@ -1705,7 +1705,8 @@ def write_wake(path: Path, reason: str) -> None:
 
 
 def handle_webhook_request(
-    config: dict[str, Any], *, method: str, path: str, headers: dict[str, str], body: bytes, secret: str
+    config: dict[str, Any], *, method: str, path: str, headers: dict[str, str], body: bytes,
+    secret: str, ingestor: Callable[..., dict[str, Any]] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     ingress = config["ingress"]
     if method != "POST":
@@ -1721,7 +1722,7 @@ def handle_webhook_request(
     delivery_id = headers.get("x-github-delivery", "")
     signature = headers.get("x-hub-signature-256", "")
     try:
-        receipt = core.ingest_github_delivery(
+        receipt = (ingestor or core.ingest_github_delivery)(
             config_path=Path(config["core_config"]),
             state_root=Path(config["paths"]["state_root"]),
             event_type=event_type,
@@ -1746,7 +1747,10 @@ def handle_webhook_request(
         return HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "reason": "state_unavailable"}
 
 
-def build_http_handler(config: dict[str, Any], secret: str) -> type[BaseHTTPRequestHandler]:
+def build_http_handler(
+    config: dict[str, Any], secret: str,
+    *, ingestor: Callable[..., dict[str, Any]] | None = None,
+) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         server_version = "SmokyReviewConductor/1"
         sys_version = ""
@@ -1781,7 +1785,8 @@ def build_http_handler(config: dict[str, Any], secret: str) -> type[BaseHTTPRequ
                 return
             headers = {key.lower(): value for key, value in self.headers.items()}
             status, payload = handle_webhook_request(
-                config, method="POST", path=self.path, headers=headers, body=body, secret=secret
+                config, method="POST", path=self.path, headers=headers, body=body,
+                secret=secret, ingestor=ingestor,
             )
             self._write(status, payload)
 

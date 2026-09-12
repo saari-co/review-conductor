@@ -32,8 +32,8 @@
   },
   "github_app": {
     "api_base": "https://api.github.com",
-    "app_id": null,
-    "installation_id": null,
+    "app_id": 4916376,
+    "installation_id": 161027021,
     "repository": "saari-co/openclaw-smcbd-suite",
     "repository_id": 1366416798,
     "permissions": {
@@ -128,7 +128,9 @@
     "enabled": false,
     "blockers": [
       "Authoritative repository-specific reviewer identities are not enrolled.",
-      "Dedicated GitHub App installation, webhook and external-review credentials are not provisioned.",
+      "GitHub App 4916376 installation 161027021 lacks the required Contents: read permission for approved-policy retrieval.",
+      "Dedicated webhook, GitHub App private-key and external-review credentials are not provisioned.",
+      "The target default branch does not yet contain an owner-approved .review-conductor.json commit/hash.",
       "Dedicated ingress and tunnel are not provisioned.",
       "Private exact-tuple comprehensive ClawSweeper workflow/artifact adapter is not installed or qualified.",
       "Main has only bootstrap README; CI and rail placeholders remain on PR #3.",

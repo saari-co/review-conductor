@@ -1,0 +1,27 @@
+{
+  "base_main": "320534450bbfe924bf855b762a0f9358f0b40336",
+  "pre_split_head": "3b7516c892679a5ec302e84c3ee975c51331766d",
+  "candidate_source": "d3a026bf55d0987ff40cb9a0e5ffc30b11966bad",
+  "captured_utc": "2026-09-12T15:52:18Z",
+  "scope": "inactive_service_core",
+  "deferred_scope": "authority_bound_live_adapters",
+  "files": {
+    "Makefile": "b640756b3a3e3c877a0fa8201e1aaf2d1a3a506cdd4c7b7a412fe0d2e2baa0e9",
+    "README.md": "66e9d042d2fc5a0d37b172028a2ba729ec95aa1797c6505bdb674937e1137d5c",
+    "SECURITY.md": "0367aa8cad9a7a37677f45b2b9475c12ee7926d9b507015ca7b56274114ce800",
+    "contracts/review-conductor/openclaw-smcbd-suite-userland.json": "7cef706dbdc0e299e9c4036510c3be41358d25b1f82dda9d8cf5f807b4fbd18e",
+    "docs/bootstrap.md": "5b51e826bacc1db0004eab31acd8cc058770c46a168abf4aaeb1f1044a710341",
+    "docs/integration-contract.md": "3f52a920d5d1480a667eee1d78039ba6ba3023008bb290b81134ac0100debd12",
+    "docs/migration.md": "ed6f4b8e40fd105e1b2668808469b23bef8847addb279d7127510735cce21716",
+    "docs/provenance.json": "55a2dca930347197aee887308579a5e457c8794a9b9a234ca867e1933d32dc24",
+    "docs/trusted-admission.md": "b911584c654d4be5557b5a792416f1360612038640045250f5a7f954bc5f1af4",
+    "tests/test_review_conductor_profiles.py": "69ad3645458d4313e1607e1a498c868b719949110c916d5bb71dd081dce74d8e",
+    "tests/test_service_runtime.py": "4aac7a7773a9ee3469474f85fba112e8d8424b23f51695a841b3a320b4641196",
+    "tests/test_trusted_admission.py": "be0c30a4ba54b92b08f72eec1b7df9df31c957e5839d4426cb8189f91828235e",
+    "tools/review_conductor.py": "2b5ae0336b1f754866680eaeb775df5643cb73983fdb250600304b47a43c7097",
+    "tools/review_conductor_runtime.py": "fd58ef25115344c1ef67e3097706a12a81de2f2ebdc3972ad63bdabf4b35c723",
+    "tools/service_entrypoint.py": "05f78bbf6972e11f400c17be8b1af4109380b085765524e55d24e730a4074fc5",
+    "tools/service_runtime.py": "9df945f3c2ea027ca497c053de11f33c826333af618e13f4e373007695831361",
+    "tools/trusted_admission.py": "ae11f1697cc2d78d824a55475f009c87cdf3f01f0b0bd187bf29ba2bc44a8578"
+  }
+}

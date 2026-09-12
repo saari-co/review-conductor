@@ -1,4 +1,4 @@
-# Trusted admission v1: enrollment registry and approved policy binding
+# Trusted admission v2: enrollment registry and approved policy binding
 
 `tools/trusted_admission.py` is a standard-library-only module that the future
 service calls before any review work. It is not packaged in the zipapp, has no
@@ -6,7 +6,7 @@ CLI command, performs no I/O, and reads no credentials. All failures raise
 `AdmissionError` before any admission value exists; messages name the check and
 never echo untrusted data.
 
-## Enrollment registry (`review-conductor.enrollment.v1`)
+## Enrollment registry (`review-conductor.enrollment.v2`)
 
 Service-owned JSON, at most 65536 bytes, strict UTF-8, no duplicate keys, no
 unknown keys. It is never read from a reviewed repository and never committed
@@ -14,13 +14,18 @@ to this repository; tests build synthetic registries in memory.
 
 ```json
 {
-  "schema": "review-conductor.enrollment.v1",
+  "schema": "review-conductor.enrollment.v2",
   "enrollments": [
     {
       "repository": "dinkuskit/blocks",
       "repository_id": 1306882611,
-      "installation": {"id": 0, "account": "dinkuskit"},
-      "approved_policy": {"commit": "<40 lowercase hex>", "sha256": "<64 lowercase hex>"}
+      "github_app": {
+        "id": 1,
+        "installation_id": 2,
+        "installation_account": "dinkuskit"
+      },
+      "approved_policy": {"commit": "<40 lowercase hex>", "sha256": "<64 lowercase hex>"},
+      "reviewers": {"openclaw": "<actor>", "clawsweeper": "<distinct actor>"}
     }
   ]
 }
@@ -36,17 +41,18 @@ Rules enforced by `load_registry`:
   (`1306882611`, `1366416798`, from the historical profiles). Any other value
   for those names is rejected, so a registry cannot rebind a name to another
   repository.
-- `installation.id` is a positive integer and `installation.account` must be the
+- GitHub App and installation IDs are positive integers and the installation account must be the
   repository owner segment. A Saari installation cannot serve a Dinkus repository
-  or vice versa. No installation ID is recorded in this repository; the illustrative
-  `0` above is invalid and would be rejected.
+  or vice versa. App and installation IDs in examples are synthetic.
 - `approved_policy` is the approved default-branch commit plus the SHA-256 of the
   exact manifest bytes at that commit. Both are required.
 - Repository names, numeric IDs and installation IDs must be unique across the
   registry.
+- Reviewer actor identities are non-empty, bounded, and distinct. They are
+  service-owned authority, not target-manifest input.
 
-`Registry.lookup(repository, repository_id, installation_id)` succeeds only when
-all three agree with one enrollment; strings, booleans or a neighbouring
+`Registry.lookup(repository, repository_id, app_id, installation_id)` succeeds only when
+all four agree with one enrollment; strings, booleans or a neighbouring
 enrollment's values fail.
 
 ## Approved base-policy loading
@@ -76,13 +82,13 @@ different one.
 ## Tuple/epoch binding
 
 `admit(registry, request, read_policy)` takes an untrusted request with exactly
-`repository, repository_id, installation_id, pr_number, base_sha, head_sha,
+`repository, repository_id, app_id, installation_id, pr_number, base_sha, head_sha,
 review_epoch, policy_commit`. It resolves the enrollment, constructs a validated
 frozen `ReviewTuple` (owner/name, positive IDs, 40-hex lowercase SHAs, base ≠
 head, epoch ≥ 0), refuses `policy_commit == head_sha` unless that is already the
 approved commit, and loads the approved policy. The frozen `Admission` exposes
 `binding_id`: the SHA-256 of canonical JSON over repository, repository_id,
-pr_number, base_sha, head_sha, review_epoch, installation_id and `policy_id`.
+pr_number, base_sha, head_sha, review_epoch, App ID, installation ID and `policy_id`.
 Any base/head/epoch/PR change, and any policy promotion, yields a new binding.
 
 `policy_is_current(admission, registry)` is true only while the registry still
@@ -104,9 +110,19 @@ fields, so an object crafted around `__post_init__` (for example with
 well-formed object naming another enrollment's installation is only detectable
 against the registry, where it is never current and cannot be re-admitted.
 
+## Inactive source integration
+
+`tools/service_runtime.py` verifies HMAC before parsing or policy access, binds
+only accepted non-closed `pull_request` deliveries, stages approved bytes outside
+the SQLite write transaction, re-resolves enrollment inside that transaction,
+and persists one policy binding with the exact tuple. Injected transports and a
+bounded loopback handler are covered by synthetic tests. The registry loader
+opens an absolute same-user mode-0600 file through held descriptors and rejects
+symlinks and forbidden source/checkout/state/proof roots.
+
 ## What this does not do
 
-No GitHub App, installation, webhook, credential, transport, database, event
-outbox, check publication, adjudication or merge behaviour. Nothing is activated
-by this module's presence; the packaged scaffold still exposes only
-`validate-manifest`. The legacy engine and profiles are unchanged.
+No live GitHub token, check publication, checkout hydration, OpenClaw or
+ClawSweeper dispatch, notification, credential reader, service process,
+deployment, adjudication, or merge behavior. Nothing is activated by these
+modules; the packaged scaffold still exposes only `validate-manifest`.

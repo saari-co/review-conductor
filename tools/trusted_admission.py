@@ -13,9 +13,9 @@ import re
 
 from target_manifest import MAX_BYTES, unique_object, validate_manifest
 
-REGISTRY_SCHEMA = "review-conductor.enrollment.v1"
+REGISTRY_SCHEMA = "review-conductor.enrollment.v2"
 POLICY_IDENTITY_SCHEMA = "review-conductor.policy-identity.v1"
-BINDING_SCHEMA = "review-conductor.admission-binding.v1"
+BINDING_SCHEMA = "review-conductor.admission-binding.v2"
 MAX_REGISTRY_BYTES = 65536
 SHA1_RE = re.compile(r"[0-9a-f]{40}")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -60,25 +60,44 @@ def _sha256(value, label):
     return value
 
 
+def _actor(value, label):
+    if not isinstance(value, str) or not value or len(value) > 200 or value.strip() != value:
+        _fail(f"{label} must be a non-empty bounded actor identity")
+    return value
+
+
 @dataclass(frozen=True)
 class Enrollment:
     repository: str
     repository_id: int
+    app_id: int
     installation_id: int
     installation_account: str
     approved_policy_commit: str
     approved_policy_sha256: str
+    reviewer_openclaw: str
+    reviewer_clawsweeper: str
 
     def __post_init__(self):
         if not isinstance(self.repository, str) or self.repository not in INITIAL_ENROLLMENT_SCOPE:
             _fail("repository is outside the initial enrollment scope")
         if type(self.repository_id) is not int or self.repository_id != INITIAL_ENROLLMENT_SCOPE[self.repository]:
             _fail("enrollment repository_id contradicts the recorded numeric identity")
+        _positive_int(self.app_id, "GitHub App id")
         _positive_int(self.installation_id, "installation id")
         if self.installation_account != self.repository.split("/", 1)[0]:
             _fail("installation account must own the enrolled repository")
         _sha1(self.approved_policy_commit, "approved policy commit")
         _sha256(self.approved_policy_sha256, "approved policy sha256")
+        _actor(self.reviewer_openclaw, "OpenClaw reviewer actor")
+        _actor(self.reviewer_clawsweeper, "ClawSweeper reviewer actor")
+        if self.reviewer_openclaw == self.reviewer_clawsweeper:
+            _fail("reviewer actors must be distinct")
+
+    @property
+    def reviewers(self):
+        """Authoritative reviewer actors in the engine's review_policy shape."""
+        return {"openclaw": self.reviewer_openclaw, "clawsweeper": self.reviewer_clawsweeper}
 
 
 @dataclass(frozen=True)
@@ -94,7 +113,7 @@ class Registry:
         if len(set(names)) != len(names) or len(set(ids)) != len(ids) or len(set(installations)) != len(installations):
             _fail("enrollment identities must be unique across the registry")
 
-    def lookup(self, repository, repository_id, installation_id):
+    def lookup(self, repository, repository_id, app_id, installation_id):
         """Resolve one enrollment; every identity component must agree."""
         if not isinstance(repository, str):
             _fail("repository name is required")
@@ -104,6 +123,8 @@ class Registry:
         enrollment = match[0]
         if type(repository_id) is not int or repository_id != enrollment.repository_id:
             _fail("repository numeric identity does not match enrollment")
+        if type(app_id) is not int or app_id != enrollment.app_id:
+            _fail("GitHub App does not match enrollment")
         if type(installation_id) is not int or installation_id != enrollment.installation_id:
             _fail("installation does not match enrollment")
         return enrollment
@@ -124,17 +145,19 @@ def load_registry(raw):
         _fail("registry enrollments must be a list")
     enrollments = []
     for item in value["enrollments"]:
-        _exact(item, ["repository", "repository_id", "installation", "approved_policy"], "enrollment")
+        _exact(item, ["repository", "repository_id", "github_app", "approved_policy", "reviewers"], "enrollment")
         repository = item["repository"]
         if not isinstance(repository, str) or repository not in INITIAL_ENROLLMENT_SCOPE:
             _fail("repository is outside the initial enrollment scope")
         repository_id = _positive_int(item["repository_id"], "enrollment repository_id")
-        installation = item["installation"]
-        _exact(installation, ["id", "account"], "installation")
+        github_app = item["github_app"]
+        _exact(github_app, ["id", "installation_id", "installation_account"], "GitHub App")
         policy = item["approved_policy"]
         _exact(policy, ["commit", "sha256"], "approved policy")
-        enrollments.append(Enrollment(repository, repository_id, installation["id"], installation["account"],
-                                      policy["commit"], policy["sha256"]))
+        reviewers = item["reviewers"]
+        _exact(reviewers, ["openclaw", "clawsweeper"], "reviewers")
+        enrollments.append(Enrollment(repository, repository_id, github_app["id"], github_app["installation_id"], github_app["installation_account"],
+                                      policy["commit"], policy["sha256"], reviewers["openclaw"], reviewers["clawsweeper"]))
     return Registry(tuple(enrollments))
 
 
@@ -244,12 +267,14 @@ class ReviewTuple:
 @dataclass(frozen=True)
 class Admission:
     review: ReviewTuple
+    app_id: int
     installation_id: int
     policy: AdmittedPolicy
 
     def __post_init__(self):
         if not isinstance(self.review, ReviewTuple) or not isinstance(self.policy, AdmittedPolicy):
             _fail("admission requires a validated review tuple and admitted policy")
+        _positive_int(self.app_id, "admission app_id")
         _positive_int(self.installation_id, "admission installation_id")
         if (self.review.repository != self.policy.repository
                 or self.review.repository_id != self.policy.repository_id):
@@ -260,7 +285,7 @@ class Admission:
         try:
             review = ReviewTuple(*(getattr(self.review, f) for f in ReviewTuple.__dataclass_fields__))
             policy = AdmittedPolicy(*(getattr(self.policy, f) for f in AdmittedPolicy.__dataclass_fields__))
-            Admission(review, self.installation_id, policy)
+            Admission(review, self.app_id, self.installation_id, policy)
         except (AttributeError, TypeError) as exc:
             raise AdmissionError("admission object is malformed") from exc
         return self
@@ -272,7 +297,8 @@ class Admission:
             {"schema": BINDING_SCHEMA, "repository": self.review.repository,
              "repository_id": self.review.repository_id, "pr_number": self.review.pr_number,
              "base_sha": self.review.base_sha, "head_sha": self.review.head_sha,
-             "review_epoch": self.review.review_epoch, "installation_id": self.installation_id,
+             "review_epoch": self.review.review_epoch, "app_id": self.app_id,
+             "installation_id": self.installation_id,
              "policy_id": self.policy.policy_id},
             sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -282,20 +308,21 @@ def admit(registry, request, read_policy):
     """Bind the approved policy to one exact review tuple.
 
     ``request`` is an untrusted mapping with exactly: repository, repository_id,
-    installation_id, pr_number, base_sha, head_sha, review_epoch, policy_commit.
+    app_id, installation_id, pr_number, base_sha, head_sha, review_epoch,
+    policy_commit.
     The registry decides which policy applies; the request cannot choose it.
     """
     if not isinstance(registry, Registry):
         _fail("registry is required")
-    _exact(request, ["repository", "repository_id", "installation_id", "pr_number",
+    _exact(request, ["repository", "repository_id", "app_id", "installation_id", "pr_number",
                      "base_sha", "head_sha", "review_epoch", "policy_commit"], "admission request")
-    enrollment = registry.lookup(request["repository"], request["repository_id"], request["installation_id"])
+    enrollment = registry.lookup(request["repository"], request["repository_id"], request["app_id"], request["installation_id"])
     review = ReviewTuple(enrollment.repository, enrollment.repository_id, request["pr_number"],
                          request["base_sha"], request["head_sha"], request["review_epoch"])
     if request["policy_commit"] == review.head_sha and review.head_sha != enrollment.approved_policy_commit:
         _fail("PR head cannot promote its own policy")
     policy = load_approved_policy(enrollment, request["policy_commit"], read_policy)
-    return Admission(review, enrollment.installation_id, policy)
+    return Admission(review, enrollment.app_id, enrollment.installation_id, policy)
 
 
 def policy_is_current(admission, registry):
@@ -305,11 +332,12 @@ def policy_is_current(admission, registry):
     try:
         admission.revalidate()
         enrollment = registry.lookup(admission.review.repository, admission.review.repository_id,
-                                     admission.installation_id)
+                                     admission.app_id, admission.installation_id)
     except AdmissionError:
         return False
     return (enrollment.repository == admission.policy.repository
             and enrollment.repository_id == admission.policy.repository_id
+            and enrollment.app_id == admission.app_id
             and enrollment.installation_id == admission.installation_id
             and enrollment.approved_policy_commit == admission.policy.commit
             and enrollment.approved_policy_sha256 == admission.policy.sha256)

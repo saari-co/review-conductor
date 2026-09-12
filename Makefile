@@ -15,6 +15,7 @@ test:
 	$(PYTHON) tests/test_review_conductor_profiles.py
 	$(PYTHON) -m unittest discover -s tests -p 'test_scaffold.py' -v
 	$(PYTHON) -m unittest discover -s tests -p 'test_trusted_admission.py' -v
+	$(PYTHON) -m unittest discover -s tests -p 'test_service_runtime.py' -v
 	$(PYTHON) -m unittest discover -s tests -p 'test_*guard.py' -v
 	$(PYTHON) -m unittest discover -s tests -p 'test_launcher_transport.py' -v
 	$(PYTHON) -m unittest discover -s tests -p 'test_workflow_contract.py' -v

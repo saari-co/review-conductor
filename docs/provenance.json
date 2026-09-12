@@ -7,8 +7,8 @@
       "source_path": "tools/review_conductor.py",
       "destination_path": "tools/review_conductor.py",
       "source_sha256": "3915b5d15b9226b29c9e1fe6b74af71a08bb787c68e2e6bd8b63fef86924eda4",
-      "destination_sha256": "3915b5d15b9226b29c9e1fe6b74af71a08bb787c68e2e6bd8b63fef86924eda4",
-      "adaptation": "byte-identical"
+      "destination_sha256": "2b5ae0336b1f754866680eaeb775df5643cb73983fdb250600304b47a43c7097",
+      "adaptation": "standalone service-core adaptation: an optional injected admission hook binds accepted deliveries atomically; the default legacy path remains unchanged"
     },
     {
       "source_path": "tools/review_conductor_profiles.py",
@@ -21,8 +21,8 @@
       "source_path": "tools/review_conductor_runtime.py",
       "destination_path": "tools/review_conductor_runtime.py",
       "source_sha256": "22fff3925db126de0fc27e9c61be03cd710d24d9140342ff8367e9831e683d40",
-      "destination_sha256": "22fff3925db126de0fc27e9c61be03cd710d24d9140342ff8367e9831e683d40",
-      "adaptation": "byte-identical"
+      "destination_sha256": "fd58ef25115344c1ef67e3097706a12a81de2f2ebdc3972ad63bdabf4b35c723",
+      "adaptation": "standalone service-core adaptation: the webhook handler accepts an injected ingestor while default legacy ingestion remains unchanged"
     },
     {
       "source_path": "tools/review_conductor_userland.py",
@@ -56,8 +56,8 @@
       "source_path": "contracts/review-conductor/openclaw-smcbd-suite-userland.json",
       "destination_path": "contracts/review-conductor/openclaw-smcbd-suite-userland.json",
       "source_sha256": "f603f8b53e6ac4dcb49fba0cfdaa4336af21550ba0d53e6948ab75ba7cab7e7b",
-      "destination_sha256": "f603f8b53e6ac4dcb49fba0cfdaa4336af21550ba0d53e6948ab75ba7cab7e7b",
-      "adaptation": "byte-identical"
+      "destination_sha256": "7cef706dbdc0e299e9c4036510c3be41358d25b1f82dda9d8cf5f807b4fbd18e",
+      "adaptation": "inactive SMCBD candidate records verified App and installation identity plus explicit activation blockers; no live permission, endpoint or tunnel is enabled"
     },
     {
       "source_path": "contracts/review-conductor/openclaw-smcbd-suite.json",
@@ -84,8 +84,8 @@
       "source_path": "tonight-lab/tests/test_review_conductor_profiles.py",
       "destination_path": "tests/test_review_conductor_profiles.py",
       "source_sha256": "b166648b7b0139b718d82ced0911d670475e0885d0aba20a7eb26f257f527462",
-      "destination_sha256": "a5833dd83c1b3d80b3c33e56d837747967fafc8680d3d6db6613f41e3d5799af",
-      "adaptation": "test root and archived lane location only"
+      "destination_sha256": "69ad3645458d4313e1607e1a498c868b719949110c916d5bb71dd081dce74d8e",
+      "adaptation": "test root and archived lane location plus inactive candidate App, installation and permission-boundary assertions"
     },
     {
       "source_path": "tonight-lab/tests/test_review_conductor_userland.py",
