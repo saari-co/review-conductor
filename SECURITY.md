@@ -1,9 +1,11 @@
 # Security boundary
 
-**Offline scaffold only; no supported live service or deployment.** The zipapp
-contains only manifest validation. Extracted engine/runtime/launcher modules and
-historical profiles exist for regression coverage, are not service entrypoints,
-and must not be invoked against real credentials, repositories or deployments.
+**Offline, inactive qualification source only; no deployed service.** The zipapp
+contains only manifest validation. `tools/service_entrypoint.py` is an executable
+but unpackaged qualification entrypoint; the other extracted engine/runtime/launcher
+modules and historical profiles exist for regression coverage and are not service
+entrypoints. None may be invoked against real credentials, repositories or
+deployments without the separately authorized pilot procedure.
 Some legacy profiles retain active pilot defaults for byte-for-byte compatibility;
 that is not standalone enrollment. Do not deploy directly from `tools/`.
 

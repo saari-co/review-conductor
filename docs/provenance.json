@@ -21,8 +21,8 @@
       "source_path": "tools/review_conductor_runtime.py",
       "destination_path": "tools/review_conductor_runtime.py",
       "source_sha256": "22fff3925db126de0fc27e9c61be03cd710d24d9140342ff8367e9831e683d40",
-      "destination_sha256": "b80ad704715236e5a43b95f573634832e4a29743159bb47a04f829aa44e6d5be",
-      "adaptation": "standalone policy-read/check adapter with profile-selected least privilege, immutable App and ClawSweeper maps, synchronized installation-token caching, unfenced policy-fetch token minting, injected signer/ingestor seams, transient 503 classification, fresh fences before each mutating GitHub or OpenClaw command, and recoverable pre-request authority denial"
+      "destination_sha256": "202eb2fa4993a4b19b1989d37c0331f2ef2fdeb903d38c5db3bfbe00e517ebd0",
+      "adaptation": "standalone policy-read/check adapter with profile-selected least privilege, immutable App and ClawSweeper maps, synchronized installation-token caching, unfenced policy-fetch token minting, injected signer/ingestor seams, header-aware transient and rate-limit classification, fresh fences before each mutating GitHub or OpenClaw command, and recoverable pre-request authority denial"
     },
     {
       "source_path": "tools/review_conductor_userland.py",

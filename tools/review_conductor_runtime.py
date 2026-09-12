@@ -152,7 +152,8 @@ def sign_app_jwt(app_id: int, private_key_pem: str, now: int | None = None) -> s
     return f"{header}.{claims}.{b64url(signature)}"
 
 
-Transport = Callable[[str, str, dict[str, str], bytes | None, float], tuple[int, bytes]]
+TransportResponse = tuple[int, bytes] | tuple[int, dict[str, str], bytes]
+Transport = Callable[[str, str, dict[str, str], bytes | None, float], TransportResponse]
 ArtifactTransport = Callable[[str, dict[str, str], float], tuple[int, bytes]]
 ArtifactRequest = Callable[
     [str, dict[str, str], float], tuple[int, dict[str, str], bytes]
@@ -165,13 +166,19 @@ ARTIFACT_BLOB_HOST_RE = re.compile(
 
 def urllib_transport(
     method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float
-) -> tuple[int, bytes]:
+) -> tuple[int, dict[str, str], bytes]:
     request = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return int(response.status), response.read(1024 * 1024)
+            return (
+                int(response.status),
+                dict(response.headers.items()),
+                response.read(1024 * 1024),
+            )
     except urllib.error.HTTPError as exc:
-        return int(exc.code), b""
+        response_headers = dict(exc.headers.items()) if exc.headers is not None else {}
+        exc.close()
+        return int(exc.code), response_headers, b""
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise GitHubTransientError("GitHub API transport failed") from exc
 
@@ -445,11 +452,20 @@ class GitHubAppClient:
                 raise core.AuthorityDenied(
                     "authority revoked before GitHub request"
                 ) from exc
-        status, raw = self._transport(
+        response = self._transport(
             method, self._app["api_base"] + path, headers, body, 15.0
         )
+        if len(response) == 2:
+            status, raw = response
+            response_headers: dict[str, str] = {}
+        else:
+            status, response_headers, raw = response
         if status not in expected:
-            if status in TRANSIENT_STATUSES:
+            rate_limited = status == 403 and (
+                header_value(response_headers, "Retry-After") is not None
+                or header_value(response_headers, "X-RateLimit-Remaining") == "0"
+            )
+            if status in TRANSIENT_STATUSES or rate_limited:
                 raise GitHubTransientError(
                     f"allowlisted GitHub API operation failed transiently ({operation})"
                 )

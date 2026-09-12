@@ -229,7 +229,7 @@ def serve(profile_path: Path, registry_path: Path) -> None:
     worker = threading.Thread(
         target=lambda: _worker_loop(config, provide_registry, client, notifier, stop, failure, lambda: server),
         name="review-conductor-service",
-        daemon=True,
+        daemon=False,
     )
     try:
         # Bind ingress before any worker exists so a failed startup cannot leave a
@@ -252,7 +252,10 @@ def serve(profile_path: Path, registry_path: Path) -> None:
         if server is not None:
             server.server_close()
         if worker.is_alive():
-            worker.join(timeout=config["worker"]["tick_seconds"] + 1)
+            # A tick may be inside a bounded external adapter operation far longer
+            # than the polling interval. Never return while that worker still owns
+            # a claim or subprocess; its adapter timeout remains the upper bound.
+            worker.join()
         webhook_secret = ""
     if failure:
         # The worker stopped the service; surface its operational failure instead of

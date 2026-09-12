@@ -41,7 +41,7 @@ It remains disabled and is reviewed independently from the admission core.
 
 ## Executable proof
 
-- Focused live service/adapter suite: 58 tests passed.
+- Focused live service/adapter suite: 59 tests passed.
 - Executable mutation suite: all 57 precise mutants killed.
 - The added cases directly exercise concurrent token minting, promotion after
   a stale binding, reloaded core identity, read-only/disappearing SQLite state,

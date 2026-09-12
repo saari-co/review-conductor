@@ -705,6 +705,10 @@ class AdmissionIngressTests(unittest.TestCase):
             with self.subTest(status=status), self.assertRaises(runtime.GitHubApiError) as ctx:
                 client.read_policy(REPOSITORY, POLICY_COMMIT)
             self.assertNotIsInstance(ctx.exception, runtime.GitHubTransientError)
+        for headers in ({"Retry-After": "30"}, {"X-RateLimit-Remaining": "0"}):
+            responses.append((403, headers, b""))
+            with self.subTest(headers=headers), self.assertRaises(runtime.GitHubTransientError):
+                client.read_policy(REPOSITORY, POLICY_COMMIT)
         # Base64 that passes the character allowlist but has invalid padding/length is
         # normalized to the adapter's error, never a leaked binascii.Error.
         for content in ("A", "QUJD\nRA", "===="):
@@ -2048,6 +2052,61 @@ class EntrypointTests(unittest.TestCase):
         self.assertTrue(closed.is_set())
         self.assertNotIn("review-conductor-service", [thread.name for thread in threading.enumerate()])
 
+    def test_shutdown_waits_for_the_non_daemon_worker_without_tick_timeout(self):
+        self.enable_profile()
+        registry = self.root / "registry.json"
+        registry.write_text(json.dumps({
+            "schema": admission.REGISTRY_SCHEMA,
+            "enrollments": [{
+                "repository": REPOSITORY, "repository_id": REPOSITORY_ID,
+                "github_app": {"id": APP_ID, "installation_id": INSTALLATION_ID,
+                               "installation_account": "saari-co"},
+                "approved_policy": {"commit": POLICY_COMMIT,
+                                    "sha256": hashlib.sha256((ROOT / "examples/smcbd.review-conductor.json").read_bytes()).hexdigest()},
+                "reviewers": dict(REVIEWERS),
+            }],
+        }))
+        registry.chmod(0o600)
+        observed = {}
+
+        class FakeThread:
+            def __init__(self, *, target, name, daemon):
+                observed.update(target=target, name=name, daemon=daemon)
+
+            def start(self):
+                observed["started"] = True
+
+            def is_alive(self):
+                return True
+
+            def join(self, *args, **kwargs):
+                observed["join"] = (args, kwargs)
+
+        class FakeServer:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def serve_forever(self, poll_interval=0.5):
+                return None
+
+            def server_close(self):
+                observed["closed"] = True
+
+        class Client:
+            def read_policy(self, *_args):
+                raise AssertionError("policy transport ran")
+
+        with patch.object(userland, "read_inherited_value", return_value="fixture-secret"), \
+                patch.object(userland, "build_client", return_value=Client()), \
+                patch.object(userland, "OpenClawNotifier", return_value=object()), \
+                patch.object(entrypoint.threading, "Thread", FakeThread), \
+                patch.object(runtime, "BoundedHTTPServer", FakeServer):
+            entrypoint.serve(self.profile, registry)
+        self.assertEqual(observed["daemon"], False)
+        self.assertEqual(observed["join"], ((), {}))
+        self.assertTrue(observed["started"])
+        self.assertTrue(observed["closed"])
+
     def test_apply_flag_and_arguments_are_mandatory(self):
         for argv in [[], ["--profile", str(self.profile), "--registry", str(self.root)],
                      ["--profile", str(self.profile), "--apply"]]:
@@ -2265,7 +2324,7 @@ MUTANTS = [
     (
         "classify transient GitHub statuses as rejected operations",
         "tools/review_conductor_runtime.py",
-        "            if status in TRANSIENT_STATUSES:\n",
+        "            if status in TRANSIENT_STATUSES or rate_limited:\n",
         "            if False:\n",
         "AdmissionIngressTests.test_github_client_classifies_transient_failures_and_malformed_content",
     ),
@@ -2450,6 +2509,27 @@ MUTANTS = [
         "        if not callable(install) or not callable(assertion):\n",
         "        if not callable(install):\n",
         "AdmissionIngressTests.test_tick_side_effects_revalidate_admission_before_each_mutating_call",
+    ),
+    (
+        "treat rate-limited GitHub 403 responses as permanent authorization failures",
+        "tools/review_conductor_runtime.py",
+        '            rate_limited = status == 403 and (\n                header_value(response_headers, "Retry-After") is not None\n                or header_value(response_headers, "X-RateLimit-Remaining") == "0"\n            )\n',
+        "            rate_limited = False\n",
+        "AdmissionIngressTests.test_github_client_classifies_transient_failures_and_malformed_content",
+    ),
+    (
+        "detach the service worker during shutdown",
+        "tools/service_entrypoint.py",
+        "        daemon=False,\n",
+        "        daemon=True,\n",
+        "EntrypointTests.test_shutdown_waits_for_the_non_daemon_worker_without_tick_timeout",
+    ),
+    (
+        "bound shutdown waiting to the short tick interval",
+        "tools/service_entrypoint.py",
+        "            worker.join()\n",
+        '            worker.join(timeout=config["worker"]["tick_seconds"] + 1)\n',
+        "EntrypointTests.test_shutdown_waits_for_the_non_daemon_worker_without_tick_timeout",
     ),
     (
         "let the worker die silently on operational failure",
