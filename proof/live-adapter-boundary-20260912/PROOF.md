@@ -44,16 +44,20 @@ It remains disabled and is reviewed independently from the admission core.
     the service-side OpenClaw destination invalidates existing bindings.
 12. The injected GitHub transport's two- and three-element response forms are
     normalized for artifact downloads as well as API calls.
+13. Failed OpenClaw actions and uncertain notifications have supported
+    standalone recovery commands. Each command rechecks the whole profile and
+    then the selected PR's current policy binding inside the state-mutation
+    transaction; revocation leaves state unchanged.
 
 ## Executable proof
 
-- Focused live service/adapter suite: 60 tests passed.
-- Executable mutation suite: all 62 precise mutants killed.
+- Focused live service/adapter suite: 63 tests passed.
+- Executable mutation suite: all 64 precise mutants killed.
 - The added cases directly exercise concurrent token minting, promotion after
   a stale binding, reloaded core identity, read-only/disappearing SQLite state,
   checkout fencing, both OpenClaw command fences, per-notification fencing,
-  incomplete live clients, the Spark dispatch target and header-aware artifact
-  transport normalization.
+  incomplete live clients, the Spark dispatch target, header-aware artifact
+  transport normalization and authority-bound standalone maintenance.
 - Complete `make check`: passed before this evidence-only commit.
 - Extraction provenance: 14 files verified and Python compilation passed.
 - `git diff --check`: passed.

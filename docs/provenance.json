@@ -28,8 +28,8 @@
       "source_path": "tools/review_conductor_userland.py",
       "destination_path": "tools/review_conductor_userland.py",
       "source_sha256": "0f19c2143f568117fa44b29bd56cb652df511f6e19c6ea8d100389dc2605a106",
-      "destination_sha256": "57ae710ae8add11c982da04f874b0c4f993e50f2304d8bf7df2551b055523e02",
-      "adaptation": "generalized standalone profiles require Contents read and the trusted service entrypoint; legacy Blocks permissions and CLI route remain accepted unchanged; checkout fetches and every notification send use fresh admission-authority fences, with revocation preserved as recoverable pending work"
+      "destination_sha256": "06a8f5ddf1d9ee54a7c41e39772799aa916ecfc9f568d2acb2d236eb793c002f",
+      "adaptation": "generalized standalone profiles require Contents read and the trusted service entrypoint; legacy Blocks permissions and CLI route remain accepted unchanged; checkout fetches and every notification send use fresh admission-authority fences, with revocation preserved as recoverable pending work; explicit retry and notification reconciliation accept a transaction-bound authority callback"
     },
     {
       "source_path": "tools/review_conductor_userland_launcher.py",

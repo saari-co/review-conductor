@@ -1511,11 +1511,17 @@ def hydrate_pending_openclaw_heads(
 
 
 def retry_failed_openclaw(
-    config: dict[str, Any], pr_number: int, *, apply: bool
+    config: dict[str, Any],
+    pr_number: int,
+    *,
+    apply: bool,
+    authority_guard: Callable[[sqlite3.Connection], None] | None = None,
 ) -> dict[str, Any]:
     connection = core.open_database(Path(config["paths"]["state_root"]), config["github_app"]["repository"])
     try:
         connection.execute("BEGIN IMMEDIATE")
+        if authority_guard is not None:
+            authority_guard(connection)
         head = core.current_head(connection, config["github_app"]["repository"], pr_number)
         if head is None or head["state"] != "openclaw_failed":
             raise UserlandError("PR does not have a current failed OpenClaw adapter action")
@@ -1583,6 +1589,7 @@ def reconcile_uncertain_notification(
     confirmation: str,
     *,
     apply: bool,
+    authority_guard: Callable[[sqlite3.Connection], None] | None = None,
 ) -> dict[str, Any]:
     confirmations = {
         "sent": "provider-delivery-observed",
@@ -1598,6 +1605,8 @@ def reconcile_uncertain_notification(
     try:
         ensure_userland_tables(connection)
         connection.execute("BEGIN IMMEDIATE")
+        if authority_guard is not None:
+            authority_guard(connection)
         head = core.current_head(connection, config["github_app"]["repository"], pr_number)
         if head is None:
             raise UserlandError("PR does not have a current Review Conductor head")

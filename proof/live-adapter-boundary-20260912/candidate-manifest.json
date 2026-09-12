@@ -5,7 +5,8 @@
   "restored_adapter_commit": "9ca6f516cb8e0da4a57b7a814656a56f64df88ad",
   "boundary_repair_commit": "d18d336664fa993a4414851ab48d624be44f8b5e",
   "review_repair_starting_head": "f877a11c648411db5e03c42fd08d907708f0ed2b",
-  "captured_utc": "2026-09-12T17:58:47Z",
+  "maintenance_repair_starting_head": "31997300165dd28dd05e5cb3ed7405dd68a24c9a",
+  "captured_utc": "2026-09-12T18:15:14Z",
   "scope": "authority_bound_live_adapters",
   "files": {
     "README.md": "7faa2f7b5975304fac12ea49760bc6c47b554b9b0a5a2f796c8e8277cef348cc",
@@ -13,19 +14,19 @@
     "contracts/review-conductor/openclaw-smcbd-suite-userland.json": "e9775049f4498831e9f7f548b06a157a2396be86c6c0a881dd598649fdecd36d",
     "docs/bootstrap.md": "d7fab758e263f1b7ba1c8a1431fa435bfa17685cd533fc603720130d860cca87",
     "docs/integration-contract.md": "4be2ede8991699adc24422491cc3c05d4a2807e9ac3dc11c2a2a715711252c58",
-    "docs/migration.md": "72032323cd45fa6cb66ae9b28871dc20ff13e3655372a5cfd9325cee46ca9e9e",
-    "docs/provenance.json": "3947720bc3a5b3870ec5a706ba1dd6ab21170687b77e1a0cec8437151da434cf",
-    "docs/smcbd-pilot-handoff.md": "c702f818acbe62aee89245cb5d98f1d8ab0378f67c41428ef8cd2dafff8230f0",
+    "docs/migration.md": "1e77841bec4fb23e03a4f77c342db8f075526fa296ca93260eeaf31638d7e1b3",
+    "docs/provenance.json": "9a67e38f17b9b07cfa6afaa6eb99bd932ae23c7e09e52e98b74f49cf8f0a857f",
+    "docs/smcbd-pilot-handoff.md": "888b91a1967de4f99a650f068f55a6ac4d257f9665f35eb1d7239feead5d11b2",
     "docs/trusted-admission.md": "d58253b9d1710b75dd90980fede0a8cedc8dc598ed513524b37ca5d8d92f6e27",
-    "proof/live-adapter-boundary-20260912/PROOF.md": "3d7769e5d6235c14606eae2b2664e168db12ddd65e8764d374e75de3c340cb7c",
+    "proof/live-adapter-boundary-20260912/PROOF.md": "a694670190f8741f7f8982d2db9f8f0f46b080f74869d0f158f78d780ac14f01",
     "proof/smcbd-service-admission-20260912/PROOF.md": "9fc215d180a5764db8ae3f33d3d905ff0d50d8e0d539a6a8332c57760d648810",
     "proof/smcbd-service-admission-20260912/candidate-manifest.json": "85e22fd6511cc7882718fb5586a2c5ebac514cf9a6f7488353759f36df707741",
     "tests/test_review_conductor_profiles.py": "bafad178ef7e5e4c0adb5c58f5a6141d0607fa1fa5131053cfaccab3877a6c88",
-    "tests/test_service_runtime.py": "b5d0068f4254169810f611611666bffa5483e26a16e81b0ba27273be7e0db0b1",
+    "tests/test_service_runtime.py": "bb5ed5f5ddc834e991fafb2bcf6b7b6d2da66c6c1645dfd0100e188fd3cf07ab",
     "tools/review_conductor.py": "dde1004db27b8692987b76360fa17771377ce812a06bcd7e367a1a651855002a",
     "tools/review_conductor_runtime.py": "d6294d4d4df8a1d7b602f9b2949465ffc35539645c5dc4d7a199d6355895f3bb",
-    "tools/review_conductor_userland.py": "57ae710ae8add11c982da04f874b0c4f993e50f2304d8bf7df2551b055523e02",
-    "tools/service_entrypoint.py": "367b50e1051f414de8ad4d09637362933635f390772320707c40f370423127ba",
-    "tools/service_runtime.py": "58ba18d3ac7ce0663733fd41e8b1d8e6f9d0f1b796ce6de4534257fcc0525b49"
+    "tools/review_conductor_userland.py": "06a8f5ddf1d9ee54a7c41e39772799aa916ecfc9f568d2acb2d236eb793c002f",
+    "tools/service_entrypoint.py": "e8011b3ebb34cc4d9adf7fc80430dc0c6dbb4c77ec895dced6fd2dd42cbbc7ac",
+    "tools/service_runtime.py": "f00f33feedc45b992e7a69ecccdecd2b1b82876d23b45d2c8c7083fab8dd977c"
   }
 }

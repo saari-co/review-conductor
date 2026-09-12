@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import stat
@@ -283,14 +284,105 @@ def _worker_loop(config, provide_registry, client, notifier, stop, failure, get_
             return
 
 
+def run_maintenance(
+    profile_path: Path,
+    registry_path: Path,
+    command: str,
+    pr_number: int,
+    *,
+    apply: bool,
+    channel: str | None = None,
+    disposition: str | None = None,
+    confirmation: str | None = None,
+) -> dict:
+    """Run a supported state recovery only under current standalone authority."""
+    config = userland.load_config(profile_path)
+    profiles.require_enabled(config)
+    provide_registry = registry_provider(registry_path, config)
+    # Match the worker's whole-profile opening gate, then re-check the target
+    # binding inside the mutation transaction immediately before state changes.
+    service.require_current_bindings(config, provide_registry)
+
+    def require_target(connection) -> None:
+        service.require_current_binding(
+            connection, config, provide_registry, pr_number
+        )
+
+    if command == "retry-openclaw":
+        return userland.retry_failed_openclaw(
+            config,
+            pr_number,
+            apply=apply,
+            authority_guard=require_target,
+        )
+    if command == "reconcile-notification":
+        return userland.reconcile_uncertain_notification(
+            config,
+            pr_number,
+            channel,
+            disposition,
+            confirmation,
+            apply=apply,
+            authority_guard=require_target,
+        )
+    raise service.ServiceError("unsupported standalone maintenance operation")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", type=Path, required=True)
     parser.add_argument("--registry", type=Path, required=True)
-    parser.add_argument("--apply", action="store_true", required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--apply", action="store_true")
+    parser.add_argument(
+        "command",
+        nargs="?",
+        default="serve",
+        choices=("serve", "retry-openclaw", "reconcile-notification"),
+    )
+    parser.add_argument("--pr", type=int)
+    parser.add_argument(
+        "--channel", choices=("openclaw_context", "discord", "signal")
+    )
+    parser.add_argument("--disposition", choices=("sent", "retry"))
+    parser.add_argument("--confirm")
     args = parser.parse_args(argv)
+    if args.command == "serve":
+        if args.dry_run:
+            parser.error("serve requires --apply")
+        if any(
+            value is not None
+            for value in (args.pr, args.channel, args.disposition, args.confirm)
+        ):
+            parser.error("serve does not accept maintenance arguments")
+    elif args.pr is None:
+        parser.error(f"{args.command} requires --pr")
+    elif args.command == "retry-openclaw" and any(
+        value is not None for value in (args.channel, args.disposition, args.confirm)
+    ):
+        parser.error("retry-openclaw does not accept notification arguments")
+    elif args.command == "reconcile-notification" and any(
+        value is None for value in (args.channel, args.disposition, args.confirm)
+    ):
+        parser.error(
+            "reconcile-notification requires --channel, --disposition and --confirm"
+        )
     try:
-        serve(args.profile, args.registry)
+        if args.command == "serve":
+            serve(args.profile, args.registry)
+        else:
+            result = run_maintenance(
+                args.profile,
+                args.registry,
+                args.command,
+                args.pr,
+                apply=args.apply,
+                channel=args.channel,
+                disposition=args.disposition,
+                confirmation=args.confirm,
+            )
+            print(json.dumps(result, indent=2, sort_keys=True))
     except (core.ContractError, OSError) as exc:
         print(f"review-conductor-service: {exc}", file=sys.stderr)
         return 2

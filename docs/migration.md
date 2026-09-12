@@ -33,12 +33,16 @@ configuration. The build excludes all historical profiles and legacy launchers.
    target manifest to an approved base commit, materialize the admitted manifest
    as the effective engine profile (today the two must agree exactly or binding
    fails closed), and activate an isolated service.
-2. Replace x-api `bin/smoky`/host-relative integration with qualified external
-   adapters. The copied compatibility modules still describe the existing pilot;
-   tests inject transports. They are not a portable activated service yet.
+2. Qualify the remaining Smoky runtime integration. The standalone entrypoint
+   contains its own periodic worker loop, so it needs no external scheduler or
+   Gateway plugin; however, OpenClaw dispatch still executes the configured
+   `spark.smoky_path` transport for the configured Spark target. The copied
+   compatibility modules still describe the existing pilot and tests inject
+   transports. They are not a portable activated service yet.
 3. Implement/version the general authenticated client surface and event outbox.
-   GitHub webhook ingress exists; no Gateway plugin, Smoky dependency, webhook
-   registration or scheduler is added.
+   GitHub webhook ingress exists; no Gateway plugin, external scheduler or
+   webhook registration is added. The live OpenClaw dispatch path retains the
+   explicit Smoky executable/runtime dependency described above.
 4. Obtain exact-head external reviews of this new repo. It is not self-enrolled;
    CI success is not OpenClaw/ClawSweeper clearance.
 5. Separately authorize each target's manifest commit, installation and isolated

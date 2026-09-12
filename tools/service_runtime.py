@@ -635,6 +635,33 @@ def require_current_bindings(config: dict[str, Any], registry: RegistrySource) -
         connection.close()
 
 
+def require_current_binding(
+    connection: sqlite3.Connection,
+    config: dict[str, Any],
+    registry: RegistrySource,
+    pr_number: int,
+) -> dict[str, Any]:
+    """Require one live tuple's current authority inside its mutation transaction.
+
+    Standalone maintenance operations use the same transaction for this check and
+    their state change. The registry is re-read here, after ``BEGIN IMMEDIATE``,
+    so a profile or enrollment revocation observed before the write fails closed.
+    """
+    registry = resolve_registry(registry)
+    core_config = core.load_config(Path(config["core_config"]))
+    enrolled = require_profile_enrolled(config, registry, core_config)
+    repository = enrolled.repository
+    head = core.current_head(connection, repository, pr_number)
+    if head is None or head["state"] in {"closed", "closed_merged"}:
+        raise ServiceError("maintenance target has no live current review tuple")
+    binding = binding_for_current_head(
+        connection, registry, repository, pr_number, core_config, config
+    )
+    if binding is None:
+        raise ServiceError("maintenance target lacks a current approved-policy binding")
+    return binding
+
+
 def run_service_tick(
     config: dict[str, Any],
     registry: RegistrySource,

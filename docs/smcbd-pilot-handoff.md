@@ -223,6 +223,29 @@ Verify clean, findings,
 timeout, replay, stale head/base/epoch, cross-installation and policy-promotion
 cases before proposing cutover.
 
+## Authority-bound maintenance
+
+The standalone entrypoint exposes only the two state-recovery mutations needed
+by the live adapters. Both re-read the service-owned registry, require every live
+head to retain a current approved-policy binding, then re-check the selected PR's
+binding inside the same SQLite transaction that performs the mutation. Neither
+command reads GitHub or notification credentials.
+
+Preview before applying:
+
+```text
+python3 tools/service_entrypoint.py --profile PROFILE --registry REGISTRY --dry-run retry-openclaw --pr PR
+python3 tools/service_entrypoint.py --profile PROFILE --registry REGISTRY --dry-run reconcile-notification --pr PR --channel CHANNEL --disposition sent --confirm provider-delivery-observed
+python3 tools/service_entrypoint.py --profile PROFILE --registry REGISTRY --dry-run reconcile-notification --pr PR --channel CHANNEL --disposition retry --confirm provider-nondelivery-observed
+```
+
+Repeat the selected command with `--apply` instead of `--dry-run` only after the
+preview identifies the intended exact current tuple. Registry/profile revocation,
+a stale or missing binding, a closed tuple, ambiguous notification state, or an
+action that is not currently failed aborts without changing state. There is no
+generic SQL, adjudication, merge, check-publishing or reviewer-dispatch maintenance
+command on this entrypoint.
+
 ## Rollback
 
 Before authoritative cutover, rollback is: disable the GitHub webhook, stop the

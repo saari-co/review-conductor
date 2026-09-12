@@ -207,6 +207,54 @@ class AdmissionIngressTests(unittest.TestCase):
         self.assertEqual(duplicate["result"], "duplicate_delivery")
         self.assertEqual(duplicate["admission_binding_id"], receipt["admission_binding_id"])
 
+    def test_transaction_bound_maintenance_gate_rejects_policy_revocation(self):
+        self.fx.ingest("maintenance-binding", self.fx.payload())
+        connection = core.open_database(self.fx.state, REPOSITORY)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            current = service.require_current_binding(
+                connection, self.fx.app_config(), self.fx.registry(), 7
+            )
+            self.assertEqual(current["policy_commit"], POLICY_COMMIT)
+            with self.assertRaises(core.ContractError) as ctx:
+                service.require_current_binding(
+                    connection,
+                    self.fx.app_config(),
+                    self.fx.registry(policy=b"promoted-policy"),
+                    7,
+                )
+            self.assertIn("lacks a current approved-policy binding", str(ctx.exception))
+        finally:
+            connection.rollback()
+            connection.close()
+
+    def test_mutating_maintenance_calls_the_transaction_authority_guard(self):
+        calls = []
+
+        def denied(connection):
+            calls.append(connection)
+            raise service.ServiceError("maintenance authority revoked")
+
+        operations = (
+            lambda: userland.retry_failed_openclaw(
+                self.fx.app_config(), 7, apply=True, authority_guard=denied
+            ),
+            lambda: userland.reconcile_uncertain_notification(
+                self.fx.app_config(),
+                7,
+                "discord",
+                "retry",
+                "provider-nondelivery-observed",
+                apply=True,
+                authority_guard=denied,
+            ),
+        )
+        for operation in operations:
+            with self.subTest(operation=operation), self.assertRaises(core.ContractError) as ctx:
+                operation()
+            self.assertIn("maintenance authority revoked", str(ctx.exception))
+        self.assertEqual(len(calls), 2)
+
     def test_legacy_binding_schema_is_migrated_but_never_trusted(self):
         self.fx.ingest("legacy-schema", self.fx.payload())
         connection = core.open_database(self.fx.state, REPOSITORY)
@@ -2120,6 +2168,81 @@ class EntrypointTests(unittest.TestCase):
                 entrypoint.main(argv)
             self.assertEqual(ctx.exception.code, 2)
 
+    def test_maintenance_modes_use_outer_and_transaction_binding_gates(self):
+        self.enable_profile()
+        registry = self.root / "registry.json"
+        registry.write_text(json.dumps({
+            "schema": admission.REGISTRY_SCHEMA,
+            "enrollments": [{
+                "repository": REPOSITORY, "repository_id": REPOSITORY_ID,
+                "github_app": {"id": APP_ID, "installation_id": INSTALLATION_ID,
+                               "installation_account": "saari-co"},
+                "approved_policy": {"commit": POLICY_COMMIT,
+                                    "sha256": hashlib.sha256((ROOT / "examples/smcbd.review-conductor.json").read_bytes()).hexdigest()},
+                "reviewers": dict(REVIEWERS),
+            }],
+        }))
+        registry.chmod(0o600)
+        transaction_connections = []
+
+        def retry(_config, pr_number, *, apply, authority_guard):
+            connection = object()
+            authority_guard(connection)
+            transaction_connections.append(("retry", connection, pr_number, apply))
+            return {"result": "planned"}
+
+        def reconcile(
+            _config, pr_number, channel, disposition, confirmation, *, apply, authority_guard
+        ):
+            connection = object()
+            authority_guard(connection)
+            transaction_connections.append(
+                ("reconcile", connection, pr_number, channel, disposition, confirmation, apply)
+            )
+            return {"result": "reconciled"}
+
+        target_checks = []
+
+        def require_target(connection, _config, _registry, pr_number):
+            target_checks.append((connection, pr_number))
+            return {}
+
+        base = ["--profile", str(self.profile), "--registry", str(registry)]
+        with patch.object(service, "require_current_bindings") as outer, \
+                patch.object(service, "require_current_binding", side_effect=require_target), \
+                patch.object(userland, "retry_failed_openclaw", side_effect=retry), \
+                patch.object(userland, "reconcile_uncertain_notification", side_effect=reconcile), \
+                patch.object(sys, "stdout", io.StringIO()):
+            self.assertEqual(
+                entrypoint.main(base + ["--dry-run", "retry-openclaw", "--pr", "7"]), 0
+            )
+            self.assertEqual(
+                entrypoint.main(base + [
+                    "--apply", "reconcile-notification", "--pr", "7",
+                    "--channel", "discord", "--disposition", "retry",
+                    "--confirm", "provider-nondelivery-observed",
+                ]),
+                0,
+            )
+        self.assertEqual(outer.call_count, 2)
+        self.assertEqual([item[0] for item in transaction_connections], ["retry", "reconcile"])
+        self.assertEqual(target_checks, [
+            (transaction_connections[0][1], 7),
+            (transaction_connections[1][1], 7),
+        ])
+
+        with patch.object(
+            service, "require_current_bindings",
+            side_effect=service.ServiceError("current binding revoked"),
+        ), patch.object(
+            userland, "retry_failed_openclaw",
+            side_effect=AssertionError("mutation ran after a denied opening gate"),
+        ), patch.object(sys, "stderr", io.StringIO()) as stderr:
+            self.assertEqual(
+                entrypoint.main(base + ["--dry-run", "retry-openclaw", "--pr", "7"]), 2
+            )
+        self.assertIn("current binding revoked", stderr.getvalue())
+
 
 MUTANTS = [
     # (label, relative file, exact old substring, replacement, test id that must fail)
@@ -2182,8 +2305,8 @@ MUTANTS = [
     (
         "serve an inactive profile",
         "tools/service_entrypoint.py",
-        "    profiles.require_enabled(config)\n",
-        "    pass\n",
+        "    profiles.require_enabled(config)\n    provide_registry = registry_provider(registry_path, config)\n    provide_registry()\n",
+        "    pass\n    provide_registry = registry_provider(registry_path, config)\n    provide_registry()\n",
         "EntrypointTests.test_shipped_candidate_profile_is_refused_before_registry_or_credentials",
     ),
     (
@@ -2528,6 +2651,20 @@ MUTANTS = [
         '                if len(response) == 2:\n                    return response\n                status, _response_headers, raw = response\n                return status, raw\n',
         '                status, raw = response\n                return status, raw\n',
         "GitHubAdapterTests.test_header_aware_transport_fallback_normalizes_artifact_downloads",
+    ),
+    (
+        "run standalone maintenance without the whole-profile authority gate",
+        "tools/service_entrypoint.py",
+        "    service.require_current_bindings(config, provide_registry)\n",
+        "    pass\n",
+        "EntrypointTests.test_maintenance_modes_use_outer_and_transaction_binding_gates",
+    ),
+    (
+        "run standalone maintenance without the transaction-bound target gate",
+        "tools/service_entrypoint.py",
+        "        service.require_current_binding(\n            connection, config, provide_registry, pr_number\n        )\n",
+        "        return None\n",
+        "EntrypointTests.test_maintenance_modes_use_outer_and_transaction_binding_gates",
     ),
     (
         "treat rate-limited GitHub 403 responses as permanent authorization failures",
