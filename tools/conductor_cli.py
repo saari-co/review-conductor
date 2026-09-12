@@ -2,7 +2,7 @@
 import argparse
 import json
 from pathlib import Path
-from target_manifest import validate_manifest
+from target_manifest import MAX_BYTES, validate_manifest
 
 VERSION = "0.1.0.dev0"
 
@@ -14,7 +14,8 @@ def main(argv=None):
     command.add_argument("path", type=Path)
     args = parser.parse_args(argv)
     try:
-        value = validate_manifest(args.path.read_bytes())
+        with args.path.open("rb") as stream:
+            value = validate_manifest(stream.read(MAX_BYTES + 1))
     except (OSError, ValueError) as exc:
         print(json.dumps({"valid": False, "error": str(exc), "activation_supported": False}))
         return 2

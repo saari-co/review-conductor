@@ -45,3 +45,10 @@ merge, or credential commands.
 
 No open-source license is assigned by this scaffold; licensing remains an owner
 choice. Do not infer redistribution permission from the source extraction.
+
+## Governance and security
+
+[Contributing / owners](CONTRIBUTING.md) · [Security](SECURITY.md) ·
+[Bootstrap gates](docs/bootstrap.md) · [Proposed protection](docs/branch-protection.md)
+
+These are source-review rules, not live enrollment or applied GitHub protection.

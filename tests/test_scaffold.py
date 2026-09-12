@@ -7,6 +7,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+from io import BytesIO
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,6 +44,33 @@ class ScaffoldTests(unittest.TestCase):
         for raw in [b'{"schema":1,"schema":2}', b' ' * 16385, b'\xff', b'[' * 2000]:
             with self.subTest(raw=raw[:30]), self.assertRaises(ValueError):
                 validate_manifest(raw)
+
+    def test_utf8_only_and_git_ref_components(self):
+        raw = json.dumps(self.value)
+        for encoding in ["utf-16", "utf-32"]:
+            with self.subTest(encoding=encoding), self.assertRaises(ValueError):
+                validate_manifest(raw.encode(encoding))
+        for branch in ["topic/.hidden", "topic.lock/child", "topic/child.lock", "main/..bad"]:
+            item = copy.deepcopy(self.value)
+            item["default_branch"] = branch
+            with self.subTest(branch=branch), self.assertRaises(ValueError):
+                validate_manifest(json.dumps(item).encode())
+        for branch in ["main", "release/1.0", "topic.locked/child"]:
+            item = copy.deepcopy(self.value)
+            item["default_branch"] = branch
+            self.assertEqual(validate_manifest(json.dumps(item).encode())["default_branch"], branch)
+
+    def test_cli_bounds_file_read_before_decoding(self):
+        from conductor_cli import main
+        from target_manifest import MAX_BYTES
+        class BoundedStream(BytesIO):
+            def read(self, size=-1):
+                if size != MAX_BYTES + 1:
+                    raise AssertionError("CLI attempted unbounded input read")
+                return super().read(size)
+        stream = BoundedStream(b" " * (MAX_BYTES + 100))
+        with patch("conductor_cli.Path.open", return_value=stream):
+            self.assertEqual(main(["validate-manifest", "oversized.json"]), 2)
 
     def test_examples_and_nonactivating_cli(self):
         for path in sorted((ROOT / "examples").glob("*.json")):

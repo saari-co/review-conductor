@@ -16,3 +16,9 @@ agent, Gateway, CI executor, source-repair worker, or merge service.
 - Changes to deployments, credentials, protection, merges, and adjudication
   require their own explicit authorization. No activation follows from a PR.
 - Keep dated proof in proof/, stable contracts in docs/, generated output in runs/.
+
+Governance: read CONTRIBUTING.md and SECURITY.md. The two human owners are mapped
+in .github/owners.json; .github/CODEOWNERS covers all paths. Those files do not
+supply service reviewer authority. Evaluate policy changes against approved base.
+Keep PR #1 draft; docs/bootstrap.md defines the pending human bootstrap gate.
+docs/main-protection.proposed.json is review-only, never permission to apply it.

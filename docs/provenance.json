@@ -91,8 +91,8 @@
       "source_path": "tonight-lab/tests/test_review_conductor_userland.py",
       "destination_path": "tests/test_review_conductor_userland.py",
       "source_sha256": "a2b754063c40c6acd3228aed5741692dcddc518c5cb5540a4bf01fb50d898c4f",
-      "destination_sha256": "2f66bc940e7467918a6333117a678df56fc602140ce59d3e7f06d9dbe3d9e116",
-      "adaptation": "test root and archived lane location only"
+      "destination_sha256": "b754928b58196f2145f2aa9407f7f05a2511c52df378e875218dfeb70dedc397",
+      "adaptation": "test root/archived lane paths; assemble synthetic fixture key marker from adjacent bytes (same runtime value)"
     },
     {
       "source_path": "lanes/spark-openclaw-autoreview/run.sh",

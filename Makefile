@@ -1,9 +1,12 @@
 PYTHON ?= python3
 
-.PHONY: check test build
-check: test
+.PHONY: check governance test build
+check: governance test
 	$(PYTHON) scripts/check_provenance.py
 	git diff --check
+
+governance:
+	$(PYTHON) scripts/check_repository.py
 
 test:
 	$(PYTHON) tests/test_review_conductor.py
@@ -11,6 +14,7 @@ test:
 	$(PYTHON) tests/test_review_conductor_userland.py
 	$(PYTHON) tests/test_review_conductor_profiles.py
 	$(PYTHON) -m unittest discover -s tests -p 'test_scaffold.py' -v
+	$(PYTHON) -m unittest discover -s tests -p 'test_*guard.py' -v
 
 build:
 	$(PYTHON) scripts/build.py

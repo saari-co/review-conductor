@@ -1,0 +1,4 @@
+# Repository governance owners, not runtime reviewer authority.
+# A single catch-all covers every file, including this file and future paths.
+# GitHub accepts approval from either owner; this does not require both.
+* @saariuslystoned @saarius

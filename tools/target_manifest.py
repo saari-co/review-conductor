@@ -21,7 +21,7 @@ def validate_manifest(raw):
     if len(raw) > MAX_BYTES:
         raise ValueError("manifest exceeds 16384 bytes")
     try:
-        value = json.loads(raw, object_pairs_hook=unique_object)
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object)
     except (UnicodeError, RecursionError) as exc:
         raise ValueError("invalid JSON encoding or nesting") from exc
     exact(value, ["schema", "repository", "default_branch", "ci", "review", "merge_policy"], "manifest")
@@ -31,7 +31,10 @@ def validate_manifest(raw):
     if not isinstance(repo, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}", repo):
         raise ValueError("invalid repository")
     branch = value["default_branch"]
-    if not isinstance(branch, str) or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_./-]{0,254}", branch) or any(x in branch for x in ("..", "//")) or branch.endswith(("/", ".", ".lock")):
+    if (not isinstance(branch, str) or
+            not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_./-]{0,254}", branch) or
+            any(x in branch for x in ("..", "//")) or branch.endswith(("/", ".")) or
+            any(part.startswith(".") or part.endswith(".lock") for part in branch.split("/"))):
         raise ValueError("invalid default branch")
     exact(value["ci"], ["workflow_name", "workflow_path"], "CI")
     ci = value["ci"]

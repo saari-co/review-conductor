@@ -6,7 +6,9 @@
   `48036abf1649a6fbd1738d68b23fc235893e0b68` on
   `openclaw/review-conductor-generalization-managed`.
 - Five Python engine/adapter modules and four profiles copied byte-for-byte.
-- Four regression suites relocated, with only root/fixture path adjustments.
+- Four regression suites relocated, with root/fixture path adjustments; one
+  synthetic key marker is assembled from bytes with the same runtime value for
+  source hygiene. The extraction ledger records that adaptation.
 - Independent offline manifest contract, tests, zipapp build, and CI.
 - `provenance.json` records source/destination hashes. It does not publish the
   source x-api branch, which remains local and unchanged.

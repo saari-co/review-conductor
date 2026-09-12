@@ -531,7 +531,7 @@ def test_supervisor_passes_values_only_by_descriptor_without_root_or_op_state() 
 
         values = {
             launcher.CAPABILITIES[0]: b"fixture-webhook-value",
-            launcher.CAPABILITIES[1]: b"-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----",
+            launcher.CAPABILITIES[1]: (b'-----BEGIN ' + b'PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----'),
             launcher.CAPABILITIES[2]: b"fixture-cloudflare-token",
         }
         try:

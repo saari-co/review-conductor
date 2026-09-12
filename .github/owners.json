@@ -1,0 +1,14 @@
+{
+  "schema": "review-conductor.governance-owners.v1",
+  "repository": "saari-co/review-conductor",
+  "owners": [
+    {
+      "login": "saariuslystoned",
+      "github_user_id": 159389674
+    },
+    {
+      "login": "saarius",
+      "github_user_id": 83989817
+    }
+  ]
+}
