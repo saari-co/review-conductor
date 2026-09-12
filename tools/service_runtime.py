@@ -541,6 +541,11 @@ def require_profile_enrolled(
         raise ServiceError("runtime profile is not enrolled in the service registry") from exc
     if core_config is None:
         core_config = core.load_config(Path(config["core_config"]))
+    if (
+        core_config.get("repository") != enrolled.repository
+        or core_config.get("repository_id") != enrolled.repository_id
+    ):
+        raise ServiceError("runtime core repository identity contradicts service enrollment")
     review_policy = core.require_object(core_config.get("review_policy"), "core review_policy")
     # A profile deactivated after startup must fail every provider read, delivery
     # and tick closed, not merely stop admitting new heads.
@@ -559,10 +564,21 @@ def _gate_connection(state_root: Path) -> sqlite3.Connection | None:
     take the write lock or migrate; a database that does not exist yet has no
     live heads to gate.
     """
-    database = core.ensure_state_root(Path(state_root)) / "review-conductor.sqlite3"
-    if not database.exists():
+    database = Path(state_root) / "review-conductor.sqlite3"
+    try:
+        database.stat()
+    except FileNotFoundError:
         return None
-    connection = sqlite3.connect(database, timeout=10)
+    except OSError as exc:
+        raise ServiceError("admission-gate database is unavailable") from exc
+    try:
+        connection = sqlite3.connect(
+            f"file:{database.as_posix()}?mode=ro", uri=True, timeout=10
+        )
+    except sqlite3.Error as exc:
+        # The file may have disappeared or become unreadable after the stat;
+        # that race is a failed gate, not an empty-state success.
+        raise ServiceError("admission-gate database could not be opened read-only") from exc
     connection.row_factory = sqlite3.Row
     return connection
 
@@ -613,7 +629,10 @@ def run_service_tick(
 
     if not dry_run:
         install = getattr(client, "set_authority_guard", None)
-        if install is None:
-            raise ServiceError("tick client cannot carry the admission authority guard")
+        assertion = getattr(client, "assert_authority", None)
+        if not callable(install) or not callable(assertion):
+            raise ServiceError(
+                "tick client must install and assert the admission authority guard"
+            )
         install(lambda _method, _path: require_current_bindings(config, registry))
     return userland.run_tick(config, client, notifier, dry_run=dry_run)

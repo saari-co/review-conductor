@@ -1897,6 +1897,9 @@ def dispatch_action(args: argparse.Namespace) -> dict[str, Any]:
                     )
                     connection.commit()
                     return interrupted_receipt
+                before_external_command = getattr(args, "before_external_command", None)
+                if before_external_command is not None:
+                    before_external_command(index, command)
                 result = run_command(command, f"{row['kind']} adapter step {index + 1}")
                 if row["kind"] == "openclaw.enqueue":
                     receipt = parse_json_receipt(result.stdout, f"{row['kind']} adapter step {index + 1}")

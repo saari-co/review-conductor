@@ -314,6 +314,7 @@ class GitHubAppClient:
         self._signer = signer or sign_app_jwt
         self._token: str | None = None
         self._token_expires = 0.0
+        self._token_lock = threading.Lock()
         self._authority_guard: Callable[[str, str], None] | None = None
 
     def set_authority_guard(self, guard: Callable[[str, str], None] | None) -> None:
@@ -426,7 +427,11 @@ class GitHubAppClient:
             headers["Content-Type"] = "application/json"
         # Fence immediately before the mutating request itself: token minting above
         # is a separate call, and authority may have been revoked while it ran.
-        if self._authority_guard is not None and method != "GET":
+        if (
+            self._authority_guard is not None
+            and method != "GET"
+            and operation != "installation-token"
+        ):
             self._authority_guard(method, path)
         status, raw = self._transport(
             method, self._app["api_base"] + path, headers, body, 15.0
@@ -442,34 +447,40 @@ class GitHubAppClient:
     def _installation_token(self) -> str:
         if self._token is not None and self._clock() < self._token_expires - 60:
             return self._token
-        app_jwt = self._signer(
-            self._app["app_id"], self._private_key, int(self._clock())
-        )
-        response = self._call(
-            "POST",
-            f"/app/installations/{self._app['installation_id']}/access_tokens",
-            {
-                "repositories": [self.repository.split("/", 1)[1]],
-                "permissions": {
-                    name: level
-                    for name, level in self._app["permissions"].items()
-                    if name != "metadata"
+        # A shared service client may be used by ingress and the worker. Only one
+        # thread may mint/replace an installation token; late contenders re-use
+        # the first validated result instead of racing duplicate token requests.
+        with self._token_lock:
+            if self._token is not None and self._clock() < self._token_expires - 60:
+                return self._token
+            app_jwt = self._signer(
+                self._app["app_id"], self._private_key, int(self._clock())
+            )
+            response = self._call(
+                "POST",
+                f"/app/installations/{self._app['installation_id']}/access_tokens",
+                {
+                    "repositories": [self.repository.split("/", 1)[1]],
+                    "permissions": {
+                        name: level
+                        for name, level in self._app["permissions"].items()
+                        if name != "metadata"
+                    },
                 },
-            },
-            expected={201},
-            app_jwt=app_jwt,
-        )
-        token = response.get("token")
-        expires_at = response.get("expires_at")
-        if not isinstance(token, str) or not token or not isinstance(expires_at, str):
-            raise GitHubApiError("installation token response is incomplete")
-        try:
-            expiry = dt.datetime.fromisoformat(expires_at.replace("Z", "+00:00")).timestamp()
-        except ValueError as exc:
-            raise GitHubApiError("installation token expiry is invalid") from exc
-        self._token = token
-        self._token_expires = expiry
-        return token
+                expected={201},
+                app_jwt=app_jwt,
+            )
+            token = response.get("token")
+            expires_at = response.get("expires_at")
+            if not isinstance(token, str) or not token or not isinstance(expires_at, str):
+                raise GitHubApiError("installation token response is incomplete")
+            try:
+                expiry = dt.datetime.fromisoformat(expires_at.replace("Z", "+00:00")).timestamp()
+            except ValueError as exc:
+                raise GitHubApiError("installation token expiry is invalid") from exc
+            self._token = token
+            self._token_expires = expiry
+            return token
 
     def read_policy(self, repository: str, commit: str) -> bytes:
         if repository != self.repository:
@@ -1370,6 +1381,9 @@ def drain_actions(
                 retry=action["status"] == "failed",
                 claim_owner="cp1-worker",
                 claim_lease_seconds=config["worker"]["claim_lease_seconds"],
+                before_external_command=lambda index, _command, action_id=action["action_id"]: assert_authority(
+                    client, f"openclaw.enqueue:{action_id}:step:{index + 1}"
+                ),
             )
             # Each OpenClaw dispatch is an external side effect; fence it like a
             # GitHub write so revoked authority stops the whole drain here instead

@@ -1,7 +1,9 @@
 # SMCBD shadow-pilot activation handoff
 
-Status: source candidate only; inactive; no secrets, registry, tunnel, service or
-GitHub webhook configured by this repository.
+Status: stacked live-adapter source candidate only; inactive; no secrets,
+registry, tunnel, service or GitHub webhook configured by this repository. The
+inactive admission core is reviewed separately in PR #3; this handoff belongs
+to its stacked authority-bound adapter slice.
 
 ## Verified non-secret identity
 
@@ -84,7 +86,13 @@ profile before staging or persisting a binding; a profile with
 opening gate is re-run before every external side effect (each mutating GitHub
 call after token minting, each OpenClaw dispatch, notification delivery)
 through the client's authority guard, so a revocation or profile edit after the
-gate stops the rest of that tick. Fail-closed admission conditions are
+gate stops the rest of that tick. Installation-token minting is synchronized
+but deliberately not fenced by an old binding, because ingress must be able to
+retrieve a newly promoted policy; the subsequent repository mutation is fenced
+after token minting. Checkout hydration is fenced before the checkout is
+touched and again immediately before a fetch. Both OpenClaw external commands
+and every individual notification send receive their own fresh fence.
+Fail-closed admission conditions are
 retried on the next tick; any other worker failure (database, filesystem,
 unexpected) stops the whole service with exit status 2 rather than leaving
 ingress accepting deliveries that nothing will act on. The GitHub App client

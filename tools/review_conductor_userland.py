@@ -1333,6 +1333,7 @@ def hydrate_exact_pr_head(
     action: sqlite3.Row,
     *,
     runner: CommandRunner = subprocess.run,
+    authority_client: Any | None = None,
 ) -> dict[str, Any]:
     checkout = Path(config["paths"]["blocks_checkout"])
     try:
@@ -1390,6 +1391,9 @@ def hydrate_exact_pr_head(
     available = git("cat-file", "-e", f"{head_sha}^{{commit}}")
     fetched = False
     if available.returncode != 0:
+        runtime.assert_authority(
+            authority_client, f"checkout-hydration:{action['action_id']}:fetch"
+        )
         pull_ref = f"refs/pull/{core.require_positive_int(action['pr_number'], 'PR number')}/head"
         fetched_result = git(
             "fetch",
@@ -1432,7 +1436,7 @@ def hydrate_exact_pr_head(
 
 
 def hydrate_pending_openclaw_heads(
-    config: dict[str, Any], *, dry_run: bool
+    config: dict[str, Any], *, dry_run: bool, authority_client: Any | None = None
 ) -> list[dict[str, Any]]:
     connection = core.open_database(Path(config["paths"]["state_root"]), config["github_app"]["repository"])
     try:
@@ -1466,8 +1470,18 @@ def hydrate_pending_openclaw_heads(
         ]
     outcomes: list[dict[str, Any]] = []
     for row in rows:
+        # Admission revocation is not a checkout failure. Keep the fence outside
+        # the adapter-error handler so it stops the tick instead of marking the
+        # action failed and continuing under revoked authority.
+        runtime.assert_authority(
+            authority_client, f"checkout-hydration:{row['action_id']}"
+        )
         try:
-            outcomes.append(hydrate_exact_pr_head(config, row))
+            outcomes.append(
+                hydrate_exact_pr_head(
+                    config, row, authority_client=authority_client
+                )
+            )
         except core.ContractError:
             connection = core.open_database(Path(config["paths"]["state_root"]), config["github_app"]["repository"])
             try:
@@ -1813,6 +1827,7 @@ def deliver_notifications(
     notifier: OpenClawNotifier | Any,
     *,
     dry_run: bool,
+    authority_client: Any | None = None,
 ) -> dict[str, Any]:
     queue_notifications(config)
     connection = core.open_database(Path(config["paths"]["state_root"]), config["github_app"]["repository"])
@@ -1832,6 +1847,10 @@ def deliver_notifications(
             if dry_run:
                 outcomes.append({"event_key": row["event_key"], "channel": row["channel"], "result": "planned"})
                 continue
+            runtime.assert_authority(
+                authority_client,
+                f"notification:{row['event_key']}:{row['channel']}",
+            )
             try:
                 notifier.send(row["channel"], payload["message"])
             except NotificationUnavailable as exc:
@@ -1893,7 +1912,9 @@ def run_tick(
         if dry_run
         else runtime.drain_bridge_inboxes(config)
     )
-    hydration = hydrate_pending_openclaw_heads(config, dry_run=dry_run)
+    hydration = hydrate_pending_openclaw_heads(
+        config, dry_run=dry_run, authority_client=client
+    )
     worker = runtime.drain_actions(config, client, dry_run=dry_run)
     openclaw = collect_openclaw_terminals(config, dry_run=dry_run)
     clawsweeper = collect_clawsweeper_terminals(config, client, dry_run=dry_run)
@@ -1903,12 +1924,11 @@ def run_tick(
         else runtime.drain_bridge_inboxes(config)
     )
     projection = runtime.reconcile_projection(config, client, dry_run=dry_run)
-    if not dry_run:
-        runtime.assert_authority(client, "notifications")
     notifications = deliver_notifications(
         config,
         notifier,
         dry_run=dry_run,
+        authority_client=client,
     )
     return {
         "schema": "smoky.review-conductor.userland-tick.v1",

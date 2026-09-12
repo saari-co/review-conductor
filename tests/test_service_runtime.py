@@ -1,6 +1,7 @@
 """Qualified service-owned admission, ingress and GitHub App adapter boundary."""
 from __future__ import annotations
 
+import argparse
 import base64
 import copy
 import contextlib
@@ -20,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -1047,6 +1049,17 @@ class AdmissionIngressTests(unittest.TestCase):
         with self.assertRaises(core.ContractError):
             service.run_service_tick(self.fx.app_config(), lambda: current, object(), object(), dry_run=False)
 
+        class InstallOnlyClient:
+            def set_authority_guard(self, _guard):
+                pass
+
+        with self.assertRaises(core.ContractError) as ctx:
+            service.run_service_tick(
+                self.fx.app_config(), lambda: current,
+                InstallOnlyClient(), object(), dry_run=False,
+            )
+        self.assertIn("install and assert", str(ctx.exception))
+
     # --- Invariant 1: enrollment/profile identity -------------------------------
 
     def test_profile_disabled_after_startup_fails_every_gate_closed(self):
@@ -1234,33 +1247,116 @@ class AdmissionIngressTests(unittest.TestCase):
             self.assertEqual([row["status"] for row in connection.execute("SELECT status FROM actions")], ["pending"])
         finally:
             connection.close()
-        # Notifications are fenced too: with every earlier phase neutralised, a
-        # revocation before the notification phase stops the tick there.
-        phases = []
 
-        class FencedClient:
-            def __init__(self):
-                self.guard = None
+    def test_checkout_hydration_is_fenced_before_the_checkout_is_touched(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = legacy.config_fixture(Path(temporary))
+            legacy.ingress(config, "pull_request", "hydrate-pr", legacy.pr_payload(78))
+            legacy.ingress(config, "workflow_run", "hydrate-ci", legacy.ci_payload(78, 1078))
+            touched = []
 
-            def set_authority_guard(self, guard):
-                self.guard = guard
+            class RevokedClient:
+                def assert_authority(self, operation):
+                    self.operation = operation
+                    raise service.ServiceError("revoked before hydration")
 
-            def assert_authority(self, operation):
-                phases.append(operation)
-                self.guard("SIDE_EFFECT", operation)
+            client = RevokedClient()
+            with patch.object(
+                userland, "hydrate_exact_pr_head",
+                lambda *_args, **_kwargs: touched.append(True),
+            ):
+                with self.assertRaises(core.ContractError):
+                    userland.hydrate_pending_openclaw_heads(
+                        config, dry_run=False, authority_client=client
+                    )
+            self.assertEqual(touched, [])
+            self.assertRegex(client.operation, r"^checkout-hydration:act-[0-9a-f]{32}$")
 
-        fenced = FencedClient()
-        resolutions.clear()
-        with patch.object(runtime, "drain_bridge_inboxes", neutral), \
-                patch.object(userland, "hydrate_pending_openclaw_heads", neutral), \
-                patch.object(runtime, "drain_actions", neutral), \
-                patch.object(userland, "collect_openclaw_terminals", neutral), \
-                patch.object(userland, "collect_clawsweeper_terminals", neutral), \
-                patch.object(runtime, "reconcile_projection", neutral), \
-                patch.object(userland, "deliver_notifications", lambda *a, **k: phases.append("delivered") or {}):
-            with self.assertRaises(core.ContractError):
-                service.run_service_tick(config, provider, fenced, object(), dry_run=False)
-        self.assertEqual(phases, ["notifications"])
+    def test_each_openclaw_external_command_has_a_fresh_authority_fence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = legacy.config_fixture(Path(temporary))
+            legacy.ingress(config, "pull_request", "dispatch-pr", legacy.pr_payload(79))
+            legacy.ingress(config, "workflow_run", "dispatch-ci", legacy.ci_payload(79, 1079))
+            action = legacy.action(config, 79, "openclaw.enqueue")
+            fences = []
+            commands = []
+
+            def fence(index, _command):
+                fences.append(index)
+                if index == 1:
+                    raise service.ServiceError("revoked between OpenClaw commands")
+
+            def run(command, _label):
+                commands.append(command)
+                receipt = {"result": "completed", "commit_sha": legacy.HEAD}
+                return subprocess.CompletedProcess(
+                    command, 0, stdout=json.dumps(receipt) + "\n", stderr=""
+                )
+
+            args = argparse.Namespace(
+                config=Path(config["core_config"]),
+                state_root=Path(config["paths"]["state_root"]),
+                action_id=action["action_id"],
+                source_checkout=Path(config["paths"]["blocks_checkout"]),
+                apply=True,
+                retry=False,
+                claim_owner="fixture-worker",
+                claim_lease_seconds=60,
+                before_external_command=fence,
+            )
+            with patch.object(core, "run_command", run):
+                with self.assertRaises(core.ContractError):
+                    core.dispatch_action(args)
+            self.assertEqual(fences, [0, 1])
+            self.assertEqual(len(commands), 1)
+
+    def test_each_notification_send_has_a_fresh_authority_fence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = legacy.config_fixture(Path(temporary))
+            userland.queue_operator_alert(config, "fixture-alert", "fixture message")
+            fences = []
+            sent = []
+
+            class FenceClient:
+                def assert_authority(self, operation):
+                    fences.append(operation)
+                    if len(fences) == 2:
+                        raise service.ServiceError("revoked between notifications")
+
+            class Notifier:
+                def send(self, channel, message):
+                    sent.append((channel, message))
+
+            with patch.object(userland, "queue_notifications", lambda _config: 0):
+                with self.assertRaises(core.ContractError):
+                    userland.deliver_notifications(
+                        config, Notifier(), dry_run=False,
+                        authority_client=FenceClient(),
+                    )
+            self.assertEqual(len(fences), 2)
+            self.assertEqual(len(sent), 1)
+
+    def test_gate_database_is_read_only_and_disappearance_fails_closed(self):
+        self.fx.ingest("initial", self.fx.payload())
+        database = self.fx.state / "review-conductor.sqlite3"
+        connection = service._gate_connection(self.fx.state)
+        self.assertIsNotNone(connection)
+        try:
+            with self.assertRaises(sqlite3.OperationalError):
+                connection.execute("CREATE TABLE authority_bypass(value TEXT)")
+        finally:
+            connection.close()
+
+        real_connect = sqlite3.connect
+
+        def disappear_then_open(*args, **kwargs):
+            database.unlink()
+            return real_connect(*args, **kwargs)
+
+        with patch.object(service.sqlite3, "connect", disappear_then_open):
+            with self.assertRaises(core.ContractError) as ctx:
+                service._gate_connection(self.fx.state)
+        self.assertIn("could not be opened read-only", str(ctx.exception))
 
     # --- Invariant 6: evidence accuracy --------------------------------------------
 
@@ -1339,6 +1435,19 @@ class AdmissionIngressTests(unittest.TestCase):
         with self.assertRaises(core.ContractError):
             service.run_service_tick({**self.fx.app_config(), "github_app": {**self.fx.app_config()["github_app"], "app_id": APP_ID + 1}},
                                      self.fx.registry(), object(), object(), dry_run=True)
+
+        original = json.loads(self.fx.config_path.read_text())
+        for key, value in (
+            ("repository", "dinkuskit/blocks"),
+            ("repository_id", REPOSITORY_ID + 1),
+        ):
+            changed = copy.deepcopy(original)
+            changed[key] = value
+            self.fx.config_path.write_text(json.dumps(changed) + "\n")
+            with self.subTest(core_identity=key), self.assertRaises(core.ContractError) as ctx:
+                service.require_profile_enrolled(self.fx.app_config(), self.fx.registry())
+            self.assertIn("core repository identity contradicts", str(ctx.exception))
+        self.fx.config_path.write_text(json.dumps(original) + "\n")
 
     def test_reviewer_actors_come_from_enrollment_not_the_profile(self):
         self.fx.ingest("initial", self.fx.payload())
@@ -2180,9 +2289,9 @@ MUTANTS = [
     (
         "deliver notifications without the authority fence",
         "tools/review_conductor_userland.py",
-        '    if not dry_run:\n        runtime.assert_authority(client, "notifications")\n',
+        '            runtime.assert_authority(\n                authority_client,\n                f"notification:{row[\'event_key\']}:{row[\'channel\']}",\n            )\n',
         "",
-        "AdmissionIngressTests.test_openclaw_dispatch_and_notifications_are_fenced_by_the_authority_guard",
+        "AdmissionIngressTests.test_each_notification_send_has_a_fresh_authority_fence",
     ),
     (
         "assert automatic redelivery of a 503",
@@ -2194,7 +2303,7 @@ MUTANTS = [
     (
         "skip the authority guard before mutating GitHub calls",
         "tools/review_conductor_runtime.py",
-        "        if self._authority_guard is not None and method != \"GET\":\n            self._authority_guard(method, path)\n",
+        '        if (\n            self._authority_guard is not None\n            and method != "GET"\n            and operation != "installation-token"\n        ):\n            self._authority_guard(method, path)\n',
         "        pass\n",
         "AdmissionIngressTests.test_tick_side_effects_revalidate_admission_before_each_mutating_call",
     ),
@@ -2203,6 +2312,62 @@ MUTANTS = [
         "tools/service_runtime.py",
         "        install(lambda _method, _path: require_current_bindings(config, registry))\n",
         "        pass\n",
+        "AdmissionIngressTests.test_tick_side_effects_revalidate_admission_before_each_mutating_call",
+    ),
+    (
+        "allow concurrent installation-token cache replacement",
+        "tools/review_conductor_runtime.py",
+        "        with self._token_lock:\n            if self._token is not None and self._clock() < self._token_expires - 60:\n",
+        "        if True:\n            if self._token is not None and self._clock() < self._token_expires - 60:\n",
+        "GitHubAdapterTests.test_token_cache_is_synchronized_and_policy_fetch_is_not_binding_fenced",
+    ),
+    (
+        "fence installation-token minting under the stale binding",
+        "tools/review_conductor_runtime.py",
+        '            and operation != "installation-token"\n',
+        "",
+        "GitHubAdapterTests.test_token_cache_is_synchronized_and_policy_fetch_is_not_binding_fenced",
+    ),
+    (
+        "ignore the reloaded core repository identity",
+        "tools/service_runtime.py",
+        '    if (\n        core_config.get("repository") != enrolled.repository\n        or core_config.get("repository_id") != enrolled.repository_id\n    ):\n        raise ServiceError("runtime core repository identity contradicts service enrollment")\n',
+        "    if False:\n        pass\n",
+        "AdmissionIngressTests.test_worker_gate_requires_the_profile_to_be_the_registry_enrollment",
+    ),
+    (
+        "open the authority gate database read-write",
+        "tools/service_runtime.py",
+        '        connection = sqlite3.connect(\n            f"file:{database.as_posix()}?mode=ro", uri=True, timeout=10\n        )\n',
+        "        connection = sqlite3.connect(database, timeout=10)\n",
+        "AdmissionIngressTests.test_gate_database_is_read_only_and_disappearance_fails_closed",
+    ),
+    (
+        "treat a disappearing authority database as empty state",
+        "tools/service_runtime.py",
+        '        raise ServiceError("admission-gate database could not be opened read-only") from exc\n',
+        "        return None\n",
+        "AdmissionIngressTests.test_gate_database_is_read_only_and_disappearance_fails_closed",
+    ),
+    (
+        "touch the checkout before a fresh authority fence",
+        "tools/review_conductor_userland.py",
+        '        runtime.assert_authority(\n            authority_client, f"checkout-hydration:{row[\'action_id\']}"\n        )\n',
+        "",
+        "AdmissionIngressTests.test_checkout_hydration_is_fenced_before_the_checkout_is_touched",
+    ),
+    (
+        "run both OpenClaw commands under one stale fence",
+        "tools/review_conductor.py",
+        '                before_external_command = getattr(args, "before_external_command", None)\n                if before_external_command is not None:\n                    before_external_command(index, command)\n',
+        "",
+        "AdmissionIngressTests.test_each_openclaw_external_command_has_a_fresh_authority_fence",
+    ),
+    (
+        "accept a live client that cannot assert authority",
+        "tools/service_runtime.py",
+        "        if not callable(install) or not callable(assertion):\n",
+        "        if not callable(install):\n",
         "AdmissionIngressTests.test_tick_side_effects_revalidate_admission_before_each_mutating_call",
     ),
     (
@@ -2298,6 +2463,60 @@ class GitHubAdapterTests(unittest.TestCase):
             {"actions": "write", "checks": "write", "contents": "read", "pull_requests": "write"},
         )
         self.assertTrue(content_call[1].endswith(f"/.review-conductor.json?ref={POLICY_COMMIT}"))
+
+    def test_token_cache_is_synchronized_and_policy_fetch_is_not_binding_fenced(self):
+        token_calls = []
+        call_lock = threading.Lock()
+
+        def transport(method, url, headers, body, timeout):
+            if url.endswith("/access_tokens"):
+                with call_lock:
+                    token_calls.append(url)
+                # Hold the first mint long enough for every competing caller to
+                # reach the cache boundary; without the lock they all mint.
+                time.sleep(0.05)
+                return 201, json.dumps(
+                    {"token": "fixture-token", "expires_at": "2099-01-01T00:00:00Z"}
+                ).encode()
+            content = base64.b64encode(self.fx.policy).decode()
+            return 200, json.dumps({"encoding": "base64", "content": content}).encode()
+
+        client = runtime.GitHubAppClient(
+            self.fx.app_config(), "fixture-private-key", transport=transport,
+            signer=lambda *_: "fixture-jwt",
+        )
+        start = threading.Barrier(9)
+        results = []
+
+        def get_token():
+            start.wait()
+            results.append(client._installation_token())
+
+        workers = [threading.Thread(target=get_token) for _ in range(8)]
+        for worker in workers:
+            worker.start()
+        start.wait()
+        for worker in workers:
+            worker.join(timeout=2)
+            self.assertFalse(worker.is_alive())
+        self.assertEqual(results, ["fixture-token"] * 8)
+        self.assertEqual(len(token_calls), 1)
+
+        # A stale old binding must not fence the installation-token POST or the
+        # read-only policy fetch needed to admit the promoted policy. A later
+        # repository mutation is still fenced after token minting.
+        guarded = runtime.GitHubAppClient(
+            self.fx.app_config(), "fixture-private-key", transport=transport,
+            signer=lambda *_: "fixture-jwt",
+        )
+        guarded.set_authority_guard(
+            lambda _method, _path: (_ for _ in ()).throw(
+                service.ServiceError("old binding is stale")
+            )
+        )
+        self.assertEqual(guarded.read_policy(REPOSITORY, POLICY_COMMIT), self.fx.policy)
+        with self.assertRaises(core.ContractError):
+            guarded.create_check("OpenClaw Review Rail", HEAD, "fixture", "queued")
 
     def test_policy_reader_and_check_publisher_cannot_cross_repository_or_merge(self):
         # The transport would happily answer anything; the allowlist must stop the call.
