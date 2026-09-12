@@ -154,24 +154,44 @@ synthetic signed POST reaches the service without logging its body or signature.
 
 ## Exact remaining GitHub browser actions
 
-Perform these only after the source is reviewed/merged, the isolated service and
-HTTPS edge are healthy, the target policy is owner-approved, and activation is
-explicitly authorized:
+Use the following staged sequence. Completing one stage does not authorize the
+next stage.
 
-1. Open the App's **General** settings. Confirm visibility is **Any account**;
-   do not publish it to Marketplace.
+### Stage 1: credential prerequisites and App permission
+
+1. Open the App's **General** settings. Confirm it remains restricted to
+   `saari-co`; do not change visibility or publish it to Marketplace.
 2. Under repository permissions, add **Contents: Read-only**. Confirm the exact
    permission list above and no additional permissions. Keep event subscriptions
    to `pull_request` and `workflow_run` only.
 3. Confirm installation `161027021` still uses **Only select repositories** and
    lists only `saari-co/openclaw-smcbd-suite`.
 4. Generate the private key and transfer it with the 1Password procedure above.
-5. Set the webhook URL to the qualified HTTPS URL, fill the independently stored
+
+### Stage 2: service and HTTPS qualification, webhook disabled
+
+5. Provision the isolated service and proposed HTTPS route using the protected
+   credentials. Keep the GitHub App webhook disabled and its URL empty.
+6. Verify service health, TLS, loopback routing, exact deployed source, isolated
+   state/queue/proof paths, and a synthetic signed POST without logging secrets.
+
+### Stage 3: separately authorized webhook activation
+
+7. Obtain an explicit SMCBD webhook-activation go/no-go.
+8. Set the webhook URL to the qualified HTTPS URL, fill the independently stored
    webhook secret through 1Password, keep SSL verification enabled, then enable
    **Active** and save.
-6. Use GitHub's Recent Deliveries view to confirm one authenticated delivery is
+9. Use GitHub's Recent Deliveries view to confirm one authenticated delivery is
    accepted. Redeliver the same event and verify the service reports a duplicate
-   without producing a second review action.
+   without producing a second review action. Also prove stale-head evidence cannot
+   advance or publish a current rail.
+
+### Stage 4: separately authorized check cutover
+
+10. Complete shadow qualification with existing required-check bindings unchanged.
+11. Obtain a distinct cutover go/no-go. Fence every prior authoritative writer,
+    then rebind only the qualified rail checks to the Conductor App in one reviewed
+    change. Re-read protection and verify the exact issuers afterward.
 
 Do not change branch protection during these actions. SMCBD's required `CI`,
 `OpenClaw Review Rail` and `ClawSweeper Review Rail` remain bound to GitHub
@@ -196,7 +216,10 @@ Activation remains blocked until all are true:
 
 Installation alone is never activation. Fixture PASS is never review clearance.
 During shadow qualification, App `4916376` may publish its genuine rail checks,
-but Actions App `15368` remains the required issuer. Verify clean, findings,
+but Actions App `15368` remains the required issuer. OpenClaw and ClawSweeper
+retain native detailed findings/comments; the Conductor alone publishes the two
+authoritative rail check names after validating their exact-revision evidence.
+Verify clean, findings,
 timeout, replay, stale head/base/epoch, cross-installation and policy-promotion
 cases before proposing cutover.
 

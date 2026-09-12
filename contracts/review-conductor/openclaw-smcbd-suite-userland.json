@@ -130,10 +130,10 @@
       "Authoritative repository-specific reviewer identities are not enrolled.",
       "GitHub App 4916376 installation 161027021 lacks the required Contents: read permission for approved-policy retrieval.",
       "Dedicated webhook, GitHub App private-key and external-review credentials are not provisioned.",
-      "The target default branch does not yet contain an owner-approved .review-conductor.json commit/hash.",
+      "The owner-approved target .review-conductor.json commit/hash is not yet promoted into the external enrollment registry.",
       "Dedicated ingress and tunnel are not provisioned.",
       "Private exact-tuple comprehensive ClawSweeper workflow/artifact adapter is not installed or qualified.",
-      "Main has only bootstrap README; CI and rail placeholders remain on PR #3.",
+      "The SMCBD shadow pilot and genuine exact-revision reviewer producers are not yet qualified.",
       "Conductor check ownership and required-check App binding require separately authorized target-repository changes."
     ]
   },
