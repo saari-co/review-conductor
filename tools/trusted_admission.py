@@ -60,6 +60,12 @@ def _sha256(value, label):
     return value
 
 
+def _actor(value, label):
+    if not isinstance(value, str) or not value or len(value) > 200 or value.strip() != value:
+        _fail(f"{label} must be a non-empty bounded actor identity")
+    return value
+
+
 @dataclass(frozen=True)
 class Enrollment:
     repository: str
@@ -69,6 +75,8 @@ class Enrollment:
     installation_account: str
     approved_policy_commit: str
     approved_policy_sha256: str
+    reviewer_openclaw: str
+    reviewer_clawsweeper: str
 
     def __post_init__(self):
         if not isinstance(self.repository, str) or self.repository not in INITIAL_ENROLLMENT_SCOPE:
@@ -81,6 +89,15 @@ class Enrollment:
             _fail("installation account must own the enrolled repository")
         _sha1(self.approved_policy_commit, "approved policy commit")
         _sha256(self.approved_policy_sha256, "approved policy sha256")
+        _actor(self.reviewer_openclaw, "OpenClaw reviewer actor")
+        _actor(self.reviewer_clawsweeper, "ClawSweeper reviewer actor")
+        if self.reviewer_openclaw == self.reviewer_clawsweeper:
+            _fail("reviewer actors must be distinct")
+
+    @property
+    def reviewers(self):
+        """Authoritative reviewer actors in the engine's review_policy shape."""
+        return {"openclaw": self.reviewer_openclaw, "clawsweeper": self.reviewer_clawsweeper}
 
 
 @dataclass(frozen=True)
@@ -128,7 +145,7 @@ def load_registry(raw):
         _fail("registry enrollments must be a list")
     enrollments = []
     for item in value["enrollments"]:
-        _exact(item, ["repository", "repository_id", "github_app", "approved_policy"], "enrollment")
+        _exact(item, ["repository", "repository_id", "github_app", "approved_policy", "reviewers"], "enrollment")
         repository = item["repository"]
         if not isinstance(repository, str) or repository not in INITIAL_ENROLLMENT_SCOPE:
             _fail("repository is outside the initial enrollment scope")
@@ -137,8 +154,10 @@ def load_registry(raw):
         _exact(github_app, ["id", "installation_id", "installation_account"], "GitHub App")
         policy = item["approved_policy"]
         _exact(policy, ["commit", "sha256"], "approved policy")
+        reviewers = item["reviewers"]
+        _exact(reviewers, ["openclaw", "clawsweeper"], "reviewers")
         enrollments.append(Enrollment(repository, repository_id, github_app["id"], github_app["installation_id"], github_app["installation_account"],
-                                      policy["commit"], policy["sha256"]))
+                                      policy["commit"], policy["sha256"], reviewers["openclaw"], reviewers["clawsweeper"]))
     return Registry(tuple(enrollments))
 
 

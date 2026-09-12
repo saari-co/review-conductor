@@ -39,13 +39,16 @@ activation.**
 The live enrollment registry is an external same-user regular file with mode
 exactly `0600`, never a target-repository file. The entrypoint refuses a registry
 located inside this source tree, the target checkout, or the state/proof roots,
-requires a same-user parent directory that is not group/world writable, opens the
-file without following symlinks and validates and reads the opened descriptor,
+walks the canonical path with held directory descriptors (refusing any symlink
+component and any forbidden root by device/inode), requires a same-user parent
+directory that is not group/world writable, opens the leaf relative to that held
+parent without following symlinks, validates and reads the opened descriptor,
 and re-reads and re-validates the file on every delivery and worker tick, so a
 promotion or revocation takes effect without restart and a registry that stops
 validating fails every delivery and tick closed. It must contain exactly the repository/name/ID,
 App/installation/account and an owner-promoted default-branch policy commit plus
-the SHA-256 of the exact `.review-conductor.json` bytes. The loader accepts only
+the SHA-256 of the exact `.review-conductor.json` bytes, and the authoritative
+OpenClaw/ClawSweeper reviewer actors. The loader accepts only
 the two owner-approved repository names; the initial deployed registry should
 contain SMCBD only. `dinkuskit/blocks` is added after the pilot under a separate
 installation and migration decision.
@@ -150,7 +153,9 @@ Activation remains blocked until all are true:
 - App Contents permission is corrected;
 - SMCBD `main` contains an owner-approved `.review-conductor.json`, and its exact
   commit/hash is promoted into the external registry;
-- authoritative OpenClaw and ClawSweeper reviewer actor identities are recorded;
+- authoritative OpenClaw and ClawSweeper reviewer actor identities are recorded
+  in the external registry's `reviewers` block and the engine profile agrees
+  exactly;
 - dedicated 1Password service accounts, private key, webhook secret and tunnel
   connector are provisioned;
 - the isolated HTTPS edge and local service health are verified;

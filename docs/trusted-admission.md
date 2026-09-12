@@ -24,7 +24,8 @@ to this repository; tests build synthetic registries in memory.
         "installation_id": 0,
         "installation_account": "dinkuskit"
       },
-      "approved_policy": {"commit": "<40 lowercase hex>", "sha256": "<64 lowercase hex>"}
+      "approved_policy": {"commit": "<40 lowercase hex>", "sha256": "<64 lowercase hex>"},
+      "reviewers": {"openclaw": "<actor>", "clawsweeper": "<actor>"}
     }
   ]
 }
@@ -49,6 +50,11 @@ Rules enforced by `load_registry`:
   exact manifest bytes at that commit. Both are required.
 - Repository names, numeric IDs and installation IDs must be unique across the
   registry.
+- `reviewers.openclaw` and `reviewers.clawsweeper` are the authoritative
+  reviewer actor identities (non-empty, bounded, distinct). The service refuses
+  to serve, tick or accept deliveries while the engine profile's
+  `review_policy.reviewers` differs from the enrollment, so a profile cannot
+  supply or change the actors the engine trusts.
 
 `Registry.lookup(repository, repository_id, app_id, installation_id)` succeeds
 only when all four agree with one enrollment; strings, booleans or a neighbouring

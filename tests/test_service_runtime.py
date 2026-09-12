@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -38,6 +39,7 @@ POLICY_COMMIT = "a" * 40
 BASE = legacy.BASE
 HEAD = legacy.HEAD
 SECRET = "fixture-service-webhook-secret"
+REVIEWERS = {"openclaw": "fixture-openclaw", "clawsweeper": "fixture-clawsweeper"}
 
 
 class ServiceFixture:
@@ -51,7 +53,7 @@ class ServiceFixture:
         )
         config["review_policy"].update(
             enabled=True,
-            reviewers={"openclaw": "fixture-openclaw", "clawsweeper": "fixture-clawsweeper"},
+            reviewers=dict(REVIEWERS),
         )
         self.config_path.write_text(json.dumps(config) + "\n")
         self.reads: list[tuple[str, str]] = []
@@ -73,6 +75,7 @@ class ServiceFixture:
                         "commit": POLICY_COMMIT,
                         "sha256": hashlib.sha256(raw).hexdigest(),
                     },
+                    "reviewers": dict(REVIEWERS),
                 }
             ],
         }
@@ -336,6 +339,7 @@ class AdmissionIngressTests(unittest.TestCase):
                                "installation_account": "saari-co"},
                 "approved_policy": {"commit": POLICY_COMMIT,
                                     "sha256": hashlib.sha256(self.fx.policy).hexdigest()},
+                "reviewers": dict(REVIEWERS),
             }],
         }
         path = self.fx.root / "registry.json"
@@ -391,6 +395,7 @@ class AdmissionIngressTests(unittest.TestCase):
                                    "installation_account": "saari-co"},
                     "approved_policy": {"commit": POLICY_COMMIT,
                                         "sha256": hashlib.sha256(self.fx.policy).hexdigest()},
+                    "reviewers": dict(REVIEWERS),
                 }],
             })
 
@@ -403,9 +408,11 @@ class AdmissionIngressTests(unittest.TestCase):
         real_fstat = os.fstat
 
         def racing_fstat(descriptor):
-            # A same-user writer replaces the pathname right after validation.
+            # A same-user writer replaces the pathname right after the opened file
+            # has been validated.
             metadata = real_fstat(descriptor)
-            os.replace(swapped, path)
+            if stat.S_ISREG(metadata.st_mode) and swapped.exists():
+                os.replace(swapped, path)
             return metadata
 
         with patch.object(entrypoint.os, "fstat", racing_fstat):
@@ -414,6 +421,58 @@ class AdmissionIngressTests(unittest.TestCase):
         # the pathname points at afterwards.
         self.assertEqual(loaded.enrollments[0].app_id, APP_ID)
         self.assertEqual(entrypoint.read_service_registry(path).enrollments[0].app_id, APP_ID + 1)
+
+    def test_registry_ancestor_swapped_for_symlink_after_canonicalization_is_refused(self):
+        document = json.dumps({
+            "schema": admission.REGISTRY_SCHEMA,
+            "enrollments": [{
+                "repository": REPOSITORY, "repository_id": REPOSITORY_ID,
+                "github_app": {"id": APP_ID, "installation_id": INSTALLATION_ID,
+                               "installation_account": "saari-co"},
+                "approved_policy": {"commit": POLICY_COMMIT,
+                                    "sha256": hashlib.sha256(self.fx.policy).hexdigest()},
+                "reviewers": dict(REVIEWERS),
+            }],
+        })
+        root = self.fx.root.resolve()
+        parent = root / "service"
+        parent.mkdir()
+        path = parent / "registry.json"
+        path.write_text(document)
+        path.chmod(0o600)
+        elsewhere = root / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "registry.json").write_text(document)
+        (elsewhere / "registry.json").chmod(0o600)
+        real_open = os.open
+        swapped = threading.Event()
+
+        def racing_open(name, flags, *args, **kwargs):
+            # After canonicalization but before the walk reaches it, a same-user
+            # writer replaces the validated parent directory with a symlink.
+            if not swapped.is_set() and "dir_fd" in kwargs:
+                swapped.set()
+                os.rename(parent, root / "service-moved")
+                parent.symlink_to(elsewhere)
+            return real_open(name, flags, *args, **kwargs)
+
+        with patch.object(entrypoint.os, "open", racing_open):
+            with self.assertRaises(core.ContractError) as ctx:
+                entrypoint.read_service_registry(path)
+        self.assertTrue(swapped.is_set())
+        self.assertIn("component is unavailable or is a symlink", str(ctx.exception))
+        # Once the parent is a genuine directory again the same path loads normally.
+        parent.unlink()
+        os.rename(root / "service-moved", parent)
+        self.assertEqual(entrypoint.read_service_registry(path).enrollments[0].app_id, APP_ID)
+        # Forbidden roots are recognised by device/inode on the held directories,
+        # independent of the pathname comparison.
+        with self.assertRaises(core.ContractError) as ctx:
+            entrypoint._registry_bytes(path, [parent])
+        self.assertIn("service-owned", str(ctx.exception))
+        with self.assertRaises(core.ContractError) as ctx:
+            entrypoint._registry_bytes(path, [root])
+        self.assertIn("service-owned", str(ctx.exception))
 
     def test_worker_gate_requires_the_profile_to_be_the_registry_enrollment(self):
         self.fx.ingest("initial", self.fx.payload())
@@ -430,6 +489,46 @@ class AdmissionIngressTests(unittest.TestCase):
             service.run_service_tick({**self.fx.app_config(), "github_app": {**self.fx.app_config()["github_app"], "app_id": APP_ID + 1}},
                                      self.fx.registry(), object(), object(), dry_run=True)
 
+    def test_reviewer_actors_come_from_enrollment_not_the_profile(self):
+        self.fx.ingest("initial", self.fx.payload())
+        service.require_current_bindings(self.fx.app_config(), self.fx.registry())
+        core_config = json.loads(self.fx.config_path.read_text())
+        for reviewers in [
+            {"openclaw": "attacker-openclaw", "clawsweeper": REVIEWERS["clawsweeper"]},
+            {"openclaw": REVIEWERS["openclaw"], "clawsweeper": "attacker-clawsweeper"},
+            {"openclaw": REVIEWERS["clawsweeper"], "clawsweeper": REVIEWERS["openclaw"]},
+        ]:
+            changed = copy.deepcopy(core_config)
+            changed["review_policy"]["reviewers"] = reviewers
+            self.fx.config_path.write_text(json.dumps(changed) + "\n")
+            with self.subTest(reviewers=reviewers, gate="tick"), self.assertRaises(core.ContractError) as ctx:
+                service.require_current_bindings(self.fx.app_config(), self.fx.registry())
+            self.assertIn("reviewer identities contradict", str(ctx.exception))
+            fresh = self.fx.payload()
+            fresh["pull_request"]["head"]["sha"] = "e" * 40
+            fresh["pull_request"]["updated_at"] = "2026-08-30T20:11:00Z"
+            with self.subTest(reviewers=reviewers, gate="delivery"), self.assertRaises(core.ContractError):
+                self.fx.ingest("changed-reviewers", fresh)
+            self.assertEqual([row["head_sha"] for row in self.fx.binding_rows()], [HEAD])
+        self.fx.config_path.write_text(json.dumps(core_config) + "\n")
+        service.require_current_bindings(self.fx.app_config(), self.fx.registry())
+        # Registry documents without reviewers, with duplicate or malformed actors, are refused.
+        base = json.loads(json.dumps({"schema": admission.REGISTRY_SCHEMA, "enrollments": [{
+            "repository": REPOSITORY, "repository_id": REPOSITORY_ID,
+            "github_app": {"id": APP_ID, "installation_id": INSTALLATION_ID, "installation_account": "saari-co"},
+            "approved_policy": {"commit": POLICY_COMMIT, "sha256": hashlib.sha256(self.fx.policy).hexdigest()},
+            "reviewers": dict(REVIEWERS)}]}))
+        bad = []
+        item = copy.deepcopy(base); del item["enrollments"][0]["reviewers"]; bad.append(item)
+        item = copy.deepcopy(base); item["enrollments"][0]["reviewers"] = {"openclaw": "same", "clawsweeper": "same"}; bad.append(item)
+        item = copy.deepcopy(base); item["enrollments"][0]["reviewers"] = {"openclaw": "", "clawsweeper": "x"}; bad.append(item)
+        item = copy.deepcopy(base); item["enrollments"][0]["reviewers"] = {"openclaw": 12, "clawsweeper": "x"}; bad.append(item)
+        item = copy.deepcopy(base); item["enrollments"][0]["reviewers"] = {"openclaw": "a", "clawsweeper": "b", "human": "c"}; bad.append(item)
+        item = copy.deepcopy(base); item["enrollments"][0]["reviewers"] = {"openclaw": " a", "clawsweeper": "b"}; bad.append(item)
+        for index, item in enumerate(bad):
+            with self.subTest(index=index), self.assertRaises(admission.AdmissionError):
+                admission.load_registry(json.dumps(item).encode())
+
     def test_registry_cannot_live_in_source_checkout_state_or_proof_roots(self):
         document = json.loads(json.dumps({
             "schema": admission.REGISTRY_SCHEMA,
@@ -439,6 +538,7 @@ class AdmissionIngressTests(unittest.TestCase):
                                "installation_account": "saari-co"},
                 "approved_policy": {"commit": POLICY_COMMIT,
                                     "sha256": hashlib.sha256(self.fx.policy).hexdigest()},
+                "reviewers": dict(REVIEWERS),
             }],
         }))
         root = self.fx.root.resolve()
@@ -494,6 +594,7 @@ class AdmissionIngressTests(unittest.TestCase):
                                    "installation_account": "saari-co"},
                     "approved_policy": {"commit": POLICY_COMMIT,
                                         "sha256": hashlib.sha256(policy).hexdigest()},
+                    "reviewers": dict(REVIEWERS),
                 }],
             }
             path.write_text(json.dumps(document))
@@ -501,6 +602,7 @@ class AdmissionIngressTests(unittest.TestCase):
 
         write_registry(self.fx.policy)
         provider = entrypoint.registry_provider(path, {
+            "core_config": str(self.fx.config_path),
             "paths": {key: str(self.fx.root.resolve() / key) for key in (
                 "blocks_checkout", "state_root", "proof_root")},
             "github_app": self.fx.app_config()["github_app"],
@@ -774,6 +876,7 @@ class EntrypointTests(unittest.TestCase):
                 "github_app": {"id": APP_ID + 1, "installation_id": INSTALLATION_ID,
                                "installation_account": "saari-co"},
                 "approved_policy": {"commit": POLICY_COMMIT, "sha256": "f" * 64},
+                "reviewers": dict(REVIEWERS),
             }],
         }
         registry.write_text(json.dumps(document))
@@ -782,6 +885,14 @@ class EntrypointTests(unittest.TestCase):
             code, stderr = self.run_main(registry)
         self.assertEqual(code, 2)
         self.assertIn("runtime profile is not enrolled in the service registry", stderr)
+        # The registry, not the profile, names the reviewer actors the engine trusts.
+        document["enrollments"][0]["github_app"]["id"] = APP_ID
+        document["enrollments"][0]["reviewers"] = {"openclaw": "someone-else", "clawsweeper": REVIEWERS["clawsweeper"]}
+        registry.write_text(json.dumps(document))
+        with patch.object(userland, "read_inherited_value", side_effect=AssertionError("credentials were read")):
+            code, stderr = self.run_main(registry)
+        self.assertEqual(code, 2)
+        self.assertIn("reviewer identities contradict service enrollment", stderr)
         registry.chmod(0o640)
         with patch.object(userland, "read_inherited_value", side_effect=AssertionError("credentials were read")):
             code, stderr = self.run_main(registry)
@@ -800,6 +911,7 @@ class EntrypointTests(unittest.TestCase):
                                "installation_account": "saari-co"},
                 "approved_policy": {"commit": POLICY_COMMIT,
                                     "sha256": hashlib.sha256((ROOT / "examples/smcbd.review-conductor.json").read_bytes()).hexdigest()},
+                "reviewers": dict(REVIEWERS),
             }],
         }))
         registry.chmod(0o600)
@@ -834,6 +946,7 @@ class EntrypointTests(unittest.TestCase):
                                "installation_account": "saari-co"},
                 "approved_policy": {"commit": POLICY_COMMIT,
                                     "sha256": hashlib.sha256((ROOT / "examples/smcbd.review-conductor.json").read_bytes()).hexdigest()},
+                "reviewers": dict(REVIEWERS),
             }],
         }))
         registry.chmod(0o600)
@@ -890,15 +1003,15 @@ MUTANTS = [
     (
         "ignore the configured App identity",
         "tools/service_runtime.py",
-        '    app_id = core.require_positive_int(app.get("app_id"), "service GitHub App id")\n',
-        "    app_id = registry.enrollments[0].app_id\n",
+        '            app.get("repository"), app.get("repository_id"), app.get("app_id"), app.get("installation_id")\n',
+        '            app.get("repository"), app.get("repository_id"), registry.enrollments[0].app_id, app.get("installation_id")\n',
         "AdmissionIngressTests.test_configured_app_identity_must_match_the_registry",
     ),
     (
         "admit a foreign installation",
         "tools/service_runtime.py",
         "    installation_id = _installation_id(payload)\n",
-        "    installation_id = registry.enrollments[0].installation_id\n",
+        "    installation_id = enrolled.installation_id\n",
         "AdmissionIngressTests.test_unknown_installation_repository_and_duplicate_json_fail_before_state",
     ),
     (
@@ -932,8 +1045,8 @@ MUTANTS = [
     (
         "skip the service enrollment check in the entrypoint",
         "tools/service_entrypoint.py",
-        "        except admission.AdmissionError as exc:\n            raise service.ServiceError(\n                \"runtime profile is not enrolled in the service registry\"\n            ) from exc\n",
-        "        except admission.AdmissionError:\n            pass\n",
+        "        service.require_profile_enrolled(config, registry)\n        return registry\n",
+        "        return registry\n",
         "EntrypointTests.test_enabled_profile_still_requires_registry_agreement_before_credentials",
     ),
     (
@@ -953,8 +1066,8 @@ MUTANTS = [
     (
         "accept a registry inside a checkout or state root",
         "tools/service_entrypoint.py",
-        "        if resolved == root or resolved.is_relative_to(root):\n",
-        "        if False:\n",
+        "            if (metadata.st_dev, metadata.st_ino) in forbidden:\n",
+        "            if False:\n",
         "AdmissionIngressTests.test_registry_cannot_live_in_source_checkout_state_or_proof_roots",
     ),
     (
@@ -1005,6 +1118,20 @@ MUTANTS = [
         "    require_profile_enrolled(config, registry)\n",
         "    pass\n",
         "AdmissionIngressTests.test_worker_gate_requires_the_profile_to_be_the_registry_enrollment",
+    ),
+    (
+        "follow a symlinked ancestor while walking the registry path",
+        "tools/service_entrypoint.py",
+        "                following = os.open(name, directory_flags, dir_fd=held)\n",
+        "                following = os.open(name, directory_flags & ~os.O_NOFOLLOW, dir_fd=held)\n",
+        "AdmissionIngressTests.test_registry_ancestor_swapped_for_symlink_after_canonicalization_is_refused",
+    ),
+    (
+        "trust the profile's reviewer actors instead of enrollment",
+        "tools/service_runtime.py",
+        '    if review_policy.get("reviewers") != enrolled.reviewers:\n        raise ServiceError("runtime reviewer identities contradict service enrollment")\n',
+        "    pass\n",
+        "AdmissionIngressTests.test_reviewer_actors_come_from_enrollment_not_the_profile",
     ),
     (
         "let the worker die silently on operational failure",

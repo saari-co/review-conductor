@@ -58,25 +58,28 @@ def _installation_id(payload: dict[str, Any]) -> int:
 
 
 def preflight_enrollment(
-    config: dict[str, Any], registry: admission.Registry, payload: dict[str, Any]
+    config: dict[str, Any],
+    registry: admission.Registry,
+    payload: dict[str, Any],
+    core_config: dict[str, Any] | None = None,
 ) -> admission.Enrollment:
-    """Reject unknown App/install/repository combinations before engine mutation."""
-    app = core.require_object(config.get("github_app"), "service GitHub App config")
+    """Reject deliveries outside the running profile's enrollment before engine mutation.
+
+    The profile resolves to exactly one enrollment (App, installation, repository
+    and reviewer actors all agreeing); the delivery must then name that exact
+    repository, numeric ID and installation.
+    """
+    enrolled = require_profile_enrolled(config, registry, core_config)
     repository = core.require_object(payload.get("repository"), "payload repository")
     name = core.require_text(repository.get("full_name"), "payload repository name", 200)
     numeric_id = core.require_positive_int(repository.get("id"), "payload repository id")
-    app_id = core.require_positive_int(app.get("app_id"), "service GitHub App id")
     installation_id = _installation_id(payload)
-    try:
-        enrolled = registry.lookup(name, numeric_id, app_id, installation_id)
-    except admission.AdmissionError as exc:
-        raise ServiceError("GitHub delivery is outside trusted service enrollment") from exc
     if (
-        app.get("repository") != enrolled.repository
-        or app.get("repository_id") != enrolled.repository_id
-        or app.get("installation_id") != enrolled.installation_id
+        name != enrolled.repository
+        or numeric_id != enrolled.repository_id
+        or installation_id != enrolled.installation_id
     ):
-        raise ServiceError("runtime profile contradicts trusted service enrollment")
+        raise ServiceError("GitHub delivery is outside trusted service enrollment")
     return enrolled
 
 
@@ -263,7 +266,7 @@ def ingest_service_delivery(
     payload = _strict_payload(body)
     core_config = core.load_config(config_path)
     registry = resolve_registry(registry)
-    enrolled = preflight_enrollment(service_config, registry, payload)
+    enrolled = preflight_enrollment(service_config, registry, payload, core_config)
     if (
         core_config["repository"] != enrolled.repository
         or core_config["repository_id"] != enrolled.repository_id
@@ -333,15 +336,31 @@ def binding_for_current_head(
     return dict(row)
 
 
-def require_profile_enrolled(config: dict[str, Any], registry: admission.Registry) -> admission.Enrollment:
-    """The runtime profile's App/installation/repository must be the registry's enrollment."""
+def require_profile_enrolled(
+    config: dict[str, Any],
+    registry: admission.Registry,
+    core_config: dict[str, Any] | None = None,
+) -> admission.Enrollment:
+    """The runtime profile must be the registry's enrollment, reviewers included.
+
+    The registry, not the profile, is the authority for App/installation/
+    repository identity and for the OpenClaw/ClawSweeper reviewer actors the
+    engine trusts. A profile that names different reviewers cannot serve, tick
+    or accept deliveries.
+    """
     app = core.require_object(config.get("github_app"), "service GitHub App config")
     try:
-        return registry.lookup(
+        enrolled = registry.lookup(
             app.get("repository"), app.get("repository_id"), app.get("app_id"), app.get("installation_id")
         )
     except admission.AdmissionError as exc:
         raise ServiceError("runtime profile is not enrolled in the service registry") from exc
+    if core_config is None:
+        core_config = core.load_config(Path(config["core_config"]))
+    review_policy = core.require_object(core_config.get("review_policy"), "core review_policy")
+    if review_policy.get("reviewers") != enrolled.reviewers:
+        raise ServiceError("runtime reviewer identities contradict service enrollment")
+    return enrolled
 
 
 def require_current_bindings(config: dict[str, Any], registry: RegistrySource) -> None:

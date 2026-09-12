@@ -45,11 +45,13 @@ class Fixture:
             {"repository": BLOCKS, "repository_id": 1306882611,
              "github_app": {"id": BLOCKS_APP, "installation_id": BLOCKS_INSTALL,
                             "installation_account": "dinkuskit"},
-             "approved_policy": {"commit": BLOCKS_COMMIT, "sha256": sha(self.blocks)}},
+             "approved_policy": {"commit": BLOCKS_COMMIT, "sha256": sha(self.blocks)},
+             "reviewers": {"openclaw": "blocks-openclaw", "clawsweeper": "blocks-clawsweeper"}},
             {"repository": SMCBD, "repository_id": 1366416798,
              "github_app": {"id": SMCBD_APP, "installation_id": SMCBD_INSTALL,
                             "installation_account": "saari-co"},
-             "approved_policy": {"commit": SMCBD_COMMIT, "sha256": sha(self.smcbd)}}]}
+             "approved_policy": {"commit": SMCBD_COMMIT, "sha256": sha(self.smcbd)},
+             "reviewers": {"openclaw": "smcbd-openclaw", "clawsweeper": "smcbd-clawsweeper"}}]}
 
     def registry(self, doc=None):
         return ta.load_registry(json.dumps(doc or self.registry_doc()).encode())

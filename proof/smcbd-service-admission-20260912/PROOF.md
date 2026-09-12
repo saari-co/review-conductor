@@ -134,10 +134,31 @@ unchanged context; it is addressed by `require_policy_matches_profile` above.
     `serve` raise `ServiceStopped`, so the process exits 2 instead of accepting
     deliveries nothing will act on.
 
+## Third review repair after head `8009e5e` (Copilot, two new findings)
+
+The `8009e5e3e806098e132f4e81e7802d926f103fbb` results (local PASS; hosted run
+34695283800 success) are historical for that head.
+
+11. **Ancestor TOCTOU.** `_open_registry_descriptor` walks the canonical path
+    from `/` with held directory descriptors (`O_RDONLY|O_DIRECTORY|O_NOFOLLOW|
+    O_CLOEXEC`, `dir_fd=`), compares every held directory to the forbidden
+    roots by `(st_dev, st_ino)`, validates the parent on its descriptor and
+    opens the leaf relative to it. A parent swapped for a symlink after
+    canonicalization is proven to be refused, not followed. The earlier
+    pathname-based root comparison was removed so the identity check is the
+    single guard.
+12. **Reviewer actors from the profile.** The enrollment schema now carries a
+    `reviewers {openclaw, clawsweeper}` block (non-empty, bounded, distinct);
+    `require_profile_enrolled` also requires the engine profile's
+    `review_policy.reviewers` to equal the enrollment, and runs on every
+    provider read, worker tick and delivery. `preflight_enrollment` now derives
+    the enrollment from the profile and compares the delivery against it, so
+    the profile-to-registry lookup is a single guard.
+
 ## Verification at the repaired head (local CPython 3.14.6, macOS arm64)
 
 - `make check` — PASS: legacy engine/activation/userland/profile suites,
-  scaffold and repository guards, trusted admission (18), service runtime (24,
+  scaffold and repository guards, trusted admission (18), service runtime (26,
   including the mutation harness), launcher transport, workflow contract,
   extraction provenance (14 files) and Python compilation, `git diff --check`.
 - `make build` — PASS; the packaged zipapp still excludes service, admission
@@ -166,7 +187,9 @@ must fail its named test and only that test):
 16. mint tokens from an unvalidated permission map;
 17. read the registry by pathname after validating the descriptor;
 18. gate the worker without checking the profile enrollment;
-19. let the worker die silently on operational failure.
+19. let the worker die silently on operational failure;
+20. follow a symlinked ancestor while walking the registry path;
+21. trust the profile's reviewer actors instead of enrollment.
 
 Only CPython 3.14 was exercised locally; 3.11/3.12 evidence comes from hosted
 exact-head CI on the PR, recorded in the PR conversation, not here.
