@@ -28,7 +28,7 @@ This map is repository governance only, not the service enrollment/reviewer map.
 
 [CODEOWNERS](.github/CODEOWNERS) covers **all files**, including itself, workflows,
 schemas, tests, proof, scripts and documentation. GitHub's two entries mean
-**either owner**, not two required approvals. The proposed baseline requires one
+**either owner**, not two required approvals. The applied baseline requires one
 eligible non-author code-owner approval and approval after the latest push.
 For security/governance, workflow/check ownership, credential, policy/admission,
 bootstrap or cutover changes, obtain explicit exact-head acknowledgement from
@@ -39,8 +39,9 @@ CODEOWNERS. Never claim two signatures merely because both names are listed.
 A PR cannot weaken the rules used to review itself. Evaluate governance changes
 against the approved base; if no approved base exists, follow the bootstrap gate.
 Future ownership changes require both existing owners, verified replacement
-identity/access, and separate owner-authorized settings updates. Branch protection
-is currently absent; tracked policy and PR-authored CI are not enforcement.
+identity/access, and separate owner-authorized settings updates. Main protection
+is currently applied and was read back as documented in `docs/branch-protection.md`;
+tracked policy and PR-authored CI still cannot approve changes to themselves.
 
 ## Source and proof hygiene
 

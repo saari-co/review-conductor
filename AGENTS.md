@@ -21,4 +21,5 @@ Governance: read CONTRIBUTING.md and SECURITY.md. The two human owners are mappe
 in .github/owners.json; .github/CODEOWNERS covers all paths. Those files do not
 supply service reviewer authority. Evaluate policy changes against approved base.
 Keep PR #1 draft; docs/bootstrap.md defines the pending human bootstrap gate.
-docs/main-protection.proposed.json is review-only, never permission to apply it.
+docs/main-protection.proposed.json records the applied baseline body but remains
+review-only; it is never permission to change or reapply repository settings.

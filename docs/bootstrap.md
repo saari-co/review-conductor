@@ -20,12 +20,13 @@ An exception, if humans choose one, must name repository/PR/base/head, missing
 checks, reason, evidence, accepted risk, scope and expiry; it is never PASS and
 expires on tuple change. None is created by this document or this work.
 
-[Proposed protection](branch-protection.md) is for a later separately authorized
-settings operation. Apply/read back/test only after owner authorization. Observe
-exact-head checks first; do not require nonexistent rail names. Because base
-CODEOWNERS is absent, bootstrap must explicitly cover the enforcement gap. Do not
-silently bypass a blocked merge to install policy. Keep normal protection strict;
-any exceptional bootstrap procedure needs its own concrete human decision.
+[Main protection](branch-protection.md) is now applied and its configuration was
+read back without mutation. That protection does not retroactively add CODEOWNERS
+to this PR's base or satisfy the pending bootstrap decision. Because base
+CODEOWNERS is absent, bootstrap must explicitly cover that enforcement gap. Do not
+weaken or bypass protection to merge this PR; any exceptional bootstrap procedure
+still needs its own concrete human decision. Every later settings change requires
+separate owner authorization, read-back and approved safe verification.
 
 A bootstrap merge would accept source only, **not** credentials, enrollment,
 service deployment, authoritative checks or migration. Keep those grants separate.

@@ -49,6 +49,7 @@ choice. Do not infer redistribution permission from the source extraction.
 ## Governance and security
 
 [Contributing / owners](CONTRIBUTING.md) · [Security](SECURITY.md) ·
-[Bootstrap gates](docs/bootstrap.md) · [Proposed protection](docs/branch-protection.md)
+[Bootstrap gates](docs/bootstrap.md) · [Main protection](docs/branch-protection.md)
 
-These are source-review rules, not live enrollment or applied GitHub protection.
+The protection document records the live GitHub baseline; none of these source
+files provide service enrollment, reviewer authority, or permission to change it.

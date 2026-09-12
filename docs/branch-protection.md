@@ -1,12 +1,12 @@
-# Proposed main protection — NOT APPLIED
+# Main protection baseline — APPLIED AND READ BACK
 
-## Read-only observation
+## Current read-only observation
 
-At this hardening slice, GitHub reports `main.protected=false`, the classic
-protection endpoint returns `404 Branch not protected`, repository/inherited
-rulesets are empty, and effective branch rules are empty. Auto-merge is disabled.
-Both designated owners resolve to the numeric IDs in `.github/owners.json` and
-have admin/write access. No settings were changed.
+On 2026-09-11 (America/New_York), GitHub reports `main.protected=true`. The
+classic protection endpoint returns the baseline described below and repository
+rulesets remain empty. Both designated owners resolve to the numeric IDs in
+`.github/owners.json` and are the only users allowed to push or dismiss reviews.
+This observation was read-only; no settings were changed by the source repair.
 
 Observed CI checks are `Python 3.11 / ubuntu-latest`,
 `Python 3.12 / ubuntu-latest`, `Python 3.12 / macos-latest`, and aggregate `CI`.
@@ -14,11 +14,12 @@ All are issued by GitHub Actions (`app_id: 15368`, slug `github-actions`). The
 aggregate runs with `always()` and fails unless the entire matrix succeeds.
 Only that aggregate needs to be required; do not bind legacy target rail names.
 
-## Exact proposed classic protection body
+## Applied classic protection body
 
-[main-protection.proposed.json](main-protection.proposed.json) is the complete
-proposed body for `PUT /repos/saari-co/review-conductor/branches/main/protection`.
-It is an inert review artifact, not a script or authorization to call the API.
+[main-protection.proposed.json](main-protection.proposed.json) is retained under
+its original review filename and matches the applied baseline read back from
+`main`. It is an inert review artifact, not a script or authorization to call the
+API again or to change repository settings.
 
 - Require strict/up-to-date `CI`, pinned to GitHub Actions App 15368.
 - Require PRs, one eligible CODEOWNER approval, stale approval dismissal,
@@ -38,13 +39,13 @@ independent owner or the PR blocks; do not weaken rules to unblock it.
 ## Limitations and later verification
 
 PR #1's base has no CODEOWNERS; follow the explicit bootstrap decision in
-[bootstrap.md](bootstrap.md). No claim of enforcement follows from tracked files.
-Re-read and preserve/merge any settings that appear after this snapshot rather
-than overwriting them with this proposal. Confirm owner access and exact-head
-issuer/check names again. After a separately authorized application, read back
-all fields and effective rules, then verify rejected direct/bypass writes,
-stale/missing/failed CI and missing owner review through an approved safe test.
-Do not perform those mutation probes in this source-only slice.
+[bootstrap.md](bootstrap.md). The applied review requirement therefore does not
+retroactively make this PR's new CODEOWNERS authoritative for its own review.
+Re-read and preserve/merge current settings before any later authorized update;
+never overwrite from this recorded body. Reconfirm owner access and exact-head
+issuer/check names. Rejected direct/bypass writes, stale/missing/failed CI and
+missing-owner-review behavior still require a separately approved safe mutation
+test; no such mutation probe was performed in this source-only repair.
 
 App pinning prevents another App from satisfying `CI`; it does not prevent a PR
 from weakening its own Actions workflow or creating a same-App check name.
