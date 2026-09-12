@@ -1861,6 +1861,52 @@ class AdmissionIngressTests(unittest.TestCase):
             finally:
                 connection.close()
 
+    def test_notification_subprocess_uses_an_allowlisted_environment(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = legacy.config_fixture(Path(temporary))
+            observed = {}
+
+            def run(command, **kwargs):
+                observed["command"] = command
+                observed["environment"] = kwargs["env"]
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=json.dumps({"result": "sent"}) + "\n",
+                    stderr="",
+                )
+
+            environment = {
+                "HOME": str(Path(temporary) / "home"),
+                "USER": "fixture-user",
+                "LOGNAME": "fixture-user",
+                "PATH": "/fixture/bin:/usr/bin:/bin",
+                "TMPDIR": "/tmp",
+                "LC_ALL": "C",
+                config["notifications"]["discord_target_env"]: "channel:fixture",
+                config["credentials"]["webhook_secret_fd_env"]: "41",
+                config["credentials"]["github_private_key_fd_env"]: "42",
+                "OP_SERVICE_ACCOUNT_TOKEN": "must-not-reach-child",
+            }
+            notifier = userland.OpenClawNotifier(
+                config, runner=run, environment=environment
+            )
+            notifier.send("discord", "fixture message")
+
+            self.assertIn("channel:fixture", observed["command"])
+            self.assertEqual(
+                observed["environment"],
+                {
+                    "HOME": environment["HOME"],
+                    "USER": "fixture-user",
+                    "LOGNAME": "fixture-user",
+                    "PATH": "/fixture/bin:/usr/bin:/bin",
+                    "TMPDIR": "/tmp",
+                    "LC_ALL": "C",
+                    "PYTHONUNBUFFERED": "1",
+                },
+            )
+
     def test_gate_database_is_read_only_and_disappearance_fails_closed(self):
         self.fx.ingest("initial", self.fx.payload())
         database = self.fx.state / "review-conductor.sqlite3"
@@ -2580,6 +2626,26 @@ class EntrypointTests(unittest.TestCase):
                 entrypoint.main(argv)
             self.assertEqual(ctx.exception.code, 2)
 
+    def test_maintenance_sqlite_failure_is_a_controlled_service_error(self):
+        argv = [
+            "--profile",
+            str(self.profile),
+            "--registry",
+            str(self.root / "registry.json"),
+            "--dry-run",
+            "retry-openclaw",
+            "--pr",
+            "7",
+        ]
+        with patch.object(
+            entrypoint,
+            "run_maintenance",
+            side_effect=sqlite3.OperationalError("database is locked"),
+        ), patch.object(sys, "stderr", io.StringIO()) as stderr:
+            self.assertEqual(entrypoint.main(argv), 2)
+        self.assertIn("review-conductor-service: database is locked", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+
     def test_maintenance_modes_use_outer_and_transaction_binding_gates(self):
         self.enable_profile()
         registry = self.root / "registry.json"
@@ -3154,6 +3220,20 @@ MUTANTS = [
         "                SET status = 'uncertain', attempts = attempts + 1,\n                  last_error = 'delivery in progress; reconcile if interrupted',\n",
         "                SET status = 'pending', attempts = attempts + 1,\n                  last_error = 'delivery in progress; reconcile if interrupted',\n",
         "AdmissionIngressTests.test_notification_is_uncertain_before_transport_and_survives_crash",
+    ),
+    (
+        "inherit the complete service environment in a notification subprocess",
+        "tools/review_conductor_userland.py",
+        "                env=self.subprocess_environment(),\n",
+        "                env=self.environment,\n",
+        "AdmissionIngressTests.test_notification_subprocess_uses_an_allowlisted_environment",
+    ),
+    (
+        "let a maintenance SQLite failure escape the CLI error boundary",
+        "tools/service_entrypoint.py",
+        "    except (core.ContractError, OSError, sqlite3.Error) as exc:\n",
+        "    except (core.ContractError, OSError) as exc:\n",
+        "EntrypointTests.test_maintenance_sqlite_failure_is_a_controlled_service_error",
     ),
 ]
 

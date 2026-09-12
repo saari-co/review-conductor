@@ -66,11 +66,16 @@ It remains disabled and is reviewed independently from the admission core.
 18. The legacy userland launcher is not represented as a standalone-service
     launcher. Registry-aware inherited-descriptor supervisor wiring remains an
     activation prerequisite.
+19. Notification subprocesses receive only an explicit runtime identity/locale
+    allowlist; service credentials and unrelated environment values are not
+    inherited.
+20. Maintenance-mode SQLite failures stay within the controlled standalone CLI
+    error boundary and return status 2 without a traceback.
 
 ## Executable proof
 
-- Focused live service/adapter suite: 68 tests passed.
-- Executable mutation suite: all 71 precise mutants killed.
+- Focused live service/adapter suite: 70 tests passed.
+- Executable mutation suite: all 73 precise mutants killed.
 - The added cases directly exercise concurrent token minting, promotion after
   a stale binding, reloaded core identity, read-only/disappearing SQLite state,
   checkout fencing, both OpenClaw command fences, per-notification fencing,
@@ -82,7 +87,8 @@ It remains disabled and is reviewed independently from the admission core.
   exact propagation of the allowlisted environment to the subprocess boundary,
   restrictive umask retention across the threaded lifecycle, and a simulated
   process death after the durable notification claim but before a transport
-  result can be recorded.
+  result can be recorded, notification subprocess environment isolation, and
+  controlled maintenance-database failure handling.
 - Complete `make check`: passed on this repair tree.
 - Extraction provenance: 14 files verified and Python compilation passed.
 - `git diff --check`: passed.

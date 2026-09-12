@@ -28,8 +28,8 @@
       "source_path": "tools/review_conductor_userland.py",
       "destination_path": "tools/review_conductor_userland.py",
       "source_sha256": "0f19c2143f568117fa44b29bd56cb652df511f6e19c6ea8d100389dc2605a106",
-      "destination_sha256": "2ea0c8e20ce9c88db3ffbf5bebf6de58885079c684a20b17c68d02dae75048fa",
-      "adaptation": "generalized standalone profiles require Contents read and the trusted service entrypoint; legacy Blocks permissions and CLI route remain accepted unchanged; checkout fetches and review-result notifications use fresh exact-tuple admission-authority fences, with revocation preserved as recoverable pending work; every notification is durably claimed uncertain before transport so an interrupted outcome cannot be retried without operator reconciliation; explicit retry and notification reconciliation accept a transaction-bound authority callback"
+      "destination_sha256": "165bc9927cffded162b7d66fa3e044d2ef093e0629f2fe620da07373a02a13df",
+      "adaptation": "generalized standalone profiles require Contents read and the trusted service entrypoint; legacy Blocks permissions and CLI route remain accepted unchanged; checkout fetches and review-result notifications use fresh exact-tuple admission-authority fences, with revocation preserved as recoverable pending work; every notification is durably claimed uncertain before transport so an interrupted outcome cannot be retried without operator reconciliation; notification subprocesses receive only an allowlisted runtime identity/locale environment; explicit retry and notification reconciliation accept a transaction-bound authority callback"
     },
     {
       "source_path": "tools/review_conductor_userland_launcher.py",

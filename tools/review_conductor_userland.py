@@ -1787,6 +1787,20 @@ class OpenClawNotifier:
         self.runner = runner
         self.environment = os.environ if environment is None else environment
 
+    def subprocess_environment(self) -> dict[str, str]:
+        """Expose only ordinary runtime identity and locale to OpenClaw."""
+        child = {
+            "PATH": self.environment.get(
+                "PATH", "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            ),
+            "PYTHONUNBUFFERED": "1",
+        }
+        for name in ("HOME", "USER", "LOGNAME", "TMPDIR", "LC_ALL"):
+            value = self.environment.get(name)
+            if value:
+                child[name] = value
+        return child
+
     def command(self, channel: str, message: str) -> list[str]:
         notifications = self.config["notifications"]
         command = notifications["openclaw_path"]
@@ -1829,6 +1843,7 @@ class OpenClawNotifier:
                 stderr=subprocess.PIPE,
                 timeout=90,
                 check=False,
+                env=self.subprocess_environment(),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise UserlandError("OpenClaw notification outcome is uncertain") from exc

@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import sqlite3
 import stat
 import sys
 import threading
@@ -392,7 +393,7 @@ def main(argv: list[str] | None = None) -> int:
                 confirmation=args.confirm,
             )
             print(json.dumps(result, indent=2, sort_keys=True))
-    except (core.ContractError, OSError) as exc:
+    except (core.ContractError, OSError, sqlite3.Error) as exc:
         print(f"review-conductor-service: {exc}", file=sys.stderr)
         return 2
     return 0

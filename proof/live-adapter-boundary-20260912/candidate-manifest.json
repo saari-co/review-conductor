@@ -19,18 +19,18 @@
     "docs/bootstrap.md": "d7fab758e263f1b7ba1c8a1431fa435bfa17685cd533fc603720130d860cca87",
     "docs/integration-contract.md": "4be2ede8991699adc24422491cc3c05d4a2807e9ac3dc11c2a2a715711252c58",
     "docs/migration.md": "1e77841bec4fb23e03a4f77c342db8f075526fa296ca93260eeaf31638d7e1b3",
-    "docs/provenance.json": "c8a1cb262cca884b6af7ff4e9b5bc538aa0f43a1eb34de3d2f2d69b693930900",
+    "docs/provenance.json": "269d88a1a251b20be1bdf927e6472aa1562be60ae3ee78140620f715f417b026",
     "docs/smcbd-pilot-handoff.md": "176a730e609fe456f7c09852c928a43cb50c90c4380274318cddfc1cac7753de",
     "docs/trusted-admission.md": "d6949576038b742fdc0bb6c4fd8ef1209db645dcfc57c6d923103ab9a9d886b6",
-    "proof/live-adapter-boundary-20260912/PROOF.md": "67ee94e8f4537a7369fed8100b34cefdd53b20011c57e496fbfb038ae93acb64",
+    "proof/live-adapter-boundary-20260912/PROOF.md": "13fefaf8db5afcd8632e56dc6971dc2698fb1c5e4603b2bd342b7b2a12ec06a2",
     "proof/smcbd-service-admission-20260912/PROOF.md": "9fc215d180a5764db8ae3f33d3d905ff0d50d8e0d539a6a8332c57760d648810",
     "proof/smcbd-service-admission-20260912/candidate-manifest.json": "85e22fd6511cc7882718fb5586a2c5ebac514cf9a6f7488353759f36df707741",
     "tests/test_review_conductor_profiles.py": "bafad178ef7e5e4c0adb5c58f5a6141d0607fa1fa5131053cfaccab3877a6c88",
-    "tests/test_service_runtime.py": "dbbeb65b138f0cede8c28741db159a6656dbc274b227763a5caf92727df6ea32",
+    "tests/test_service_runtime.py": "1a3a63e44e76cdf9792cdc88d9ab82eb6827cb6d0da2d0319646a4624b5a24ad",
     "tools/review_conductor.py": "7a1a37a1d52c6ec92b7fc0ba8d0c5d5e7d39149483c04f54fc431ab8ef98af42",
     "tools/review_conductor_runtime.py": "e91a9e9f1a8613a3df7b06cac24aee62cb000578bad32667ee3babc193311c6a",
-    "tools/review_conductor_userland.py": "2ea0c8e20ce9c88db3ffbf5bebf6de58885079c684a20b17c68d02dae75048fa",
-    "tools/service_entrypoint.py": "96204fdab2a3c9ee15bd96e09327f5b18677aa2b991428dd0f9f97f0f514180b",
+    "tools/review_conductor_userland.py": "165bc9927cffded162b7d66fa3e044d2ef093e0629f2fe620da07373a02a13df",
+    "tools/service_entrypoint.py": "c42db9d2518f20455cc7a10029d50312c90bc9b603e83abd37c074df98412d68",
     "tools/service_runtime.py": "0ac4053e05628aa4188a732ed4fd2572ccdcb39a36808fb3e010d26c6d174ed1"
   }
 }
