@@ -173,10 +173,45 @@ The `83668102fdc1df8337eaa32af14571cf87e1164c` results (local PASS; hosted run
     profile on every tick and refuses a mismatch, so a restart with an edited
     profile cannot unlock old bindings under different rules.
 
+## Fifth review repair after head `cfe7908` (suppressed Copilot findings, six items)
+
+The `cfe7908e34ade700208b53536558bf9b159526a3` results are historical for that
+head. These items were listed as suppressed in the Copilot reviews at `8009e5e`
+and `8366810` and were all reproduced against `cfe7908` before repair:
+
+15. **Remote policy I/O under `BEGIN IMMEDIATE`.** `stage_approved_policy`
+    fetches the bounded approved-policy bytes before the engine transaction,
+    hash-verifies them against the enrollment and keeps at most eight immutable
+    `(repository, commit, sha256)` entries; the admission hook's reader returns
+    only the staged bytes and performs no I/O. The regression proves a second
+    writer can take the write lock while the policy is read.
+16. **Transient policy failures answered 400.** `GitHubTransientError`
+    (transport errors, HTTP 429/5xx) is raised by the adapter, and the service
+    turns it into `RetryableIngestError`, which the webhook maps to 503
+    `dependency_unavailable` with nothing persisted so GitHub redelivers.
+    Non-transient reader failures, malformed and foreign deliveries still
+    answer 400.
+17. **Leaf `is_symlink()`+`resolve()` TOCTOU.** Only the ancestors are
+    canonicalized; the original leaf name is opened with `O_NOFOLLOW` under the
+    held parent, so a leaf swapped for a symlink after canonicalization is
+    refused, never followed.
+18. **Symlink-loop `RuntimeError`.** `resolve()` failures of either kind are a
+    fail-closed unavailable registry; `main` exits 2 without a traceback.
+19. **`binascii.Error` in `read_policy`.** It is a `ValueError` subclass and was
+    already normalized; the tuple now names it explicitly and a regression pins
+    the behaviour for invalid padding/length.
+20. **Cross-App `binding_id`.** Direct regressions in both suites prove two
+    valid Apps with identical review tuple and policy get distinct binding IDs,
+    and a mutant drops the App id from the canonical identity.
+
+`tools/review_conductor_runtime.py` is an adapted extraction file; its
+`docs/provenance.json` destination hash and adaptation note were updated for
+the transient classification and 503 mapping.
+
 ## Verification at the repaired head (local CPython 3.14.6, macOS arm64)
 
 - `make check` — PASS: legacy engine/activation/userland/profile suites,
-  scaffold and repository guards, trusted admission (18), service runtime (28,
+  scaffold and repository guards, trusted admission (18), service runtime (35,
   including the mutation harness), launcher transport, workflow contract,
   extraction provenance (14 files) and Python compilation, `git diff --check`.
 - `make build` — PASS; the packaged zipapp still excludes service, admission
@@ -209,7 +244,14 @@ must fail its named test and only that test):
 20. follow a symlinked ancestor while walking the registry path;
 21. trust the profile's reviewer actors instead of enrollment;
 22. keep bindings current after reviewer rotation;
-23. keep bindings current after the engine profile changes.
+23. keep bindings current after the engine profile changes;
+24. run policy transport inside the engine write transaction;
+25. reject transient policy failures instead of asking for redelivery;
+26. answer 400 for a retryable dependency failure;
+27. classify transient GitHub statuses as rejected operations;
+28. follow a symlinked registry leaf;
+29. let a symlink loop escape as a traceback;
+30. drop the App id from binding identity.
 
 Only CPython 3.14 was exercised locally; 3.11/3.12 evidence comes from hosted
 exact-head CI on the PR, recorded in the PR conversation, not here.

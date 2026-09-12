@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import contextlib
 import datetime as dt
 import hashlib
@@ -67,6 +68,9 @@ STANDALONE_DENIED_PERMISSIONS = DENIED_PERMISSIONS - {"contents"}
 APP_EVENTS = ["pull_request", "workflow_run"]
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 API_VERSION = "2022-11-28"
+# GitHub statuses that describe a transient upstream condition rather than a
+# rejected operation; callers may retry without changing the request.
+TRANSIENT_STATUSES = frozenset({429, 500, 502, 503, 504})
 FIXED_GIT = Path("/usr/bin/git")
 
 
@@ -77,6 +81,18 @@ class RuntimeError(core.ContractError):
 
 class GitHubApiError(RuntimeError):
     """A fixed GitHub API operation failed without exposing response material."""
+
+
+class GitHubTransientError(GitHubApiError):
+    """The transport or GitHub itself failed transiently; the same call may be retried."""
+
+
+class RetryableIngestError(Exception):
+    """A dependency failed transiently before any state was written.
+
+    Deliberately not a ContractError: the delivery was neither malformed nor
+    foreign, so the HTTP edge answers 503 and GitHub redelivers it.
+    """
 
 
 def require_absolute_path(value: Any, label: str) -> Path:
@@ -138,7 +154,7 @@ def urllib_transport(
     except urllib.error.HTTPError as exc:
         return int(exc.code), b""
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise GitHubApiError("GitHub API transport failed") from exc
+        raise GitHubTransientError("GitHub API transport failed") from exc
 
 
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -364,6 +380,10 @@ class GitHubAppClient:
             method, self._app["api_base"] + path, headers, body, 15.0
         )
         if status not in expected:
+            if status in TRANSIENT_STATUSES:
+                raise GitHubTransientError(
+                    f"allowlisted GitHub API operation failed transiently ({operation})"
+                )
             raise GitHubApiError(f"allowlisted GitHub API operation failed ({operation})")
         return operation, raw
 
@@ -419,7 +439,7 @@ class GitHubAppClient:
             content = base64.b64decode(
                 encoded.replace("\r", "").replace("\n", ""), validate=True
             )
-        except (ValueError, UnicodeError, json.JSONDecodeError, core.ContractError) as exc:
+        except (binascii.Error, ValueError, UnicodeError, json.JSONDecodeError, core.ContractError) as exc:
             raise GitHubApiError("approved policy response is malformed") from exc
         if not content or len(content) > 16384:
             raise GitHubApiError("approved policy content has an invalid bounded size")
@@ -1785,6 +1805,8 @@ def handle_webhook_request(
             "result": receipt["result"],
             "merge_dispatched": False,
         }
+    except RetryableIngestError:
+        return HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "reason": "dependency_unavailable"}
     except core.ContractError:
         return HTTPStatus.BAD_REQUEST, {"ok": False, "reason": "request_rejected"}
     except sqlite3.Error:

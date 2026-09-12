@@ -47,18 +47,19 @@ def _forbidden_identities(forbidden_roots: Iterable[Path]) -> set[tuple[int, int
     return identities
 
 
-def _open_registry_descriptor(path: Path, forbidden_roots: Iterable[Path]) -> int:
-    """Walk the canonical path with held directory descriptors and open the leaf.
+def _open_registry_descriptor(parent: Path, name: str, forbidden_roots: Iterable[Path]) -> int:
+    """Walk the canonical parent with held directory descriptors and open the leaf.
 
     Every component is opened relative to the previously validated directory with
     O_NOFOLLOW, so an ancestor swapped for a symlink after canonicalization fails
     instead of being followed. Forbidden roots are compared by device/inode on
     each held directory, and the parent is validated on its descriptor before
-    the leaf is opened relative to it.
+    the original leaf name is opened relative to it with O_NOFOLLOW; the leaf is
+    never canonicalized, so a leaf swapped for a symlink is refused too.
     """
     forbidden = _forbidden_identities(forbidden_roots)
-    parts = path.parts
-    if len(parts) < 2:
+    parts = parent.parts
+    if not parts or name in ("", ".", "..") or "/" in name:
         raise service.ServiceError("service enrollment registry must be a file below the filesystem root")
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     try:
@@ -66,9 +67,9 @@ def _open_registry_descriptor(path: Path, forbidden_roots: Iterable[Path]) -> in
     except OSError as exc:
         raise service.ServiceError("service enrollment registry path is unavailable") from exc
     try:
-        for name in parts[1:-1]:
+        for component in parts[1:]:
             try:
-                following = os.open(name, directory_flags, dir_fd=held)
+                following = os.open(component, directory_flags, dir_fd=held)
             except OSError as exc:
                 raise service.ServiceError(
                     "service enrollment registry path component is unavailable or is a symlink"
@@ -90,20 +91,20 @@ def _open_registry_descriptor(path: Path, forbidden_roots: Iterable[Path]) -> in
                 "service enrollment registry parent must be a same-user directory that is not group/world writable"
             )
         try:
-            return os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=held)
+            return os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=held)
         except OSError as exc:
             raise service.ServiceError("service enrollment registry is unavailable or is a symlink") from exc
     finally:
         os.close(held)
 
 
-def _registry_bytes(path: Path, forbidden_roots: Iterable[Path]) -> bytes:
+def _registry_bytes(parent: Path, name: str, forbidden_roots: Iterable[Path]) -> bytes:
     """Open once via held directories, validate the descriptor, read from it.
 
     Every ownership/mode/size check runs on the opened descriptor, so a same-user
     writer cannot swap the path between validation and the read.
     """
-    descriptor = _open_registry_descriptor(path, forbidden_roots)
+    descriptor = _open_registry_descriptor(parent, name, forbidden_roots)
     try:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
@@ -134,16 +135,17 @@ def _registry_bytes(path: Path, forbidden_roots: Iterable[Path]) -> bytes:
 
 
 def read_service_registry(path: Path, forbidden_roots: Iterable[Path] = ()) -> admission.Registry:
-    if not isinstance(path, Path) or not path.is_absolute() or path.is_symlink():
+    if not isinstance(path, Path) or not path.is_absolute():
         raise service.ServiceError("service enrollment registry must be an absolute regular file")
     try:
-        # Canonicalize operator-supplied ancestor symlinks (for example
-        # /var -> /private/var) once; the descriptor walk below refuses any
-        # symlink that appears afterwards and checks forbidden roots by identity.
-        resolved = path.resolve(strict=True)
-    except OSError as exc:
+        # Canonicalize only the ancestors (for example /var -> /private/var); the
+        # leaf is opened by its original name with O_NOFOLLOW under the held
+        # parent, so it is never followed. Symlink loops raise RuntimeError on
+        # older Pythons and OSError on newer ones; both are an unavailable path.
+        parent = path.parent.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
         raise service.ServiceError("service enrollment registry is unavailable") from exc
-    raw = _registry_bytes(resolved, tuple(forbidden_roots))
+    raw = _registry_bytes(parent, path.name, tuple(forbidden_roots))
     try:
         registry = admission.load_registry(raw)
     except admission.AdmissionError as exc:

@@ -221,6 +221,11 @@ class BindingTests(unittest.TestCase):
                    request(pr_number=8)]
         ids = {ta.admit(self.registry, item, self.fx.read).binding_id for item in changed}
         self.assertEqual(len(ids | {admission.binding_id}), 5)
+        # Identical review tuple and policy under a different valid App must not
+        # collide: the App id is part of the canonical binding identity.
+        other_app = dataclasses.replace(admission, app_id=BLOCKS_APP + 1)
+        self.assertEqual((other_app.review, other_app.policy.policy_id), (admission.review, admission.policy.policy_id))
+        self.assertNotEqual(other_app.binding_id, admission.binding_id)
         with self.assertRaises(dataclasses.FrozenInstanceError):
             admission.review.head_sha = BASE
         self.assertTrue(ta.policy_is_current(admission, self.registry))

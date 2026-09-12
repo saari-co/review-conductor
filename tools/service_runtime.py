@@ -21,6 +21,56 @@ from target_manifest import unique_object, validate_manifest
 
 BINDING_TABLE_SCHEMA = "review-conductor.service-policy-binding.v1"
 PROFILE_DIGEST_SCHEMA = "review-conductor.engine-profile-digest.v1"
+MAX_STAGED_POLICIES = 8
+
+# Approved policy bytes keyed by (repository, commit, sha256). Content is
+# immutable under that key and is hash-verified before it is stored, so a hit
+# is exactly the bytes the registry approves; the hook re-hashes and
+# re-validates them inside the write transaction without any remote I/O.
+_STAGED_POLICIES: dict[tuple[str, str, str], bytes] = {}
+
+
+def clear_staged_policies() -> None:
+    _STAGED_POLICIES.clear()
+
+
+def stage_approved_policy(enrolled: admission.Enrollment, read_policy: PolicyReader) -> bytes:
+    """Fetch the approved policy bytes outside any SQLite write transaction.
+
+    Remote I/O never runs while the engine holds ``BEGIN IMMEDIATE``. Transient
+    transport failures surface as ``RetryableIngestError`` (HTTP 503, nothing
+    written) instead of a rejected delivery; every other failure stays a
+    ``ServiceError``.
+    """
+    key = (enrolled.repository, enrolled.approved_policy_commit, enrolled.approved_policy_sha256)
+    staged = _STAGED_POLICIES.get(key)
+    if staged is not None:
+        return staged
+    try:
+        raw = read_policy(enrolled.repository, enrolled.approved_policy_commit)
+    except runtime.GitHubTransientError as exc:
+        raise runtime.RetryableIngestError("approved policy transport failed transiently") from exc
+    except Exception as exc:
+        raise ServiceError("approved policy content is unavailable") from exc
+    if not isinstance(raw, (bytes, bytearray)) or len(raw) > admission.MAX_BYTES:
+        raise ServiceError("approved policy content is unavailable or oversized")
+    raw = bytes(raw)
+    if hashlib.sha256(raw).hexdigest() != enrolled.approved_policy_sha256:
+        raise ServiceError("approved policy content hash does not match enrollment")
+    if len(_STAGED_POLICIES) >= MAX_STAGED_POLICIES:
+        _STAGED_POLICIES.clear()
+    _STAGED_POLICIES[key] = raw
+    return raw
+
+
+def _staged_reader(enrolled: admission.Enrollment, staged: bytes | None) -> PolicyReader:
+    """A reader that only ever returns the bytes staged before the transaction."""
+    def read(repository: str, commit: str) -> bytes:
+        if staged is None or (repository, commit) != (enrolled.repository, enrolled.approved_policy_commit):
+            raise ServiceError("approved policy was not staged for this delivery")
+        return staged
+
+    return read
 PolicyReader = Callable[[str, str], bytes]
 RegistrySource = Union[admission.Registry, Callable[[], admission.Registry]]
 
@@ -311,6 +361,7 @@ def ingest_service_delivery(
         or core_config["repository_id"] != enrolled.repository_id
     ):
         raise ServiceError("core profile contradicts trusted service enrollment")
+    staged = stage_approved_policy(enrolled, read_policy) if event_type == "pull_request" else None
     return core.ingest_github_delivery(
         config_path=config_path,
         state_root=state_root,
@@ -319,7 +370,7 @@ def ingest_service_delivery(
         signature=signature,
         body=body,
         secret=secret,
-        admission_hook=_admission_hook(registry, enrolled, read_policy),
+        admission_hook=_admission_hook(registry, enrolled, _staged_reader(enrolled, staged)),
     )
 
 

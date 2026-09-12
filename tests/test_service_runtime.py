@@ -57,17 +57,21 @@ class ServiceFixture:
         )
         self.config_path.write_text(json.dumps(config) + "\n")
         self.reads: list[tuple[str, str]] = []
+        service.clear_staged_policies()
 
-    def registry(self, *, policy=None):
+    def registry(self, *, policy=None, app_id=APP_ID):
+        return admission.load_registry(json.dumps(self.registry_document(policy=policy, app_id=app_id)).encode())
+
+    def registry_document(self, *, policy=None, app_id=APP_ID):
         raw = policy if policy is not None else self.policy
-        document = {
+        return {
             "schema": admission.REGISTRY_SCHEMA,
             "enrollments": [
                 {
                     "repository": REPOSITORY,
                     "repository_id": REPOSITORY_ID,
                     "github_app": {
-                        "id": APP_ID,
+                        "id": app_id,
                         "installation_id": INSTALLATION_ID,
                         "installation_account": "saari-co",
                     },
@@ -79,7 +83,6 @@ class ServiceFixture:
                 }
             ],
         }
-        return admission.load_registry(json.dumps(document).encode())
 
     def read(self, repository, commit):
         self.reads.append((repository, commit))
@@ -506,6 +509,222 @@ class AdmissionIngressTests(unittest.TestCase):
         cosmetic["max_repair_cycles"] = 1
         self.assertEqual(service.profile_policy_digest(cosmetic), digest)
 
+    def test_policy_transport_never_runs_under_the_write_lock(self):
+        database = self.fx.state / "review-conductor.sqlite3"
+        probes = []
+
+        def lock_aware_read(repository, commit):
+            # A second writer must be able to take the write lock while the policy
+            # is fetched: remote I/O never runs inside BEGIN IMMEDIATE.
+            probe = sqlite3.connect(database, timeout=0)
+            try:
+                probe.execute("BEGIN IMMEDIATE")
+                probe.rollback()
+            except sqlite3.OperationalError as exc:
+                raise AssertionError("policy transport ran under the engine write lock") from exc
+            finally:
+                probe.close()
+            probes.append((repository, commit))
+            return self.fx.read(repository, commit)
+
+        core.open_database(self.fx.state, REPOSITORY).close()
+        receipt = service.ingest_service_delivery(
+            config_path=self.fx.config_path, state_root=self.fx.state, event_type="pull_request",
+            delivery_id="outside-lock", signature=self.fx.signed(self.fx.payload())[1],
+            body=self.fx.signed(self.fx.payload())[0], secret=SECRET, registry=self.fx.registry(),
+            read_policy=lock_aware_read, service_config=self.fx.app_config(),
+        )
+        self.assertEqual(receipt["result"], "accepted")
+        self.assertEqual(probes, [(REPOSITORY, POLICY_COMMIT)])
+        self.assertEqual(len(self.fx.binding_rows()), 1)
+        # The staged bytes are hash-verified before caching; a reader returning the
+        # wrong content for the approved commit cannot stage anything.
+        service.clear_staged_policies()
+        with self.assertRaises(core.ContractError) as ctx:
+            service.stage_approved_policy(self.fx.registry().enrollments[0], lambda *_: b"{}")
+        self.assertIn("hash does not match", str(ctx.exception))
+        self.assertEqual(service._STAGED_POLICIES, {})
+        with self.assertRaises(core.ContractError):
+            service._staged_reader(self.fx.registry().enrollments[0], None)(REPOSITORY, POLICY_COMMIT)
+        with self.assertRaises(core.ContractError):
+            service._staged_reader(self.fx.registry().enrollments[0], self.fx.policy)(REPOSITORY, "e" * 40)
+
+    def test_transient_policy_failures_answer_503_without_writing_state(self):
+        attempts = {"count": 0}
+
+        def flaky_read(repository, commit):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise runtime.GitHubTransientError("GitHub API transport failed")
+            if attempts["count"] == 2:
+                raise runtime.GitHubApiError("allowlisted GitHub API operation failed (policy)")
+            return self.fx.read(repository, commit)
+
+        config = self.fx.app_config()
+        body, signature = self.fx.signed(self.fx.payload())
+        request = dict(
+            config=config, method="POST", path="/github/webhook",
+            headers={"content-type": "application/json", "x-github-event": "pull_request",
+                     "x-github-delivery": "retry-me", "x-hub-signature-256": signature},
+            body=body, secret=SECRET,
+        )
+
+        def ingestor(**kwargs):
+            return service.ingest_service_delivery(
+                **kwargs, registry=self.fx.registry(), read_policy=flaky_read, service_config=config,
+            )
+
+        def persisted():
+            connection = core.open_database(self.fx.state, REPOSITORY)
+            try:
+                deliveries = connection.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0]
+                tables = {row[0] for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'")}
+                bindings = 0
+                if "service_policy_bindings" in tables:
+                    bindings = connection.execute("SELECT COUNT(*) FROM service_policy_bindings").fetchone()[0]
+                return deliveries, bindings
+            finally:
+                connection.close()
+
+        # Transient transport failure: 503, nothing persisted, GitHub redelivers.
+        status, payload = runtime.handle_webhook_request(**request, ingestor=ingestor)
+        self.assertEqual((int(status), payload), (503, {"ok": False, "reason": "dependency_unavailable"}))
+        self.assertEqual(persisted(), (0, 0))
+        # Non-transient reader failure stays a rejected delivery.
+        status, payload = runtime.handle_webhook_request(**request, ingestor=ingestor)
+        self.assertEqual((int(status), payload), (400, {"ok": False, "reason": "request_rejected"}))
+        self.assertEqual(persisted(), (0, 0))
+        # The redelivered identical delivery then succeeds under the same delivery id.
+        status, payload = runtime.handle_webhook_request(**request, ingestor=ingestor)
+        self.assertEqual((int(status), payload["result"]), (202, "accepted"))
+        self.assertEqual(len(self.fx.binding_rows()), 1)
+        self.assertEqual(attempts["count"], 3)
+        # Malformed and foreign deliveries never reach the policy transport at all.
+        foreign_body, foreign_signature = self.fx.signed(self.fx.payload(installation=INSTALLATION_ID + 1))
+        status, payload = runtime.handle_webhook_request(
+            **{**request, "body": foreign_body,
+               "headers": {**request["headers"], "x-hub-signature-256": foreign_signature,
+                           "x-github-delivery": "foreign"}},
+            ingestor=ingestor,
+        )
+        self.assertEqual((int(status), payload["reason"]), (400, "request_rejected"))
+        self.assertEqual(attempts["count"], 3)
+
+    def test_github_client_classifies_transient_failures_and_malformed_content(self):
+        responses = []
+
+        def transport(method, url, headers, body, timeout):
+            if url.endswith("/access_tokens"):
+                return 201, json.dumps({"token": "fixture-token", "expires_at": "2099-01-01T00:00:00Z"}).encode()
+            return responses.pop(0)
+
+        client = runtime.GitHubAppClient(
+            self.fx.app_config(), "fixture-private-key", transport=transport,
+            signer=lambda *_: "fixture-jwt",
+        )
+        for status in sorted(runtime.TRANSIENT_STATUSES):
+            responses.append((status, b""))
+            with self.subTest(status=status), self.assertRaises(runtime.GitHubTransientError):
+                client.read_policy(REPOSITORY, POLICY_COMMIT)
+        for status in (401, 403, 404, 422):
+            responses.append((status, b""))
+            with self.subTest(status=status), self.assertRaises(runtime.GitHubApiError) as ctx:
+                client.read_policy(REPOSITORY, POLICY_COMMIT)
+            self.assertNotIsInstance(ctx.exception, runtime.GitHubTransientError)
+        # Base64 that passes the character allowlist but has invalid padding/length is
+        # normalized to the adapter's error, never a leaked binascii.Error.
+        for content in ("A", "QUJD\nRA", "===="):
+            responses.append((200, json.dumps({"encoding": "base64", "content": content}).encode()))
+            with self.subTest(content=content), self.assertRaises(runtime.GitHubApiError) as ctx:
+                client.read_policy(REPOSITORY, POLICY_COMMIT)
+            self.assertNotIsInstance(ctx.exception, runtime.GitHubTransientError)
+        self.assertEqual(responses, [])
+        # The real urllib transport classifies connection-level failures as transient.
+        import urllib.error
+        for failure in (urllib.error.URLError("unreachable"), TimeoutError(), OSError("reset")):
+            with self.subTest(failure=type(failure).__name__), \
+                    patch.object(runtime.urllib.request, "urlopen", side_effect=failure), \
+                    self.assertRaises(runtime.GitHubTransientError):
+                runtime.urllib_transport("GET", "https://api.github.com/x", {}, None, 1.0)
+
+    def test_registry_leaf_swapped_for_symlink_after_canonicalization_is_refused(self):
+        document = json.dumps(self.fx.registry_document())
+        root = self.fx.root.resolve()
+        parent = root / "service"
+        parent.mkdir()
+        path = parent / "registry.json"
+        path.write_text(document)
+        path.chmod(0o600)
+        elsewhere = root / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "registry.json").write_text(document)
+        (elsewhere / "registry.json").chmod(0o600)
+        real_open = os.open
+        swapped = threading.Event()
+
+        def racing_open(name, flags, *args, **kwargs):
+            # After the ancestors were canonicalized but before the leaf is opened, a
+            # same-user writer replaces the regular leaf with a symlink to a valid
+            # registry elsewhere.
+            if not swapped.is_set() and "dir_fd" in kwargs:
+                swapped.set()
+                path.unlink()
+                path.symlink_to(elsewhere / "registry.json")
+            return real_open(name, flags, *args, **kwargs)
+
+        with patch.object(entrypoint.os, "open", racing_open):
+            with self.assertRaises(core.ContractError) as ctx:
+                entrypoint.read_service_registry(path)
+        self.assertTrue(swapped.is_set())
+        self.assertIn("unavailable or is a symlink", str(ctx.exception))
+        # The leaf is now a genuine symlink: still refused, never canonicalized.
+        with self.assertRaises(core.ContractError) as ctx:
+            entrypoint.read_service_registry(path)
+        self.assertIn("unavailable or is a symlink", str(ctx.exception))
+        path.unlink()
+        path.write_text(document)
+        path.chmod(0o600)
+        self.assertEqual(entrypoint.read_service_registry(path).enrollments[0].app_id, APP_ID)
+
+    def test_registry_symlink_loop_is_a_clean_service_error(self):
+        root = self.fx.root.resolve()
+        (root / "loop-a").symlink_to(root / "loop-b")
+        (root / "loop-b").symlink_to(root / "loop-a")
+        with self.assertRaises(core.ContractError) as ctx:
+            entrypoint.read_service_registry(root / "loop-a" / "registry.json")
+        self.assertIn("registry is unavailable", str(ctx.exception))
+        # Older CPython raises RuntimeError for loops instead of OSError; both are
+        # normalized to the same fail-closed error.
+        real_resolve = Path.resolve
+
+        def looping_resolve(self, strict=False):
+            if self.name == "loop-a":
+                raise RuntimeError("Symlink loop from 'loop-a'")
+            return real_resolve(self, strict=strict)
+
+        with patch.object(Path, "resolve", looping_resolve):
+            with self.assertRaises(core.ContractError) as ctx:
+                entrypoint.read_service_registry(root / "loop-a" / "registry.json")
+        self.assertIn("registry is unavailable", str(ctx.exception))
+
+    def test_binding_identity_separates_apps_with_identical_review_and_policy(self):
+        self.fx.ingest("initial", self.fx.payload())
+        row = self.fx.binding_rows()[0]
+        request = {
+            "repository": REPOSITORY, "repository_id": REPOSITORY_ID,
+            "app_id": APP_ID, "installation_id": INSTALLATION_ID,
+            "pr_number": row["pr_number"], "base_sha": row["base_sha"], "head_sha": row["head_sha"],
+            "review_epoch": row["review_epoch"], "policy_commit": POLICY_COMMIT,
+        }
+        first = admission.admit(self.fx.registry(), request, self.fx.read)
+        second = admission.admit(
+            self.fx.registry(app_id=APP_ID + 1), {**request, "app_id": APP_ID + 1}, self.fx.read
+        )
+        self.assertEqual(first.binding_id, row["binding_id"])
+        self.assertEqual((first.policy.policy_id, first.review), (second.policy.policy_id, second.review))
+        self.assertNotEqual(first.binding_id, second.binding_id)
+
     def test_registry_ancestor_swapped_for_symlink_after_canonicalization_is_refused(self):
         document = json.dumps({
             "schema": admission.REGISTRY_SCHEMA,
@@ -552,10 +771,10 @@ class AdmissionIngressTests(unittest.TestCase):
         # Forbidden roots are recognised by device/inode on the held directories,
         # independent of the pathname comparison.
         with self.assertRaises(core.ContractError) as ctx:
-            entrypoint._registry_bytes(path, [parent])
+            entrypoint._registry_bytes(path.parent, path.name, [parent])
         self.assertIn("service-owned", str(ctx.exception))
         with self.assertRaises(core.ContractError) as ctx:
-            entrypoint._registry_bytes(path, [root])
+            entrypoint._registry_bytes(path.parent, path.name, [root])
         self.assertIn("service-owned", str(ctx.exception))
 
     def test_worker_gate_requires_the_profile_to_be_the_registry_enrollment(self):
@@ -892,7 +1111,8 @@ class AdmissionIngressTests(unittest.TestCase):
             status, result = post("stale-head", body, signature)
             self.assertEqual((status, result["result"]), (202, "stale"))
             self.assertEqual([row["head_sha"] for row in self.fx.binding_rows()], [HEAD, "e" * 40])
-            self.assertEqual(sorted(self.fx.reads), [(REPOSITORY, POLICY_COMMIT)] * 2)
+            # One hash-verified read staged the approved bytes; later deliveries reuse them.
+            self.assertEqual(self.fx.reads, [(REPOSITORY, POLICY_COMMIT)])
         finally:
             server.shutdown()
             server.server_close()
@@ -949,6 +1169,30 @@ class EntrypointTests(unittest.TestCase):
         self.assertIn("Contents: read", stderr)
         self.assertFalse(missing_registry.exists())
         self.assertFalse((self.home / ".local").exists())
+
+    def test_symlink_loop_registry_path_exits_two_without_a_traceback(self):
+        self.enable_profile()
+        root = self.root.resolve()
+        (root / "loop-a").symlink_to(root / "loop-b")
+        (root / "loop-b").symlink_to(root / "loop-a")
+        with patch.object(userland, "read_inherited_value", side_effect=AssertionError("credentials were read")):
+            code, stderr = self.run_main(root / "loop-a" / "registry.json")
+        self.assertEqual(code, 2)
+        self.assertIn("service enrollment registry is unavailable", stderr)
+        self.assertNotIn("Traceback", stderr)
+        real_resolve = Path.resolve
+
+        def looping_resolve(self, strict=False):
+            if self.name == "loop-a":
+                raise RuntimeError("Symlink loop from 'loop-a'")
+            return real_resolve(self, strict=strict)
+
+        with patch.object(Path, "resolve", looping_resolve), \
+                patch.object(userland, "read_inherited_value", side_effect=AssertionError("credentials were read")):
+            code, stderr = self.run_main(root / "loop-a" / "registry.json")
+        self.assertEqual(code, 2)
+        self.assertIn("service enrollment registry is unavailable", stderr)
+        self.assertNotIn("Traceback", stderr)
 
     def test_enabled_profile_still_requires_registry_agreement_before_credentials(self):
         self.enable_profile()
@@ -1206,8 +1450,8 @@ MUTANTS = [
     (
         "follow a symlinked ancestor while walking the registry path",
         "tools/service_entrypoint.py",
-        "                following = os.open(name, directory_flags, dir_fd=held)\n",
-        "                following = os.open(name, directory_flags & ~os.O_NOFOLLOW, dir_fd=held)\n",
+        "                following = os.open(component, directory_flags, dir_fd=held)\n",
+        "                following = os.open(component, directory_flags & ~os.O_NOFOLLOW, dir_fd=held)\n",
         "AdmissionIngressTests.test_registry_ancestor_swapped_for_symlink_after_canonicalization_is_refused",
     ),
     (
@@ -1230,6 +1474,55 @@ MUTANTS = [
         '    if profile_policy_digest(core_config) != row["profile_digest"]:\n',
         "    if False:\n",
         "AdmissionIngressTests.test_profile_change_after_admission_invalidates_existing_bindings",
+    ),
+    (
+        "run policy transport inside the engine write transaction",
+        "tools/service_runtime.py",
+        "        admission_hook=_admission_hook(registry, enrolled, _staged_reader(enrolled, staged)),\n",
+        "        admission_hook=_admission_hook(registry, enrolled, read_policy),\n",
+        "AdmissionIngressTests.test_policy_transport_never_runs_under_the_write_lock",
+    ),
+    (
+        "reject transient policy failures instead of asking for redelivery",
+        "tools/service_runtime.py",
+        '        raise runtime.RetryableIngestError("approved policy transport failed transiently") from exc\n',
+        '        raise ServiceError("approved policy transport failed transiently") from exc\n',
+        "AdmissionIngressTests.test_transient_policy_failures_answer_503_without_writing_state",
+    ),
+    (
+        "answer 400 for a retryable dependency failure",
+        "tools/review_conductor_runtime.py",
+        '    except RetryableIngestError:\n        return HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "reason": "dependency_unavailable"}\n',
+        '    except RetryableIngestError:\n        return HTTPStatus.BAD_REQUEST, {"ok": False, "reason": "request_rejected"}\n',
+        "AdmissionIngressTests.test_transient_policy_failures_answer_503_without_writing_state",
+    ),
+    (
+        "classify transient GitHub statuses as rejected operations",
+        "tools/review_conductor_runtime.py",
+        "            if status in TRANSIENT_STATUSES:\n",
+        "            if False:\n",
+        "AdmissionIngressTests.test_github_client_classifies_transient_failures_and_malformed_content",
+    ),
+    (
+        "follow a symlinked registry leaf",
+        "tools/service_entrypoint.py",
+        "            return os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=held)\n",
+        "            return os.open(name, os.O_RDONLY | os.O_CLOEXEC, dir_fd=held)\n",
+        "AdmissionIngressTests.test_registry_leaf_swapped_for_symlink_after_canonicalization_is_refused",
+    ),
+    (
+        "let a symlink loop escape as a traceback",
+        "tools/service_entrypoint.py",
+        "    except (OSError, RuntimeError) as exc:\n        raise service.ServiceError(\"service enrollment registry is unavailable\") from exc\n",
+        "    except OSError as exc:\n        raise service.ServiceError(\"service enrollment registry is unavailable\") from exc\n",
+        "AdmissionIngressTests.test_registry_symlink_loop_is_a_clean_service_error",
+    ),
+    (
+        "drop the App id from binding identity",
+        "tools/trusted_admission.py",
+        '             "review_epoch": self.review.review_epoch, "app_id": self.app_id,\n',
+        '             "review_epoch": self.review.review_epoch,\n',
+        "AdmissionIngressTests.test_binding_identity_separates_apps_with_identical_review_and_policy",
     ),
     (
         "let the worker die silently on operational failure",

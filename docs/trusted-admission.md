@@ -131,7 +131,19 @@ policy commit/hash, the enrollment's reviewer actors and a digest of those
 policy-governed profile fields; a binding is current only while the registry
 still approves the same policy and names the same reviewers and the engine
 profile still digests identically, so reviewer rotation or a profile edit after
-admission blocks projection until the tuple is re-admitted. That source is inactive until an external
+admission blocks projection until the tuple is re-admitted.
+
+Approved-policy transport never runs inside the engine's SQLite write
+transaction: the service stages the bounded read before `BEGIN IMMEDIATE`,
+hash-verifies the bytes against the enrollment and keeps at most eight such
+immutable `(repository, commit, sha256)` entries in memory; the admission hook
+re-hashes and re-validates the staged bytes inside the transaction from a reader
+that performs no I/O. A transient transport failure (connection error, timeout,
+HTTP 429/5xx) is a retryable service failure: the webhook answers 503
+`dependency_unavailable`, nothing is written, and GitHub redelivers. Malformed,
+foreign or otherwise rejected deliveries still answer 400.
+
+That source is inactive until an external
 service registry (mode exactly 0600, single link, non-writable same-user parent,
 outside source, checkout, state and proof roots, opened without following
 symlinks and read from the validated descriptor, re-read on every delivery and

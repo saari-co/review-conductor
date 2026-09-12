@@ -39,10 +39,12 @@ activation.**
 The live enrollment registry is an external same-user regular file with mode
 exactly `0600`, never a target-repository file. The entrypoint refuses a registry
 located inside this source tree, the target checkout, or the state/proof roots,
-walks the canonical path with held directory descriptors (refusing any symlink
-component and any forbidden root by device/inode), requires a same-user parent
-directory that is not group/world writable, opens the leaf relative to that held
-parent without following symlinks, validates and reads the opened descriptor,
+canonicalizes only the ancestors, walks them with held directory descriptors
+(refusing any symlink component and any forbidden root by device/inode),
+requires a same-user parent directory that is not group/world writable, opens
+the original leaf name relative to that held parent without following symlinks
+(so a leaf swapped for a symlink is refused, never canonicalized), treats a
+symlink loop as an unavailable registry, validates and reads the opened descriptor,
 and re-reads and re-validates the file on every delivery and worker tick, so a
 promotion or revocation takes effect without restart and a registry that stops
 validating fails every delivery and tick closed. It must contain exactly the repository/name/ID,
@@ -62,7 +64,11 @@ Every worker tick re-checks that the running profile's App, installation,
 repository and reviewer actors are the registry's enrollment, and that each live
 head's binding was admitted under the same policy, reviewer actors and
 policy-governed profile fields that hold now; rotating reviewers or editing the
-profile blocks projection until each head is re-admitted. Fail-closed admission conditions are
+profile blocks projection until each head is re-admitted. Approved-policy
+transport is staged before the engine's write transaction and hash-verified
+against the enrollment; a transient GitHub failure answers the webhook with 503
+`dependency_unavailable` and writes nothing, so GitHub redelivers, while
+malformed or foreign deliveries still answer 400. Fail-closed admission conditions are
 retried on the next tick; any other worker failure (database, filesystem,
 unexpected) stops the whole service with exit status 2 rather than leaving
 ingress accepting deliveries that nothing will act on. The GitHub App client
