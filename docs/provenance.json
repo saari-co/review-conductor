@@ -56,8 +56,8 @@
       "source_path": "contracts/review-conductor/openclaw-smcbd-suite-userland.json",
       "destination_path": "contracts/review-conductor/openclaw-smcbd-suite-userland.json",
       "source_sha256": "f603f8b53e6ac4dcb49fba0cfdaa4336af21550ba0d53e6948ab75ba7cab7e7b",
-      "destination_sha256": "6911c652241ba1acc3ddadcf6e3c0885fba161c946df7f92b48011f134227d24",
-      "adaptation": "inactive SMCBD candidate: verified App 4916376/installation 161027021, proposed isolated hostname/tunnel name, Contents-read requirement and explicit activation blockers"
+      "destination_sha256": "e9775049f4498831e9f7f548b06a157a2396be86c6c0a881dd598649fdecd36d",
+      "adaptation": "inactive SMCBD candidate: verified App 4916376/installation 161027021, proposed isolated hostname/tunnel name, Contents-read requirement, promoted-policy and shadow-pilot blockers, and no activation"
     },
     {
       "source_path": "contracts/review-conductor/openclaw-smcbd-suite.json",
