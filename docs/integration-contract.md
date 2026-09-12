@@ -16,7 +16,7 @@ credential selectors, reviewer identity overrides, or install/state roots.
 `validate-manifest` performs syntax/policy checks offline. A valid manifest is
 **not enrollment, identity verification, review PASS, or activation approval**.
 
-## Trusted admission (library and source transport implemented; not deployed)
+## Trusted admission (inactive source integration; not deployed)
 
 1. Resolve repository numeric ID and installation from the service-owned registry.
 2. Read policy from the registry's approved base commit and content hash, not
@@ -30,16 +30,14 @@ credential selectors, reviewer identity overrides, or install/state roots.
    skipped rail is not PASS; no result authorizes merge.
 
 `tools/trusted_admission.py` implements the inert contract. The source-only
-`tools/service_runtime.py` authenticates before parsing, rejects unknown App /
-installation / numeric repository tuples, retrieves only the approved manifest
-path at the pinned commit, requires the admitted manifest to agree with the
-engine profile, and persists the policy binding in the same SQLite transaction
-as the accepted `pull_request` delivery that established the head. `workflow_run`
-deliveries never create bindings. Worker/check projection is blocked if a
-current head lacks a current binding; the registry is re-read on every delivery
-and tick. See [trusted admission](trusted-admission.md).
-No live registry, credential, HTTPS edge or deployment exists, so this is
-qualified source behavior, not live admission.
+`tools/service_runtime.py` authenticates before parsing, resolves the exact App,
+installation and repository identity, retrieves approved bytes through an
+injected reader outside the engine write transaction, and persists the policy
+binding atomically with the accepted `pull_request` delivery. `workflow_run`,
+closed and duplicate deliveries never create bindings. The registry file loader
+uses descriptor-based ownership/mode/path checks, but there is no executable
+service entrypoint, credential reader or live transport. Source qualification is
+not live admission.
 
 ## Service-owned enrollment
 
@@ -50,8 +48,8 @@ reviewer credential boundary and mutable store must be isolated. A target cannot
 request another target's installation, read its evidence, or supply its reviewers.
 No credentials or live deployment files are included. The inactive SMCBD
 candidate pins App `4916376`, installation `161027021`, repository
-`saari-co/openclaw-smcbd-suite` and repository ID `1366416798` while retaining
-explicit activation blockers.
+`saari-co/openclaw-smcbd-suite`, and repository ID `1366416798`; that identity
+record is not enrollment activation.
 
 ## Gateway/client contract (planned; no server or plugin installed)
 

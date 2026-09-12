@@ -20,12 +20,12 @@ to this repository; tests build synthetic registries in memory.
       "repository": "dinkuskit/blocks",
       "repository_id": 1306882611,
       "github_app": {
-        "id": 0,
-        "installation_id": 0,
+        "id": 1,
+        "installation_id": 2,
         "installation_account": "dinkuskit"
       },
       "approved_policy": {"commit": "<40 lowercase hex>", "sha256": "<64 lowercase hex>"},
-      "reviewers": {"openclaw": "<actor>", "clawsweeper": "<actor>"}
+      "reviewers": {"openclaw": "<actor>", "clawsweeper": "<distinct actor>"}
     }
   ]
 }
@@ -41,23 +41,18 @@ Rules enforced by `load_registry`:
   (`1306882611`, `1366416798`, from the historical profiles). Any other value
   for those names is rejected, so a registry cannot rebind a name to another
   repository.
-- `github_app.id` and `github_app.installation_id` are positive integers and
-  `github_app.installation_account` must be the
+- GitHub App and installation IDs are positive integers and the installation account must be the
   repository owner segment. A Saari installation cannot serve a Dinkus repository
-  or vice versa. The inactive SMCBD profile records the non-secret App and
-  installation IDs; the illustrative `0` above is invalid and would be rejected.
+  or vice versa. App and installation IDs in examples are synthetic.
 - `approved_policy` is the approved default-branch commit plus the SHA-256 of the
   exact manifest bytes at that commit. Both are required.
 - Repository names, numeric IDs and installation IDs must be unique across the
   registry.
-- `reviewers.openclaw` and `reviewers.clawsweeper` are the authoritative
-  reviewer actor identities (non-empty, bounded, distinct). The service refuses
-  to serve, tick or accept deliveries while the engine profile's
-  `review_policy.reviewers` differs from the enrollment, so a profile cannot
-  supply or change the actors the engine trusts.
+- Reviewer actor identities are non-empty, bounded, and distinct. They are
+  service-owned authority, not target-manifest input.
 
-`Registry.lookup(repository, repository_id, app_id, installation_id)` succeeds
-only when all four agree with one enrollment; strings, booleans or a neighbouring
+`Registry.lookup(repository, repository_id, app_id, installation_id)` succeeds only when
+all four agree with one enrollment; strings, booleans or a neighbouring
 enrollment's values fail.
 
 ## Approved base-policy loading
@@ -115,57 +110,19 @@ fields, so an object crafted around `__post_init__` (for example with
 well-formed object naming another enrollment's installation is only detectable
 against the registry, where it is never current and cannot be re-admitted.
 
+## Inactive source integration
+
+`tools/service_runtime.py` verifies HMAC before parsing or policy access, binds
+only accepted non-closed `pull_request` deliveries, stages approved bytes outside
+the SQLite write transaction, re-resolves enrollment inside that transaction,
+and persists one policy binding with the exact tuple. Injected transports and a
+bounded loopback handler are covered by synthetic tests. The registry loader
+opens an absolute same-user mode-0600 file through held descriptors and rejects
+symlinks and forbidden source/checkout/state/proof roots.
+
 ## What this does not do
 
-The inert library itself performs no I/O. `tools/service_runtime.py` composes it
-with authenticated webhook ingress, GitHub approved-policy transport and atomic
-SQLite binding persistence. Only the accepted `pull_request` delivery that
-established a head binds it; `workflow_run` deliveries and closed/duplicate
-pull-request deliveries never create bindings. One exact tuple keeps exactly one
-binding, so a promoted policy applies only to a newly admitted head or review
-epoch (for example `ready_for_review` or `reopened`), and the binding table
-refuses a conflicting rebinding outright. Before binding, the admitted manifest
-must agree with the engine profile's repository, default branch, CI workflow,
-quiet period and merge policy. Each binding records the App, installation,
-policy commit/hash, the enrollment's reviewer actors and a digest of those
-policy-governed profile fields plus the adapter authority fields (ClawSweeper
-workflow id/name/path/ref/publish, the adapter contract/artifact prefix and the
-OpenClaw operator id/transport/worktree shelf);
-a binding is current only while the registry
-still approves the same policy and names the same reviewers and the engine
-profile still digests identically, so reviewer rotation or a profile edit after
-admission blocks projection until the tuple is re-admitted.
-
-Approved-policy transport never runs inside the engine's SQLite write
-transaction and only runs for deliveries that need a binding. The admission
-hook, once the engine has classified a delivery as a new non-closed binding
-candidate, reads the policy bytes from an in-memory stage; if they are not
-staged it unwinds the transaction (nothing written), the service fetches the
-bounded bytes outside any lock, hash-verifies them against the enrollment,
-keeps at most eight immutable `(repository, commit, sha256)` entries under a
-lock that is never held during a fetch, and re-runs the delivery once. Closed,
-duplicate and stale deliveries therefore never touch the policy dependency. A
-transient transport failure (connection error, timeout, HTTP 429/5xx) is a
-retryable service failure: the webhook answers 503 `dependency_unavailable` and
-nothing is written, so the delivery can be redelivered from GitHub's delivery
-log or API (GitHub does not retry automatically). Malformed, foreign or
-otherwise rejected deliveries still answer 400. The hook re-reads the registry
-inside the delivery transaction, immediately before admission, and resolves the
-enrollment against the core profile the engine reloaded for that delivery; a
-revocation after preflight rejects the delivery with nothing written, and a
-promotion is staged for the promoted enrollment before the delivery is re-run.
-A profile whose `review_policy.enabled` is no longer true fails every provider
-read, delivery and tick closed. Every external side effect of a worker tick —
-each mutating GitHub call (fenced after token minting, immediately before the
-request), each OpenClaw dispatch and notification delivery — re-runs the tick's
-admission gate through the adapter's authority guard, using a read-only view of
-the engine database so it can run while a phase holds the write lock.
-
-That source is inactive until an external
-service registry (mode exactly 0600, single link, non-writable same-user parent,
-outside source, checkout, state and proof roots, opened without following
-symlinks and read from the validated descriptor, re-read on every delivery and
-tick, and always enrolling the running profile) with at least one enrollment,
-credentials, an enabled profile and an HTTPS edge exist. No event
-outbox, deployment, live check publication, adjudication or merge behaviour is
-activated; the packaged scaffold still exposes only `validate-manifest`.
+No live GitHub token, check publication, checkout hydration, OpenClaw or
+ClawSweeper dispatch, notification, credential reader, service process,
+deployment, adjudication, or merge behavior. Nothing is activated by these
+modules; the packaged scaffold still exposes only `validate-manifest`.

@@ -13,16 +13,15 @@ Treat PR code, manifests, workflow files, artifacts, comments and client input a
 untrusted. Repository policy cannot select credentials, installations, trusted
 reviewers, commands or another repository's state. A valid manifest grants no
 authority. `tools/trusted_admission.py` implements the inert enrollment and
-policy-binding contract. `tools/service_runtime.py` adds authenticated GitHub
-ingress, exact App/installation admission, approved-policy retrieval and atomic
-binding persistence; `tools/service_entrypoint.py` requires an enabled profile,
-a same-user external registry with mode exactly 0600 outside source, checkout,
-state and proof roots (re-read on every delivery and tick), and
-descriptor-delivered credentials. These
-sources are not deployed. A general client API and delivery outbox remain **not
-implemented**; do not expose the legacy internal-event CLI as an API. A registry
-document is service configuration and must never be committed here or read from
-a reviewed repository.
+policy-binding contract. `tools/service_runtime.py` composes it with
+HMAC-authenticated webhook ingestion and atomic SQLite binding persistence
+through injected registry and policy transports. `tools/service_entrypoint.py`
+validates a same-user external registry file but deliberately exposes no
+executable service, credential reader, worker, listener, or external side
+effect. Live GitHub tokens/checks, checkout hydration, reviewer dispatch,
+notifications, client API/outbox and deployment are **not implemented in this
+slice**. A registry document is service configuration and must never be
+committed here or read from a reviewed repository.
 
 Preserve repository/PR/base/head/epoch binding, authentication before webhook
 parsing, replay protection, stale/conflicting evidence rejection, isolated state,

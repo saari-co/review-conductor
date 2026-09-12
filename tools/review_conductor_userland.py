@@ -253,15 +253,9 @@ def load_config(
         raise UserlandError("legacy GitHub App scope must remain exact dinkuskit/blocks")
     if app["repository"] != core_profile["repository"] or app["repository_id"] != core_profile["repository_id"]:
         raise UserlandError("GitHub App scope must match the exact core repository")
-    expected_permissions = (
-        runtime.STANDALONE_APP_PERMISSIONS if generalized else runtime.APP_PERMISSIONS
-    )
-    expected_denied_permissions = (
-        runtime.STANDALONE_DENIED_PERMISSIONS if generalized else runtime.DENIED_PERMISSIONS
-    )
-    if app["permissions"] != expected_permissions:
+    if app["permissions"] != runtime.APP_PERMISSIONS:
         raise UserlandError("GitHub App permissions differ from the closed allowlist")
-    if set(app["denied_permissions"]) != expected_denied_permissions:
+    if set(app["denied_permissions"]) != runtime.DENIED_PERMISSIONS:
         raise UserlandError("GitHub App denied permissions are incomplete")
     if app["events"] != runtime.APP_EVENTS:
         raise UserlandError("GitHub App events must remain pull_request and workflow_run")
@@ -1903,8 +1897,6 @@ def run_tick(
         else runtime.drain_bridge_inboxes(config)
     )
     projection = runtime.reconcile_projection(config, client, dry_run=dry_run)
-    if not dry_run:
-        runtime.assert_authority(client, "notifications")
     notifications = deliver_notifications(
         config,
         notifier,
@@ -2051,10 +2043,6 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         config = load_config(args.config)
-        if config.get("profile_id") and args.command not in {"health", "status"}:
-            raise UserlandError(
-                "standalone profiles require tools/service_entrypoint.py and trusted admission"
-            )
         if args.command not in {"health", "status"}:
             profiles.require_enabled(config)
         if args.command == "health":

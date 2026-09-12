@@ -1,19 +1,16 @@
-#!/usr/bin/env python3
-"""Inactive standalone service entrypoint; activation requires external state."""
+"""Service-owned enrollment-registry loader for the inactive service core.
+
+This module deliberately has no executable entrypoint, credential reader,
+worker, network listener, or external side effect. Live wiring belongs to the
+separately reviewed adapter slice.
+"""
 from __future__ import annotations
 
-import argparse
 import os
 from pathlib import Path
 import stat
-import sys
-import threading
 from typing import Iterable
 
-import review_conductor as core
-import review_conductor_profiles as profiles
-import review_conductor_runtime as runtime
-import review_conductor_userland as userland
 import service_runtime as service
 import trusted_admission as admission
 
@@ -205,92 +202,3 @@ def registry_provider(path: Path, config: dict):
         return registry
 
     return provide
-
-
-class ServiceStopped(service.ServiceError):
-    """The worker hit an operational failure and stopped the whole service."""
-
-
-def serve(profile_path: Path, registry_path: Path) -> None:
-    config = userland.load_config(profile_path)
-    profiles.require_enabled(config)
-    provide_registry = registry_provider(registry_path, config)
-    provide_registry()
-    webhook_secret = userland.read_inherited_value(
-        config["credentials"]["webhook_secret_fd_env"], "GitHub webhook secret"
-    )
-    client = userland.build_client(config)
-    notifier = userland.OpenClawNotifier(config)
-    stop = threading.Event()
-    failure: list[BaseException] = []
-    server = None
-    worker = threading.Thread(
-        target=lambda: _worker_loop(config, provide_registry, client, notifier, stop, failure, lambda: server),
-        name="review-conductor-service",
-        daemon=True,
-    )
-    try:
-        # Bind ingress before any worker exists so a failed startup cannot leave a
-        # detached worker draining actions, publishing checks or notifying.
-        handler = service.build_service_http_handler(
-            config,
-            secret=webhook_secret,
-            registry=provide_registry,
-            read_policy=client.read_policy,
-        )
-        server = runtime.BoundedHTTPServer(
-            (config["ingress"]["bind_host"], config["ingress"]["bind_port"]),
-            handler,
-            request_timeout_seconds=config["ingress"]["request_timeout_seconds"],
-        )
-        worker.start()
-        server.serve_forever(poll_interval=0.5)
-    finally:
-        stop.set()
-        if server is not None:
-            server.server_close()
-        if worker.is_alive():
-            worker.join(timeout=config["worker"]["tick_seconds"] + 1)
-        webhook_secret = ""
-    if failure:
-        # The worker stopped the service; surface its operational failure instead of
-        # letting ingress keep accepting deliveries that nothing will act on.
-        raise ServiceStopped("worker failed; service stopped") from failure[0]
-
-
-def _worker_loop(config, provide_registry, client, notifier, stop, failure, get_server) -> None:
-    while not stop.is_set():
-        try:
-            service.run_service_tick(
-                config, provide_registry, client, notifier, dry_run=False
-            )
-        except core.ContractError:
-            # Fail-closed admission/policy conditions are retried on the next tick.
-            pass
-        except BaseException as exc:  # sqlite3.Error, OSError, or anything unexpected
-            failure.append(exc)
-            stop.set()
-            server = get_server()
-            if server is not None:
-                server.shutdown()
-            return
-        if stop.wait(config["worker"]["tick_seconds"]):
-            return
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--profile", type=Path, required=True)
-    parser.add_argument("--registry", type=Path, required=True)
-    parser.add_argument("--apply", action="store_true", required=True)
-    args = parser.parse_args(argv)
-    try:
-        serve(args.profile, args.registry)
-    except (core.ContractError, OSError) as exc:
-        print(f"review-conductor-service: {exc}", file=sys.stderr)
-        return 2
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
