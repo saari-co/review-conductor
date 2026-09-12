@@ -7,8 +7,8 @@
       "source_path": "tools/review_conductor.py",
       "destination_path": "tools/review_conductor.py",
       "source_sha256": "3915b5d15b9226b29c9e1fe6b74af71a08bb787c68e2e6bd8b63fef86924eda4",
-      "destination_sha256": "a6b287732e6139ce4c655b0852d2ff78faf745e196b7481c12c4e3eb7120b0b4",
-      "adaptation": "standalone admission hook plus an optional per-command authority callback for multi-step OpenClaw dispatch; legacy callers remain unchanged"
+      "destination_sha256": "dde1004db27b8692987b76360fa17771377ce812a06bcd7e367a1a651855002a",
+      "adaptation": "standalone admission hook plus a distinct recoverable pre-transport authority denial and optional per-command authority callback for multi-step OpenClaw dispatch; legacy callers remain unchanged"
     },
     {
       "source_path": "tools/review_conductor_profiles.py",
@@ -21,15 +21,15 @@
       "source_path": "tools/review_conductor_runtime.py",
       "destination_path": "tools/review_conductor_runtime.py",
       "source_sha256": "22fff3925db126de0fc27e9c61be03cd710d24d9140342ff8367e9831e683d40",
-      "destination_sha256": "9c59ff3a642d21d74578a016013bbb5d119e08d78aa0a50a32918dcf9b4e24fd",
-      "adaptation": "standalone policy-read/check adapter with profile-selected least privilege, immutable App and ClawSweeper maps, synchronized installation-token caching, unfenced policy-fetch token minting, injected signer/ingestor seams, transient 503 classification, and fresh fences before each mutating GitHub or OpenClaw command"
+      "destination_sha256": "b80ad704715236e5a43b95f573634832e4a29743159bb47a04f829aa44e6d5be",
+      "adaptation": "standalone policy-read/check adapter with profile-selected least privilege, immutable App and ClawSweeper maps, synchronized installation-token caching, unfenced policy-fetch token minting, injected signer/ingestor seams, transient 503 classification, fresh fences before each mutating GitHub or OpenClaw command, and recoverable pre-request authority denial"
     },
     {
       "source_path": "tools/review_conductor_userland.py",
       "destination_path": "tools/review_conductor_userland.py",
       "source_sha256": "0f19c2143f568117fa44b29bd56cb652df511f6e19c6ea8d100389dc2605a106",
-      "destination_sha256": "44532a9a45eea4effb0ca6648cd10bd20d62b3f0301b0ccd0ea1feee687242af",
-      "adaptation": "generalized standalone profiles require Contents read and the trusted service entrypoint; legacy Blocks permissions and CLI route remain accepted unchanged; checkout fetches and every notification send use fresh admission-authority fences"
+      "destination_sha256": "57ae710ae8add11c982da04f874b0c4f993e50f2304d8bf7df2551b055523e02",
+      "adaptation": "generalized standalone profiles require Contents read and the trusted service entrypoint; legacy Blocks permissions and CLI route remain accepted unchanged; checkout fetches and every notification send use fresh admission-authority fences, with revocation preserved as recoverable pending work"
     },
     {
       "source_path": "tools/review_conductor_userland_launcher.py",

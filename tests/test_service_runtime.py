@@ -206,6 +206,36 @@ class AdmissionIngressTests(unittest.TestCase):
         self.assertEqual(duplicate["result"], "duplicate_delivery")
         self.assertEqual(duplicate["admission_binding_id"], receipt["admission_binding_id"])
 
+    def test_legacy_binding_schema_is_migrated_but_never_trusted(self):
+        self.fx.ingest("legacy-schema", self.fx.payload())
+        connection = core.open_database(self.fx.state, REPOSITORY)
+        try:
+            connection.execute("ALTER TABLE service_policy_bindings RENAME TO current_bindings")
+            connection.execute(
+                """CREATE TABLE service_policy_bindings AS
+                   SELECT repository, pr_number, base_sha, head_sha, review_epoch,
+                          app_id, installation_id, policy_commit, policy_sha256,
+                          policy_id, binding_id, reviewer_openclaw,
+                          reviewer_clawsweeper, created_at
+                   FROM current_bindings"""
+            )
+            connection.execute("DROP TABLE current_bindings")
+            connection.commit()
+            self.assertIsNone(service.binding_for_current_head(
+                connection, self.fx.registry(), REPOSITORY, 7,
+                self.fx.core_config(), self.fx.app_config(),
+            ))
+            service._ensure_binding_table(connection)
+            columns = {row["name"] for row in connection.execute(
+                "PRAGMA table_info(service_policy_bindings)"
+            )}
+            self.assertIn("profile_digest", columns)
+            self.assertIsNone(connection.execute(
+                "SELECT profile_digest FROM service_policy_bindings"
+            ).fetchone()[0])
+        finally:
+            connection.close()
+
     def test_authentication_precedes_payload_registry_and_policy_processing(self):
         # A well-formed, enrolled payload with a forged signature must be refused before
         # JSON parsing, enrollment lookup or policy transport can observe it.
@@ -1283,6 +1313,37 @@ class AdmissionIngressTests(unittest.TestCase):
             self.assertEqual(touched, [])
             self.assertRegex(client.operation, r"^checkout-hydration:act-[0-9a-f]{32}$")
 
+            connection = core.open_database(Path(config["paths"]["state_root"]), config["repository"])
+            try:
+                self.assertEqual(connection.execute(
+                    "SELECT status FROM actions WHERE kind='openclaw.enqueue'"
+                ).fetchone()[0], "pending")
+            finally:
+                connection.close()
+
+    def test_authority_denial_inside_checkout_hydration_keeps_action_pending(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = legacy.config_fixture(Path(temporary))
+            legacy.ingress(config, "pull_request", "hydrate-pr", legacy.pr_payload(80))
+            legacy.ingress(config, "workflow_run", "hydrate-ci", legacy.ci_payload(80, 1080))
+
+            with patch.object(
+                userland, "hydrate_exact_pr_head",
+                side_effect=core.AuthorityDenied("revoked during hydration"),
+            ):
+                with self.assertRaises(core.AuthorityDenied):
+                    userland.hydrate_pending_openclaw_heads(
+                        config, dry_run=False, authority_client=None
+                    )
+            connection = core.open_database(Path(config["paths"]["state_root"]), config["repository"])
+            try:
+                row = connection.execute(
+                    "SELECT status, claim_owner FROM actions WHERE kind='openclaw.enqueue'"
+                ).fetchone()
+                self.assertEqual((row["status"], row["claim_owner"]), ("pending", None))
+            finally:
+                connection.close()
+
     def test_each_openclaw_external_command_has_a_fresh_authority_fence(self):
         with tempfile.TemporaryDirectory() as temporary:
             config = legacy.config_fixture(Path(temporary))
@@ -1295,7 +1356,7 @@ class AdmissionIngressTests(unittest.TestCase):
             def fence(index, _command):
                 fences.append(index)
                 if index == 1:
-                    raise service.ServiceError("revoked between OpenClaw commands")
+                    raise core.AuthorityDenied("revoked between OpenClaw commands")
 
             def run(command, _label):
                 commands.append(command)
@@ -1320,6 +1381,15 @@ class AdmissionIngressTests(unittest.TestCase):
                     core.dispatch_action(args)
             self.assertEqual(fences, [0, 1])
             self.assertEqual(len(commands), 1)
+            connection = core.open_database(Path(config["paths"]["state_root"]), config["repository"])
+            try:
+                row = connection.execute(
+                    "SELECT status, claim_owner FROM actions WHERE action_id=?",
+                    (action["action_id"],),
+                ).fetchone()
+                self.assertEqual((row["status"], row["claim_owner"]), ("pending", None))
+            finally:
+                connection.close()
 
     def test_each_notification_send_has_a_fresh_authority_fence(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -2314,7 +2384,7 @@ MUTANTS = [
     (
         "skip the authority guard before mutating GitHub calls",
         "tools/review_conductor_runtime.py",
-        '        if (\n            self._authority_guard is not None\n            and method != "GET"\n            and operation != "installation-token"\n        ):\n            self._authority_guard(method, path)\n',
+        '        if (\n            self._authority_guard is not None\n            and method != "GET"\n            and operation != "installation-token"\n        ):\n            try:\n                self._authority_guard(method, path)\n            except core.AuthorityDenied:\n                raise\n            except Exception as exc:\n                raise core.AuthorityDenied(\n                    "authority revoked before GitHub request"\n                ) from exc\n',
         "        pass\n",
         "AdmissionIngressTests.test_tick_side_effects_revalidate_admission_before_each_mutating_call",
     ),

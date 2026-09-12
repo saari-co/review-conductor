@@ -53,6 +53,10 @@ class ContractError(RuntimeError):
     """Input or state violated the closed Review Conductor contract."""
 
 
+class AuthorityDenied(ContractError):
+    """A current authority fence denied a side effect before transport began."""
+
+
 def utc_now() -> str:
     return dt.datetime.now(tz=UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -1973,6 +1977,19 @@ def dispatch_action(args: argparse.Namespace) -> dict[str, Any]:
                 raise ContractError("action dispatch completion lost its atomic claim")
             connection.commit()
             return receipt_payload
+        except AuthorityDenied:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE actions SET status = 'pending', claim_owner = NULL,
+                  claimed_at = NULL, lease_expires_at = NULL,
+                  last_error = 'authority revoked before external command', updated_at = ?
+                WHERE action_id = ? AND status = 'dispatching' AND attempts = ?
+                """,
+                (utc_now(), args.action_id, claimed_attempts),
+            )
+            connection.commit()
+            raise
         except Exception as exc:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(

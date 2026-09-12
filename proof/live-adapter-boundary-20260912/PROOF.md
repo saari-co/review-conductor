@@ -33,10 +33,15 @@ It remains disabled and is reviewed independently from the admission core.
 7. Every individual notification send receives a fresh authority fence.
 8. A live client must implement both guard installation and authority
    assertion; partial implementations fail closed.
+9. Databases created before profile-digest binding are migrated in place, but
+   their legacy rows remain untrusted until exact-tuple readmission.
+10. Authority denial before transport releases claimed check, ClawSweeper,
+    checkout and OpenClaw work back to `pending`; it is not misclassified as a
+    failed or uncertain external side effect.
 
 ## Executable proof
 
-- Focused live service/adapter suite: 55 tests passed.
+- Focused live service/adapter suite: 58 tests passed.
 - Executable mutation suite: all 57 precise mutants killed.
 - The added cases directly exercise concurrent token minting, promotion after
   a stale binding, reloaded core identity, read-only/disappearing SQLite state,

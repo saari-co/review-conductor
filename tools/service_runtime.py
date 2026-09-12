@@ -282,6 +282,16 @@ def _ensure_binding_table(connection: sqlite3.Connection) -> None:
         )
         """
     )
+    columns = {
+        row["name"] if isinstance(row, sqlite3.Row) else row[1]
+        for row in connection.execute("PRAGMA table_info(service_policy_bindings)")
+    }
+    if "profile_digest" not in columns:
+        # PR #3 databases predate profile-digest currency. Preserve their rows as
+        # untrusted until a new exact tuple is admitted under the current profile.
+        connection.execute(
+            "ALTER TABLE service_policy_bindings ADD COLUMN profile_digest TEXT"
+        )
 
 
 def _persist_binding(
@@ -488,6 +498,12 @@ def binding_for_current_head(
     if connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='service_policy_bindings'"
     ).fetchone() is None:
+        return None
+    columns = {
+        row["name"] if isinstance(row, sqlite3.Row) else row[1]
+        for row in connection.execute("PRAGMA table_info(service_policy_bindings)")
+    }
+    if "profile_digest" not in columns:
         return None
     row = connection.execute(
         """

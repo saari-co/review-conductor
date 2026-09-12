@@ -135,6 +135,10 @@ a binding is current only while the registry
 still approves the same policy and names the same reviewers and the engine
 profile still digests identically, so reviewer rotation or a profile edit after
 admission blocks projection until the tuple is re-admitted.
+Databases created by the inactive service-core PR predate `profile_digest`.
+Startup adds that nullable column in place; pre-migration rows remain `NULL` and
+therefore cannot satisfy the read-only authority gate until the exact tuple is
+admitted under the current profile.
 
 Approved-policy transport never runs inside the engine's SQLite write
 transaction and only runs for deliveries that need a binding. The admission
@@ -157,9 +161,12 @@ promotion is staged for the promoted enrollment before the delivery is re-run.
 A profile whose `review_policy.enabled` is no longer true fails every provider
 read, delivery and tick closed. Every external side effect of a worker tick —
 each mutating GitHub call (fenced after token minting, immediately before the
-request), each OpenClaw dispatch and notification delivery — re-runs the tick's
+request), checkout hydration, each OpenClaw command and notification delivery — re-runs the tick's
 admission gate through the adapter's authority guard, using a read-only view of
-the engine database so it can run while a phase holds the write lock.
+the engine database so it can run while a phase holds the write lock. A denial
+before transport is a distinct recoverable outcome: the claim is released and
+left pending, rather than being terminalized as a failed or uncertain external
+side effect.
 
 That source is inactive until an external
 service registry (mode exactly 0600, single link, non-writable same-user parent,

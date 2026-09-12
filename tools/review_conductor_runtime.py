@@ -106,7 +106,12 @@ def assert_authority(client: Any, operation: str) -> None:
     """
     check = getattr(client, "assert_authority", None)
     if check is not None:
-        check(operation)
+        try:
+            check(operation)
+        except core.AuthorityDenied:
+            raise
+        except Exception as exc:
+            raise core.AuthorityDenied("authority revoked before side effect") from exc
 
 
 def require_absolute_path(value: Any, label: str) -> Path:
@@ -432,7 +437,14 @@ class GitHubAppClient:
             and method != "GET"
             and operation != "installation-token"
         ):
-            self._authority_guard(method, path)
+            try:
+                self._authority_guard(method, path)
+            except core.AuthorityDenied:
+                raise
+            except Exception as exc:
+                raise core.AuthorityDenied(
+                    "authority revoked before GitHub request"
+                ) from exc
         status, raw = self._transport(
             method, self._app["api_base"] + path, headers, body, 15.0
         )
@@ -903,7 +915,27 @@ def reconcile_projection(
                     )
                     if current is None or int(current["review_epoch"]) != row["review_epoch"]:
                         raise RuntimeError("check creation claim became stale before projection")
-                    check_id = client.create_check(name, row["head_sha"], external_id, check_state)
+                    try:
+                        check_id = client.create_check(
+                            name, row["head_sha"], external_id, check_state
+                        )
+                    except core.AuthorityDenied:
+                        connection.execute(
+                            f"""
+                            UPDATE projections SET {create_state_column} = 'pending',
+                              last_error = 'authority revoked before check creation',
+                              updated_at = ?
+                            WHERE repository = ? AND pr_number = ? AND base_sha = ?
+                              AND head_sha = ? AND review_epoch = ? AND {column} IS NULL
+                              AND {create_state_column} = 'creating'
+                            """,
+                            (
+                                core.utc_now(), row["repository"], row["pr_number"],
+                                row["base_sha"], row["head_sha"], row["review_epoch"],
+                            ),
+                        )
+                        connection.commit()
+                        raise
                     connection.execute(
                         f"""
                         UPDATE projections SET {column} = ?, {create_state_column} = 'active',
@@ -1272,6 +1304,19 @@ def dispatch_clawsweeper_action(
                 publish=payload["publish"],
                 **({"review_epoch": payload["review_epoch"]} if config.get("review_policy") else {}),
             )
+        except core.AuthorityDenied:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE actions SET status = 'pending', claim_owner = NULL,
+                  claimed_at = NULL, lease_expires_at = NULL,
+                  last_error = 'authority revoked before workflow dispatch', updated_at = ?
+                WHERE action_id = ? AND status = 'dispatching' AND attempts = ?
+                """,
+                (core.utc_now(), action_id, attempts),
+            )
+            connection.commit()
+            raise
         except Exception:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
@@ -1392,6 +1437,8 @@ def drain_actions(
             try:
                 with service_transport_environment(config):
                     outcomes.append(core.dispatch_action(args))
+            except core.AuthorityDenied:
+                raise
             except core.ContractError:
                 connection = core.open_database(Path(config["paths"]["state_root"]), config["github_app"]["repository"])
                 try:

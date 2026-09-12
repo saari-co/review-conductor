@@ -1482,6 +1482,8 @@ def hydrate_pending_openclaw_heads(
                     config, row, authority_client=authority_client
                 )
             )
+        except core.AuthorityDenied:
+            raise
         except core.ContractError:
             connection = core.open_database(Path(config["paths"]["state_root"]), config["github_app"]["repository"])
             try:
