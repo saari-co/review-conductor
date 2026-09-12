@@ -120,7 +120,12 @@ class ServiceFixture:
                 "workflow_id": "clawsweeper-exact-tuple.yml",
                 "ref": "main",
             },
-            "spark": {"target": "spark-2"},
+            "spark": {
+                "target": "spark-2",
+                "smoky_path": "bin/smoky",
+                "ssh_path": "/usr/bin/ssh",
+                "scp_path": "/usr/bin/scp",
+            },
             "adapter": {"contract": "exact-tuple-comprehensive-v1", "artifact_prefix": "fixture-review"},
         }
 
@@ -628,6 +633,16 @@ class AdmissionIngressTests(unittest.TestCase):
         changed_service["spark"]["target"] = "spark-2.swarm"
         with self.assertRaises(core.ContractError):
             service.require_current_bindings(changed_service, self.fx.registry())
+        for selector, replacement in (
+            ("smoky_path", "/opt/review-conductor/bin/smoky"),
+            ("ssh_path", "/opt/review-conductor/bin/ssh"),
+            ("scp_path", "/opt/review-conductor/bin/scp"),
+        ):
+            changed_service = copy.deepcopy(self.fx.app_config())
+            changed_service["spark"][selector] = replacement
+            self.assertNotEqual(service.profile_policy_digest(self.fx.core_config(), changed_service), digest)
+            with self.subTest(selector=selector), self.assertRaises(core.ContractError):
+                service.require_current_bindings(changed_service, self.fx.registry())
         service.require_current_bindings(self.fx.app_config(), self.fx.registry())
         # Non-policy edits (for example reviewer-independent operator fields) do not
         # change the digest.
@@ -2964,6 +2979,13 @@ MUTANTS = [
         "tools/service_runtime.py",
         '            "spark_target": spark_target,\n',
         '            "spark_target": None,\n',
+        "AdmissionIngressTests.test_profile_change_after_admission_invalidates_existing_bindings",
+    ),
+    (
+        "omit effective Spark executable selectors from the binding digest",
+        "tools/service_runtime.py",
+        '            "spark_executables": spark_executables,\n',
+        '            "spark_executables": None,\n',
         "AdmissionIngressTests.test_profile_change_after_admission_invalidates_existing_bindings",
     ),
     (

@@ -131,7 +131,7 @@ policy commit/hash, the enrollment's reviewer actors and a digest of those
 policy-governed profile fields plus the adapter authority fields (ClawSweeper
 workflow id/name/path/ref/publish, the adapter contract/artifact prefix and the
 OpenClaw operator id/transport/worktree shelf and effective Spark dispatch
-target);
+target plus the configured `smoky`, `ssh` and `scp` executable selectors);
 a binding is current only while the registry
 still approves the same policy and names the same reviewers and the engine
 profile still digests identically, so reviewer rotation or a profile edit after

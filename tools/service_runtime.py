@@ -223,7 +223,8 @@ def profile_policy_digest(core_config: dict[str, Any], service_config: dict[str,
     workflow, quiet period, merge policy) and the adapter authority fields that
     select the review producers and their destinations (ClawSweeper workflow
     id/name/path/ref/publish, adapter contract/artifact prefix, OpenClaw
-    operator/transport/worktree shelf and effective Spark target). Stored with
+    operator/transport/worktree shelf and effective Spark target/executable
+    selectors). Stored with
     each binding and recompared on every tick, so a profile edited after
     admission (for example across a restart) cannot keep an old binding
     unlocking projection under rules the admitted policy never approved.
@@ -234,12 +235,18 @@ def profile_policy_digest(core_config: dict[str, Any], service_config: dict[str,
     openclaw = core.require_object(core_config.get("openclaw"), "core openclaw")
     spark = service_config.get("spark")
     spark_target = None
+    spark_executables = None
     if spark is not None:
+        spark = core.require_object(spark, "service spark")
         spark_target = core.require_text(
-            core.require_object(spark, "service spark").get("target"),
+            spark.get("target"),
             "service spark target",
             255,
         )
+        spark_executables = {
+            key: core.require_text(spark.get(key), f"service spark {key}", 4096)
+            for key in ("smoky_path", "ssh_path", "scp_path")
+        }
     adapter = service_config.get("adapter")
     if adapter is not None:
         adapter = core.require_object(adapter, "service adapter")
@@ -261,6 +268,7 @@ def profile_policy_digest(core_config: dict[str, Any], service_config: dict[str,
                 key: openclaw.get(key) for key in ("operator_id", "transport", "remote_worktree_shelf")
             },
             "spark_target": spark_target,
+            "spark_executables": spark_executables,
             "quiet_seconds": review_policy.get("quiet_seconds"),
             "merge_policy": core_config.get("merge_policy"),
         },

@@ -40,8 +40,9 @@ It remains disabled and is reviewed independently from the admission core.
 10. Authority denial before transport releases claimed check, ClawSweeper,
     checkout and OpenClaw work back to `pending`; it is not misclassified as a
     failed or uncertain external side effect.
-11. The binding digest includes the effective Spark dispatch target, so changing
-    the service-side OpenClaw destination invalidates existing bindings.
+11. The binding digest includes the effective Spark dispatch target and the
+    configured `smoky`, `ssh` and `scp` executable selectors, so changing the
+    service-side OpenClaw destination or binaries invalidates existing bindings.
 12. The injected GitHub transport's two- and three-element response forms are
     normalized for artifact downloads as well as API calls.
 13. Failed OpenClaw actions and uncertain notifications have supported
@@ -60,11 +61,12 @@ It remains disabled and is reviewed independently from the admission core.
 ## Executable proof
 
 - Focused live service/adapter suite: 66 tests passed.
-- Executable mutation suite: all 68 precise mutants killed.
+- Executable mutation suite: all 69 precise mutants killed.
 - The added cases directly exercise concurrent token minting, promotion after
   a stale binding, reloaded core identity, read-only/disappearing SQLite state,
   checkout fencing, both OpenClaw command fences, per-notification fencing,
-  incomplete live clients, the Spark dispatch target, header-aware artifact
+  incomplete live clients, the Spark dispatch target and executable selectors,
+  header-aware artifact
   transport normalization, authority-bound standalone maintenance and exact
   tuple rejection after head supersession, including stale review-result
   notification suppression, concurrent process-environment preservation and
