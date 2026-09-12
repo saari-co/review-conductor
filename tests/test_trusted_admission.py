@@ -106,7 +106,11 @@ class RegistryTests(unittest.TestCase):
         doc = self.fx.registry_doc()
         dup_repo = {**doc, "enrollments": [doc["enrollments"][0], doc["enrollments"][0]]}
         shared_install = copy.deepcopy(doc); shared_install["enrollments"][1]["github_app"]["installation_id"] = BLOCKS_INSTALL
-        for candidate in [dup_repo, shared_install, {**doc, "schema": "review-conductor.enrollment.v2"},
+        empty_reviewer = copy.deepcopy(doc); empty_reviewer["enrollments"][0]["reviewers"]["openclaw"] = ""
+        duplicate_reviewer = copy.deepcopy(doc); duplicate_reviewer["enrollments"][0]["reviewers"]["clawsweeper"] = duplicate_reviewer["enrollments"][0]["reviewers"]["openclaw"]
+        legacy_v1 = {**doc, "schema": "review-conductor.enrollment.v1"}
+        for candidate in [dup_repo, shared_install, empty_reviewer, duplicate_reviewer, legacy_v1,
+                          {**doc, "schema": "review-conductor.enrollment.v3"},
                           {**doc, "enrollments": {}}, {**doc, "extra": 1}, {"schema": ta.REGISTRY_SCHEMA}]:
             with self.subTest(candidate=candidate), self.assertRaises(ta.AdmissionError):
                 self.fx.registry(candidate)
@@ -209,6 +213,7 @@ class BindingTests(unittest.TestCase):
         self.registry = self.fx.registry()
 
     def test_admission_binds_policy_to_exact_tuple_and_epoch(self):
+        self.assertEqual(ta.BINDING_SCHEMA, "review-conductor.admission-binding.v2")
         admission = ta.admit(self.registry, request(), self.fx.read)
         self.assertEqual(dataclasses.astuple(admission.review), (BLOCKS, 1306882611, 7, BASE, HEAD, 0))
         self.assertEqual(admission.installation_id, BLOCKS_INSTALL)

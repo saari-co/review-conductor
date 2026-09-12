@@ -241,6 +241,15 @@ class AdmissionIngressTests(unittest.TestCase):
             self.assertFalse(self.fx.state.exists())
         self.assertEqual(self.fx.reads, [])
 
+    def test_reviewer_identity_mismatch_leaves_no_binding(self):
+        service_config = self.fx.app_config()
+        config = json.loads(self.fx.config_path.read_text())
+        config["review_policy"]["reviewers"]["openclaw"] = "foreign-openclaw"
+        self.fx.config_path.write_text(json.dumps(config) + "\n")
+        with self.assertRaises(core.ContractError):
+            self.fx.ingest("foreign-reviewer", self.fx.payload(), service_config=service_config)
+        self.assertEqual(self.fx.binding_rows(), [])
+
     def test_unknown_installation_repository_and_duplicate_json_fail_before_state(self):
         candidates = [
             self.fx.payload(installation=INSTALLATION_ID + 1),
@@ -361,28 +370,30 @@ class AdmissionIngressTests(unittest.TestCase):
         path = self.fx.root / "registry.json"
         path.write_text(json.dumps(document))
         path.chmod(0o600)
-        loaded = entrypoint.read_service_registry(path)
+        with self.assertRaises(TypeError):
+            entrypoint.read_service_registry(path)
+        loaded = entrypoint.read_service_registry(path, [])
         self.assertEqual(loaded.enrollments[0].app_id, APP_ID)
         # The documented contract is exactly 0600: not merely owner-only bits.
         for mode in (0o400, 0o700, 0o640, 0o604, 0o660, 0o644, 0o666, 0o610, 0o601):
             path.chmod(mode)
             with self.subTest(mode=oct(mode)), self.assertRaises(core.ContractError) as ctx:
-                entrypoint.read_service_registry(path)
+                entrypoint.read_service_registry(path, [])
             self.assertIn("mode 0600 exactly", str(ctx.exception))
         path.chmod(0o200)
         with self.assertRaises(core.ContractError):
-            entrypoint.read_service_registry(path)
+            entrypoint.read_service_registry(path, [])
         path.chmod(0o600)
         link = self.fx.root / "registry-link.json"
         link.symlink_to(path)
         relative = Path("registry.json")
         for candidate in (link, relative, self.fx.root, self.fx.root / "missing.json", str(path)):
             with self.subTest(candidate=str(candidate)), self.assertRaises(core.ContractError):
-                entrypoint.read_service_registry(candidate)
+                entrypoint.read_service_registry(candidate, [])
         hard_link = self.fx.root / "registry-hard.json"
         os.link(path, hard_link)
         with self.assertRaises(core.ContractError) as ctx:
-            entrypoint.read_service_registry(path)
+            entrypoint.read_service_registry(path, [])
         self.assertIn("exactly one link", str(ctx.exception))
         hard_link.unlink()
         nested = self.fx.root / "shared"
@@ -393,13 +404,13 @@ class AdmissionIngressTests(unittest.TestCase):
         for parent_mode in (0o777, 0o775, 0o702, 0o720):
             nested.chmod(parent_mode)
             with self.subTest(parent_mode=oct(parent_mode)), self.assertRaises(core.ContractError) as ctx:
-                entrypoint.read_service_registry(nested_registry)
+                entrypoint.read_service_registry(nested_registry, [])
             self.assertIn("parent", str(ctx.exception))
         nested.chmod(0o755)
-        self.assertEqual(entrypoint.read_service_registry(nested_registry).enrollments[0].app_id, APP_ID)
+        self.assertEqual(entrypoint.read_service_registry(nested_registry, []).enrollments[0].app_id, APP_ID)
         path.write_text(json.dumps({**document, "enrollments": []}))
         with self.assertRaises(core.ContractError):
-            entrypoint.read_service_registry(path)
+            entrypoint.read_service_registry(path, [])
 
     def test_registry_is_read_from_the_validated_descriptor_not_the_pathname(self):
         def document(app_id):
@@ -432,11 +443,11 @@ class AdmissionIngressTests(unittest.TestCase):
             return metadata
 
         with patch.object(entrypoint.os, "fstat", racing_fstat):
-            loaded = entrypoint.read_service_registry(path)
+            loaded = entrypoint.read_service_registry(path, [])
         # The bytes come from the descriptor that was validated, not from whatever
         # the pathname points at afterwards.
         self.assertEqual(loaded.enrollments[0].app_id, APP_ID)
-        self.assertEqual(entrypoint.read_service_registry(path).enrollments[0].app_id, APP_ID + 1)
+        self.assertEqual(entrypoint.read_service_registry(path, []).enrollments[0].app_id, APP_ID + 1)
 
     def test_reviewer_rotation_invalidates_existing_bindings_until_readmission(self):
         self.fx.ingest("initial", self.fx.payload())
@@ -707,24 +718,24 @@ class AdmissionIngressTests(unittest.TestCase):
 
         with patch.object(entrypoint.os, "open", racing_open):
             with self.assertRaises(core.ContractError) as ctx:
-                entrypoint.read_service_registry(path)
+                entrypoint.read_service_registry(path, [])
         self.assertTrue(swapped.is_set())
         self.assertIn("unavailable or is a symlink", str(ctx.exception))
         # The leaf is now a genuine symlink: still refused, never canonicalized.
         with self.assertRaises(core.ContractError) as ctx:
-            entrypoint.read_service_registry(path)
+            entrypoint.read_service_registry(path, [])
         self.assertIn("unavailable or is a symlink", str(ctx.exception))
         path.unlink()
         path.write_text(document)
         path.chmod(0o600)
-        self.assertEqual(entrypoint.read_service_registry(path).enrollments[0].app_id, APP_ID)
+        self.assertEqual(entrypoint.read_service_registry(path, []).enrollments[0].app_id, APP_ID)
 
     def test_registry_symlink_loop_is_a_clean_service_error(self):
         root = self.fx.root.resolve()
         (root / "loop-a").symlink_to(root / "loop-b")
         (root / "loop-b").symlink_to(root / "loop-a")
         with self.assertRaises(core.ContractError) as ctx:
-            entrypoint.read_service_registry(root / "loop-a" / "registry.json")
+            entrypoint.read_service_registry(root / "loop-a" / "registry.json", [])
         self.assertIn("registry is unavailable", str(ctx.exception))
         # Older CPython raises RuntimeError for loops instead of OSError; both are
         # normalized to the same fail-closed error.
@@ -737,7 +748,7 @@ class AdmissionIngressTests(unittest.TestCase):
 
         with patch.object(Path, "resolve", looping_resolve):
             with self.assertRaises(core.ContractError) as ctx:
-                entrypoint.read_service_registry(root / "loop-a" / "registry.json")
+                entrypoint.read_service_registry(root / "loop-a" / "registry.json", [])
         self.assertIn("registry is unavailable", str(ctx.exception))
 
     def test_binding_identity_separates_apps_with_identical_review_and_policy(self):
@@ -887,11 +898,11 @@ class AdmissionIngressTests(unittest.TestCase):
 
         with patch.object(entrypoint.os, "open", racing_open):
             with self.assertRaises(core.ContractError) as ctx:
-                entrypoint.read_service_registry(path)
+                entrypoint.read_service_registry(path, [])
         self.assertTrue(swapped.is_set())
         self.assertIn("parent changed after canonicalization", str(ctx.exception))
         # The directory now at that path is a legitimate canonical parent on its own.
-        self.assertEqual(entrypoint.read_service_registry(path).enrollments[0].app_id, APP_ID + 1)
+        self.assertEqual(entrypoint.read_service_registry(path, []).enrollments[0].app_id, APP_ID + 1)
 
     def test_client_permissions_snapshot_ignores_later_caller_mutation(self):
         token_requests = []
@@ -964,7 +975,7 @@ class AdmissionIngressTests(unittest.TestCase):
 
         def attempt():
             try:
-                entrypoint.read_service_registry(path)
+                entrypoint.read_service_registry(path, [])
                 outcome["result"] = "loaded"
             except core.ContractError as exc:
                 outcome["result"] = str(exc)
@@ -1405,13 +1416,13 @@ class AdmissionIngressTests(unittest.TestCase):
 
         with patch.object(entrypoint.os, "open", racing_open):
             with self.assertRaises(core.ContractError) as ctx:
-                entrypoint.read_service_registry(path)
+                entrypoint.read_service_registry(path, [])
         self.assertTrue(swapped.is_set())
         self.assertIn("component is unavailable or is a symlink", str(ctx.exception))
         # Once the parent is a genuine directory again the same path loads normally.
         parent.unlink()
         os.rename(root / "service-moved", parent)
-        self.assertEqual(entrypoint.read_service_registry(path).enrollments[0].app_id, APP_ID)
+        self.assertEqual(entrypoint.read_service_registry(path, []).enrollments[0].app_id, APP_ID)
         # Forbidden roots are recognised by device/inode on the held directories,
         # independent of the pathname comparison.
         with self.assertRaises(core.ContractError) as ctx:

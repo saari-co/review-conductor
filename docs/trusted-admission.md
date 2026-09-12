@@ -1,4 +1,4 @@
-# Trusted admission v1: enrollment registry and approved policy binding
+# Trusted admission v2: enrollment registry and approved policy binding
 
 `tools/trusted_admission.py` is a standard-library-only module that the future
 service calls before any review work. It is not packaged in the zipapp, has no
@@ -6,7 +6,7 @@ CLI command, performs no I/O, and reads no credentials. All failures raise
 `AdmissionError` before any admission value exists; messages name the check and
 never echo untrusted data.
 
-## Enrollment registry (`review-conductor.enrollment.v1`)
+## Enrollment registry (`review-conductor.enrollment.v2`)
 
 Service-owned JSON, at most 65536 bytes, strict UTF-8, no duplicate keys, no
 unknown keys. It is never read from a reviewed repository and never committed
@@ -14,7 +14,7 @@ to this repository; tests build synthetic registries in memory.
 
 ```json
 {
-  "schema": "review-conductor.enrollment.v1",
+  "schema": "review-conductor.enrollment.v2",
   "enrollments": [
     {
       "repository": "dinkuskit/blocks",

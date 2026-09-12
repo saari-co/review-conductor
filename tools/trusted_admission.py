@@ -13,9 +13,9 @@ import re
 
 from target_manifest import MAX_BYTES, unique_object, validate_manifest
 
-REGISTRY_SCHEMA = "review-conductor.enrollment.v1"
+REGISTRY_SCHEMA = "review-conductor.enrollment.v2"
 POLICY_IDENTITY_SCHEMA = "review-conductor.policy-identity.v1"
-BINDING_SCHEMA = "review-conductor.admission-binding.v1"
+BINDING_SCHEMA = "review-conductor.admission-binding.v2"
 MAX_REGISTRY_BYTES = 65536
 SHA1_RE = re.compile(r"[0-9a-f]{40}")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")

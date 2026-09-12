@@ -1,5 +1,6 @@
 {
   "stacked_base": "c58921ee791eed9fdaab73b4bbf08d23db2e2247",
+  "normalized_main": "10ab35181c24d572351401628f2ec59ef26110a6",
   "pre_split_full_candidate": "3b7516c892679a5ec302e84c3ee975c51331766d",
   "restored_adapter_commit": "9ca6f516cb8e0da4a57b7a814656a56f64df88ad",
   "boundary_repair_commit": "d18d336664fa993a4414851ab48d624be44f8b5e",
@@ -14,15 +15,15 @@
     "docs/migration.md": "f0656d19c0d76e9ce8823745733790c744e505a3eb7f799ab2e20edbe1775fc2",
     "docs/provenance.json": "33395032229ff64a7098ab0834afecbd081ea38aa420d2f7c2279c11cf529725",
     "docs/smcbd-pilot-handoff.md": "b5e74da1cce5a9148a799b3d3fa3bbab5b682c24f9bc2ec2ea1dd4242dc81f25",
-    "docs/trusted-admission.md": "7f2eaac6ad82e3dcd9ed1b5f8ee545e4f9c5ab759a30a642a907d0904f610b3c",
+    "docs/trusted-admission.md": "511c70e5b1b61a76ea006f7eaf2e6c1fc0f1fbdedd3513cf35ce677cc218fe85",
     "proof/smcbd-service-admission-20260912/PROOF.md": "9fc215d180a5764db8ae3f33d3d905ff0d50d8e0d539a6a8332c57760d648810",
     "proof/smcbd-service-admission-20260912/candidate-manifest.json": "85e22fd6511cc7882718fb5586a2c5ebac514cf9a6f7488353759f36df707741",
     "tests/test_review_conductor_profiles.py": "bafad178ef7e5e4c0adb5c58f5a6141d0607fa1fa5131053cfaccab3877a6c88",
-    "tests/test_service_runtime.py": "ac861e03dfde9a18508446ac105a0d85952229f7fe9d02e6d79e10da113042ca",
+    "tests/test_service_runtime.py": "e964bf02d249ac084fcc99e61984a4a127f5df6f3541142f01c2aa31560667fb",
     "tools/review_conductor.py": "a6b287732e6139ce4c655b0852d2ff78faf745e196b7481c12c4e3eb7120b0b4",
     "tools/review_conductor_runtime.py": "9c59ff3a642d21d74578a016013bbb5d119e08d78aa0a50a32918dcf9b4e24fd",
     "tools/review_conductor_userland.py": "44532a9a45eea4effb0ca6648cd10bd20d62b3f0301b0ccd0ea1feee687242af",
-    "tools/service_entrypoint.py": "afbc854442afc7ad9a3b1229e39b317d4b058ca36546e65770174a1f1ec531d9",
+    "tools/service_entrypoint.py": "950aa776d60175e7210f3d7097f19b4b9ec68b198a20dccad83b44ae0038a07e",
     "tools/service_runtime.py": "21af4ad1905bf554bec96e0509dbf901481eeb59db9f3f4ae0b0cc5d946c2c12"
   }
 }
