@@ -52,18 +52,23 @@ It remains disabled and is reviewed independently from the admission core.
     base SHA, head SHA and review epoch into the final transport fence. A newly
     admitted head cannot authorize pending work or notifications selected for a
     superseded tuple; direct regression and mutation coverage prove the bound.
+15. OpenClaw adapter commands receive a dedicated allowlisted subprocess
+    environment. The threaded service never clears or restores process-global
+    `os.environ`, so concurrent webhook work and environment updates remain
+    intact while a long-running adapter command executes.
 
 ## Executable proof
 
-- Focused live service/adapter suite: 65 tests passed.
-- Executable mutation suite: all 66 precise mutants killed.
+- Focused live service/adapter suite: 66 tests passed.
+- Executable mutation suite: all 68 precise mutants killed.
 - The added cases directly exercise concurrent token minting, promotion after
   a stale binding, reloaded core identity, read-only/disappearing SQLite state,
   checkout fencing, both OpenClaw command fences, per-notification fencing,
   incomplete live clients, the Spark dispatch target, header-aware artifact
   transport normalization, authority-bound standalone maintenance and exact
   tuple rejection after head supersession, including stale review-result
-  notification suppression.
+  notification suppression, concurrent process-environment preservation and
+  exact propagation of the allowlisted environment to the subprocess boundary.
 - Complete `make check`: passed before this evidence-only commit.
 - Extraction provenance: 14 files verified and Python compilation passed.
 - `git diff --check`: passed.

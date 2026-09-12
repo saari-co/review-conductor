@@ -1641,9 +1641,22 @@ def parse_json_receipt(stdout: str, label: str) -> dict[str, Any]:
     raise ContractError(f"{label} did not emit a JSON receipt")
 
 
-def run_command(command: list[str], label: str) -> subprocess.CompletedProcess[str]:
+def run_command(
+    command: list[str],
+    label: str,
+    *,
+    environment: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     try:
-        result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=1800)
+        result = subprocess.run(
+            command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=1800,
+            env=environment,
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ContractError(f"{label} could not complete: {exc.__class__.__name__}") from exc
     if result.returncode != 0:
@@ -1651,12 +1664,18 @@ def run_command(command: list[str], label: str) -> subprocess.CompletedProcess[s
     return result
 
 
-def command_preview(action: sqlite3.Row, config: dict[str, Any], source_checkout: Path | None) -> list[list[str]]:
+def command_preview(
+    action: sqlite3.Row,
+    config: dict[str, Any],
+    source_checkout: Path | None,
+    environment: dict[str, str] | None = None,
+) -> list[list[str]]:
     payload = json.loads(action["payload_json"])
+    command_environment = os.environ if environment is None else environment
     if action["kind"] == "openclaw.enqueue":
         if source_checkout is None or not source_checkout.is_absolute():
             raise ContractError("OpenClaw dispatch requires an absolute --source-checkout")
-        smoky = os.environ.get("SMOKY_REVIEW_CONDUCTOR_SMOKY", str(Path(__file__).resolve().parents[1] / "bin" / "smoky"))
+        smoky = command_environment.get("SMOKY_REVIEW_CONDUCTOR_SMOKY", str(Path(__file__).resolve().parents[1] / "bin" / "smoky"))
         materialize = [
             smoky, "lane", "run", "spark-openclaw-materialize-worktree",
             "--repo", str(source_checkout), "--ref", payload["head_sha"], "--base", payload["base_sha"],
@@ -1671,7 +1690,7 @@ def command_preview(action: sqlite3.Row, config: dict[str, Any], source_checkout
         ]
         return [materialize, queue]
     if action["kind"] == "clawsweeper.dispatch":
-        gh = os.environ.get("SMOKY_REVIEW_CONDUCTOR_GH", "gh")
+        gh = command_environment.get("SMOKY_REVIEW_CONDUCTOR_GH", "gh")
         endpoint = f"repos/{payload['repository']}/actions/workflows/{payload['workflow_id']}/dispatches"
         return [[
             gh, "api", "--method", "POST", endpoint,
@@ -1750,7 +1769,13 @@ def dispatch_action(args: argparse.Namespace) -> dict[str, Any]:
                 "external_mutation_performed": False,
                 "merge_dispatched": False,
             }
-        commands = command_preview(row, config, args.source_checkout)
+        command_environment = getattr(args, "command_environment", None)
+        commands = command_preview(
+            row,
+            config,
+            args.source_checkout,
+            command_environment,
+        )
         if not args.apply:
             return {
                 "schema": "smoky.review-conductor.dispatch.v1",
@@ -1904,7 +1929,18 @@ def dispatch_action(args: argparse.Namespace) -> dict[str, Any]:
                 before_external_command = getattr(args, "before_external_command", None)
                 if before_external_command is not None:
                     before_external_command(index, command)
-                result = run_command(command, f"{row['kind']} adapter step {index + 1}")
+                label = f"{row['kind']} adapter step {index + 1}"
+                if command_environment is None:
+                    # Preserve the legacy/manual dispatcher seam for existing
+                    # callers and tests that intentionally inherit their process
+                    # environment.
+                    result = run_command(command, label)
+                else:
+                    result = run_command(
+                        command,
+                        label,
+                        environment=command_environment,
+                    )
                 if row["kind"] == "openclaw.enqueue":
                     receipt = parse_json_receipt(result.stdout, f"{row['kind']} adapter step {index + 1}")
                     expected = "completed" if index == 0 else "queued"

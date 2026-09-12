@@ -25,7 +25,7 @@ to this repository; tests build synthetic registries in memory.
         "installation_account": "dinkuskit"
       },
       "approved_policy": {"commit": "<40 lowercase hex>", "sha256": "<64 lowercase hex>"},
-      "reviewers": {"openclaw": "<actor>", "clawsweeper": "<actor>"}
+      "reviewers": {"openclaw": "<openclaw-actor>", "clawsweeper": "<clawsweeper-actor>"}
     }
   ]
 }

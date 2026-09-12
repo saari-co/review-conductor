@@ -1467,9 +1467,13 @@ def dispatch_clawsweeper_action(
         connection.close()
 
 
-@contextlib.contextmanager
-def service_transport_environment(config: dict[str, Any]):
-    allowed = {
+def service_transport_environment(config: dict[str, Any]) -> dict[str, str]:
+    """Return the isolated environment for one adapter subprocess.
+
+    The threaded service must never rewrite ``os.environ`` process-wide: other
+    webhook threads and libraries may read it while an adapter is running.
+    """
+    return {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin"),
         "PYTHONUNBUFFERED": "1",
         "SMOKY_REVIEW_CONDUCTOR_SMOKY": config["spark"]["smoky_path"],
@@ -1478,14 +1482,6 @@ def service_transport_environment(config: dict[str, Any]):
         "SPARK_OPENCLAW_MATERIALIZE_TARGET": config["spark"]["target"],
         "SPARK_OPENCLAW_AUTOREVIEW_TARGET": config["spark"]["target"],
     }
-    previous = os.environ.copy()
-    os.environ.clear()
-    os.environ.update(allowed)
-    try:
-        yield
-    finally:
-        os.environ.clear()
-        os.environ.update(previous)
 
 
 def drain_actions(
@@ -1551,6 +1547,7 @@ def drain_actions(
                 claim_owner="cp1-worker",
                 claim_lease_seconds=config["worker"]["claim_lease_seconds"],
                 before_external_command=before_external_command,
+                command_environment=service_transport_environment(config),
             )
             # Each OpenClaw dispatch is an external side effect; fence it like a
             # GitHub write so revoked authority stops the whole drain here instead
@@ -1561,8 +1558,7 @@ def drain_actions(
                 authority,
             )
             try:
-                with service_transport_environment(config):
-                    outcomes.append(core.dispatch_action(args))
+                outcomes.append(core.dispatch_action(args))
             except core.AuthorityDenied:
                 raise
             except core.ContractError:

@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import base64
 import copy
-import contextlib
 import dataclasses
 import hashlib
 import hmac
@@ -1509,7 +1508,7 @@ class AdmissionIngressTests(unittest.TestCase):
         neutral = lambda *args, **kwargs: {}
         with patch.object(core, "dispatch_action", lambda args: dispatched.append(args.action_id) or {}), \
                 patch.object(runtime, "recover_abandoned_actions", lambda _config: []), \
-                patch.object(runtime, "service_transport_environment", lambda _config: contextlib.nullcontext()), \
+                patch.object(runtime, "service_transport_environment", lambda _config: {}), \
                 patch.object(runtime, "drain_bridge_inboxes", neutral), \
                 patch.object(userland, "hydrate_pending_openclaw_heads", neutral):
             with self.assertRaises(core.ContractError):
@@ -1523,6 +1522,114 @@ class AdmissionIngressTests(unittest.TestCase):
             self.assertEqual([row["status"] for row in connection.execute("SELECT status FROM actions")], ["pending"])
         finally:
             connection.close()
+
+    def test_openclaw_dispatch_uses_an_isolated_subprocess_environment(self):
+        self.fx.ingest("environment-isolation", self.fx.payload())
+        connection = core.open_database(self.fx.state, REPOSITORY)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("UPDATE heads SET state='openclaw_queued' WHERE is_current=1")
+            row = connection.execute("SELECT * FROM heads WHERE is_current=1").fetchone()
+            action_id, idempotency_key = core.action_identity(
+                "openclaw.enqueue",
+                row["repository"],
+                row["pr_number"],
+                row["base_sha"],
+                row["head_sha"],
+                core.review_action_suffix(int(row["review_epoch"])),
+            )
+            connection.execute(
+                """INSERT INTO actions(action_id, idempotency_key, kind, repository, pr_number, base_sha, head_sha,
+                   review_epoch, status, payload_json, created_at, updated_at)
+                   VALUES (?, ?, 'openclaw.enqueue', ?, ?, ?, ?, ?, 'pending', '{}', ?, ?)""",
+                (
+                    action_id,
+                    idempotency_key,
+                    row["repository"],
+                    row["pr_number"],
+                    row["base_sha"],
+                    row["head_sha"],
+                    row["review_epoch"],
+                    core.utc_now(),
+                    core.utc_now(),
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        config = {
+            **self.fx.app_config(),
+            "worker": {"max_actions_per_wake": 5, "claim_lease_seconds": 60},
+            "paths": {
+                **self.fx.app_config()["paths"],
+                "blocks_checkout": str(self.fx.root / "checkout"),
+            },
+            "spark": {
+                "target": "fixture-spark",
+                "smoky_path": "bin/smoky",
+                "ssh_path": "/usr/bin/ssh",
+                "scp_path": "/usr/bin/scp",
+            },
+        }
+        started = threading.Event()
+        release = threading.Event()
+        captured = []
+        failures = []
+
+        class AllowClient:
+            @staticmethod
+            def assert_authority(_operation):
+                return None
+
+        def dispatch(args):
+            captured.append(args.command_environment)
+            started.set()
+            if not release.wait(5):
+                raise AssertionError("test dispatch was not released")
+            return {"result": "fixture"}
+
+        def drain():
+            try:
+                runtime.drain_actions(config, AllowClient(), dry_run=False)
+            except BaseException as exc:
+                failures.append(exc)
+
+        sentinel = "REVIEW_CONDUCTOR_THREAD_SENTINEL"
+        concurrent = "REVIEW_CONDUCTOR_CONCURRENT_SENTINEL"
+        old_sentinel = os.environ.get(sentinel)
+        old_concurrent = os.environ.get(concurrent)
+        os.environ[sentinel] = "parent-thread"
+        try:
+            with patch.object(core, "dispatch_action", side_effect=dispatch), patch.object(
+                runtime, "recover_abandoned_actions", return_value=[]
+            ):
+                thread = threading.Thread(target=drain)
+                thread.start()
+                self.assertTrue(started.wait(5), "adapter dispatch did not start")
+                self.assertEqual(os.environ.get(sentinel), "parent-thread")
+                os.environ[concurrent] = "written-during-dispatch"
+                release.set()
+                thread.join(5)
+                self.assertFalse(thread.is_alive(), "adapter dispatch did not finish")
+            self.assertEqual(failures, [])
+            self.assertEqual(os.environ.get(sentinel), "parent-thread")
+            self.assertEqual(os.environ.get(concurrent), "written-during-dispatch")
+            self.assertEqual(len(captured), 1)
+            self.assertNotIn(sentinel, captured[0])
+            self.assertNotIn(concurrent, captured[0])
+            self.assertEqual(captured[0]["SMOKY_REVIEW_CONDUCTOR_SMOKY"], "bin/smoky")
+            self.assertEqual(captured[0]["SPARK_OPENCLAW_AUTOREVIEW_TARGET"], "fixture-spark")
+        finally:
+            release.set()
+            if old_sentinel is None:
+                os.environ.pop(sentinel, None)
+            else:
+                os.environ[sentinel] = old_sentinel
+            if old_concurrent is None:
+                os.environ.pop(concurrent, None)
+            else:
+                os.environ[concurrent] = old_concurrent
 
     def test_checkout_hydration_is_fenced_before_the_checkout_is_touched(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1587,14 +1694,16 @@ class AdmissionIngressTests(unittest.TestCase):
             action = legacy.action(config, 79, "openclaw.enqueue")
             fences = []
             commands = []
+            environments = []
 
             def fence(index, _command):
                 fences.append(index)
                 if index == 1:
                     raise core.AuthorityDenied("revoked between OpenClaw commands")
 
-            def run(command, _label):
+            def run(command, _label, *, environment=None):
                 commands.append(command)
+                environments.append(environment)
                 receipt = {"result": "completed", "commit_sha": legacy.HEAD}
                 return subprocess.CompletedProcess(
                     command, 0, stdout=json.dumps(receipt) + "\n", stderr=""
@@ -1610,12 +1719,18 @@ class AdmissionIngressTests(unittest.TestCase):
                 claim_owner="fixture-worker",
                 claim_lease_seconds=60,
                 before_external_command=fence,
+                command_environment={
+                    "PATH": "/usr/bin:/bin",
+                    "SMOKY_REVIEW_CONDUCTOR_SMOKY": "fixture-smoky",
+                },
             )
             with patch.object(core, "run_command", run):
                 with self.assertRaises(core.ContractError):
                     core.dispatch_action(args)
             self.assertEqual(fences, [0, 1])
             self.assertEqual(len(commands), 1)
+            self.assertEqual(commands[0][0], "fixture-smoky")
+            self.assertEqual(environments, [args.command_environment])
             connection = core.open_database(Path(config["paths"]["state_root"]), config["repository"])
             try:
                 row = connection.execute(
@@ -2822,6 +2937,20 @@ MUTANTS = [
         '                before_external_command = getattr(args, "before_external_command", None)\n                if before_external_command is not None:\n                    before_external_command(index, command)\n',
         "",
         "AdmissionIngressTests.test_each_openclaw_external_command_has_a_fresh_authority_fence",
+    ),
+    (
+        "drop the isolated environment before starting an OpenClaw subprocess",
+        "tools/review_conductor.py",
+        "                        environment=command_environment,\n",
+        "                        environment=None,\n",
+        "AdmissionIngressTests.test_each_openclaw_external_command_has_a_fresh_authority_fence",
+    ),
+    (
+        "mutate the process environment while preparing an adapter subprocess",
+        "tools/review_conductor_runtime.py",
+        '    return {\n        "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin"),\n',
+        '    os.environ.pop("REVIEW_CONDUCTOR_THREAD_SENTINEL", None)\n    return {\n        "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin"),\n',
+        "AdmissionIngressTests.test_openclaw_dispatch_uses_an_isolated_subprocess_environment",
     ),
     (
         "accept a live client that cannot assert authority",
