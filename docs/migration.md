@@ -25,8 +25,11 @@ configuration. The build excludes all historical profiles and legacy launchers.
 
 ## Not completed / prerequisites for migration
 
-1. Implement trusted repository-manifest loading and approved policy-hash binding
-   to tuple/epoch; migrate profile configuration without changing legacy behavior.
+1. Trusted enrollment, approved base-policy loading and policy-hash binding to
+   tuple/epoch exist as an offline library (`tools/trusted_admission.py`,
+   [contract](trusted-admission.md)). Still open: service-owned transport for
+   approved-commit reads, registry storage, and migrating profile configuration
+   onto it without changing legacy behavior.
 2. Replace x-api `bin/smoky`/host-relative integration with qualified external
    adapters. The copied compatibility modules still describe the existing pilot;
    tests inject transports. They are not a portable activated service yet.

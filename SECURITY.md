@@ -12,9 +12,13 @@ that is not standalone enrollment. Do not deploy directly from `tools/`.
 Treat PR code, manifests, workflow files, artifacts, comments and client input as
 untrusted. Repository policy cannot select credentials, installations, trusted
 reviewers, commands or another repository's state. A valid manifest grants no
-authority. Approved base-policy loading, policy-hash binding and trusted enrollment
-are **not implemented**. Neither are the authenticated API/outbox or qualified
-standalone live adapters; do not expose the legacy internal-event CLI as an API.
+authority. `tools/trusted_admission.py` implements the enrollment registry
+contract, approved base-policy loading and policy-hash binding as an offline
+library with injected transport; it holds no credentials, no registry data and
+no live installation. The authenticated API/outbox and qualified standalone live
+adapters are **not implemented**; do not expose the legacy internal-event CLI
+as an API. A registry document is service configuration and must never be
+committed here or read from a reviewed repository.
 
 Preserve repository/PR/base/head/epoch binding, authentication before webhook
 parsing, replay protection, stale/conflicting evidence rejection, isolated state,

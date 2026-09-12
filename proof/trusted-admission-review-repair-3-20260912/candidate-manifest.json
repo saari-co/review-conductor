@@ -1,0 +1,15 @@
+{
+  "schema": "review-conductor.source-repair-proof.v1",
+  "captured_at": "2026-09-12T03:17:52Z",
+  "repository": "saari-co/review-conductor",
+  "pull_request": 2,
+  "base_sha": "0d1d7972c9814e113e924fc536b8839f33af9319",
+  "starting_head_sha": "77b88bcd7d53d7ef7e31df2e03def2dbd37a9282",
+  "repair_lineage": [
+    "https://github.com/saari-co/review-conductor/pull/2#pullrequestreview-5185036033"
+  ],
+  "files": {
+    "tests/test_trusted_admission.py": "9e5e432bcba249e2ac93db7b97b32b0d4e4a2d9f735643f21ab39b96c2ec89da",
+    "tools/trusted_admission.py": "04ff48f35fc5662fb29afc4411857ca0c2621c657d5ed28b349420f852c3cd67"
+  }
+}

@@ -1,0 +1,112 @@
+# Trusted admission v1: enrollment registry and approved policy binding
+
+`tools/trusted_admission.py` is a standard-library-only module that the future
+service calls before any review work. It is not packaged in the zipapp, has no
+CLI command, performs no I/O, and reads no credentials. All failures raise
+`AdmissionError` before any admission value exists; messages name the check and
+never echo untrusted data.
+
+## Enrollment registry (`review-conductor.enrollment.v1`)
+
+Service-owned JSON, at most 65536 bytes, strict UTF-8, no duplicate keys, no
+unknown keys. It is never read from a reviewed repository and never committed
+to this repository; tests build synthetic registries in memory.
+
+```json
+{
+  "schema": "review-conductor.enrollment.v1",
+  "enrollments": [
+    {
+      "repository": "dinkuskit/blocks",
+      "repository_id": 1306882611,
+      "installation": {"id": 0, "account": "dinkuskit"},
+      "approved_policy": {"commit": "<40 lowercase hex>", "sha256": "<64 lowercase hex>"}
+    }
+  ]
+}
+```
+
+Rules enforced by `load_registry`:
+
+- `repository` must be one of exactly `dinkuskit/blocks` and
+  `saari-co/openclaw-smcbd-suite` (`INITIAL_ENROLLMENT_SCOPE`). Expanding that
+  map is a separate explicit owner enrollment decision, made in source review,
+  not by editing a registry document.
+- `repository_id` must equal the numeric identity recorded for that name
+  (`1306882611`, `1366416798`, from the historical profiles). Any other value
+  for those names is rejected, so a registry cannot rebind a name to another
+  repository.
+- `installation.id` is a positive integer and `installation.account` must be the
+  repository owner segment. A Saari installation cannot serve a Dinkus repository
+  or vice versa. No installation ID is recorded in this repository; the illustrative
+  `0` above is invalid and would be rejected.
+- `approved_policy` is the approved default-branch commit plus the SHA-256 of the
+  exact manifest bytes at that commit. Both are required.
+- Repository names, numeric IDs and installation IDs must be unique across the
+  registry.
+
+`Registry.lookup(repository, repository_id, installation_id)` succeeds only when
+all three agree with one enrollment; strings, booleans or a neighbouring
+enrollment's values fail.
+
+## Approved base-policy loading
+
+`load_approved_policy(enrollment, commit, read_policy)`:
+
+1. Refuses any `commit` other than `approved_policy.commit` before transport is
+   consulted. A PR head, base SHA, newer default-branch commit or another
+   repository's approved commit never reaches the reader.
+2. Calls the service-supplied `read_policy(repository, commit)` and requires raw
+   bytes of at most 16384 bytes.
+3. Requires `sha256(bytes) == approved_policy.sha256`. Whitespace changes,
+   re-serialisation, another repository's manifest, empty or oversized content
+   all fail. The hash is over exact bytes, not semantic JSON.
+4. Validates the bytes with the v1 manifest validator and requires
+   `manifest.repository == enrollment.repository`.
+
+The result is a frozen `AdmittedPolicy` that retains the exact immutable manifest
+bytes. Construction and revalidation recompute their digest, parse them again and
+require the exposed `quiet_seconds` and `default_branch` values to match the
+validated content. Shape-valid replacement or crafted-object mutation therefore
+cannot preserve a current binding. `policy_id` is the SHA-256 of a
+canonical JSON of `(schema, repository, repository_id, commit, sha256)`. Same
+inputs always produce the same identity; any component change produces a
+different one.
+
+## Tuple/epoch binding
+
+`admit(registry, request, read_policy)` takes an untrusted request with exactly
+`repository, repository_id, installation_id, pr_number, base_sha, head_sha,
+review_epoch, policy_commit`. It resolves the enrollment, constructs a validated
+frozen `ReviewTuple` (owner/name, positive IDs, 40-hex lowercase SHAs, base ≠
+head, epoch ≥ 0), refuses `policy_commit == head_sha` unless that is already the
+approved commit, and loads the approved policy. The frozen `Admission` exposes
+`binding_id`: the SHA-256 of canonical JSON over repository, repository_id,
+pr_number, base_sha, head_sha, review_epoch, installation_id and `policy_id`.
+Any base/head/epoch/PR change, and any policy promotion, yields a new binding.
+
+`policy_is_current(admission, registry)` is true only while the registry still
+approves exactly the bound commit and hash for that repository and installation.
+Policy promotion, de-enrollment or a changed hash makes in-flight evidence stale;
+the service must re-admit at the current tuple rather than carry evidence forward.
+
+## Object coherence
+
+Every dataclass validates its own invariants in `__post_init__`: `Enrollment`
+and `AdmittedPolicy` are pinned to `INITIAL_ENROLLMENT_SCOPE` names and numeric
+IDs, and `AdmittedPolicy` re-derives its exposed policy fields from the exact
+hash-bound manifest bytes; `Registry` enforces uniqueness; `Admission` requires a positive-int
+installation and that the review tuple and policy identify the same repository
+and numeric ID. `Admission.revalidate()` rebuilds every component from its
+fields, so an object crafted around `__post_init__` (for example with
+`object.__setattr__`) fails. `binding_id` calls it before hashing and
+`policy_is_current` returns false for any malformed or incoherent object. A
+well-formed object naming another enrollment's installation is only detectable
+against the registry, where it is never current and cannot be re-admitted.
+
+## What this does not do
+
+No GitHub App, installation, webhook, credential, transport, database, event
+outbox, check publication, adjudication or merge behaviour. Nothing is activated
+by this module's presence; the packaged scaffold still exposes only
+`validate-manifest`. The legacy engine and profiles are unchanged.
