@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import http.client
 import io
+import os
 import json
 from pathlib import Path
 import shutil
@@ -343,11 +344,14 @@ class AdmissionIngressTests(unittest.TestCase):
         loaded = entrypoint.read_service_registry(path)
         self.assertEqual(loaded.enrollments[0].app_id, APP_ID)
         # The documented contract is exactly 0600: not merely owner-only bits.
-        for mode in (0o400, 0o700, 0o640, 0o604, 0o660, 0o644, 0o666, 0o610, 0o601, 0o200):
+        for mode in (0o400, 0o700, 0o640, 0o604, 0o660, 0o644, 0o666, 0o610, 0o601):
             path.chmod(mode)
             with self.subTest(mode=oct(mode)), self.assertRaises(core.ContractError) as ctx:
                 entrypoint.read_service_registry(path)
             self.assertIn("mode 0600 exactly", str(ctx.exception))
+        path.chmod(0o200)
+        with self.assertRaises(core.ContractError):
+            entrypoint.read_service_registry(path)
         path.chmod(0o600)
         link = self.fx.root / "registry-link.json"
         link.symlink_to(path)
@@ -355,9 +359,76 @@ class AdmissionIngressTests(unittest.TestCase):
         for candidate in (link, relative, self.fx.root, self.fx.root / "missing.json", str(path)):
             with self.subTest(candidate=str(candidate)), self.assertRaises(core.ContractError):
                 entrypoint.read_service_registry(candidate)
+        hard_link = self.fx.root / "registry-hard.json"
+        os.link(path, hard_link)
+        with self.assertRaises(core.ContractError) as ctx:
+            entrypoint.read_service_registry(path)
+        self.assertIn("exactly one link", str(ctx.exception))
+        hard_link.unlink()
+        nested = self.fx.root / "shared"
+        nested.mkdir()
+        nested_registry = nested / "registry.json"
+        nested_registry.write_text(json.dumps(document))
+        nested_registry.chmod(0o600)
+        for parent_mode in (0o777, 0o775, 0o702, 0o720):
+            nested.chmod(parent_mode)
+            with self.subTest(parent_mode=oct(parent_mode)), self.assertRaises(core.ContractError) as ctx:
+                entrypoint.read_service_registry(nested_registry)
+            self.assertIn("parent", str(ctx.exception))
+        nested.chmod(0o755)
+        self.assertEqual(entrypoint.read_service_registry(nested_registry).enrollments[0].app_id, APP_ID)
         path.write_text(json.dumps({**document, "enrollments": []}))
         with self.assertRaises(core.ContractError):
             entrypoint.read_service_registry(path)
+
+    def test_registry_is_read_from_the_validated_descriptor_not_the_pathname(self):
+        def document(app_id):
+            return json.dumps({
+                "schema": admission.REGISTRY_SCHEMA,
+                "enrollments": [{
+                    "repository": REPOSITORY, "repository_id": REPOSITORY_ID,
+                    "github_app": {"id": app_id, "installation_id": INSTALLATION_ID,
+                                   "installation_account": "saari-co"},
+                    "approved_policy": {"commit": POLICY_COMMIT,
+                                        "sha256": hashlib.sha256(self.fx.policy).hexdigest()},
+                }],
+            })
+
+        path = self.fx.root / "registry.json"
+        path.write_text(document(APP_ID))
+        path.chmod(0o600)
+        swapped = self.fx.root / "swapped.json"
+        swapped.write_text(document(APP_ID + 1))
+        swapped.chmod(0o600)
+        real_fstat = os.fstat
+
+        def racing_fstat(descriptor):
+            # A same-user writer replaces the pathname right after validation.
+            metadata = real_fstat(descriptor)
+            os.replace(swapped, path)
+            return metadata
+
+        with patch.object(entrypoint.os, "fstat", racing_fstat):
+            loaded = entrypoint.read_service_registry(path)
+        # The bytes come from the descriptor that was validated, not from whatever
+        # the pathname points at afterwards.
+        self.assertEqual(loaded.enrollments[0].app_id, APP_ID)
+        self.assertEqual(entrypoint.read_service_registry(path).enrollments[0].app_id, APP_ID + 1)
+
+    def test_worker_gate_requires_the_profile_to_be_the_registry_enrollment(self):
+        self.fx.ingest("initial", self.fx.payload())
+        service.require_current_bindings(self.fx.app_config(), self.fx.registry())
+        for key, value in [("app_id", APP_ID + 1), ("installation_id", INSTALLATION_ID + 1),
+                           ("repository_id", REPOSITORY_ID + 1), ("repository", "dinkuskit/blocks"),
+                           ("app_id", str(APP_ID)), ("app_id", None)]:
+            config = self.fx.app_config()
+            config["github_app"][key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(core.ContractError) as ctx:
+                service.require_current_bindings(config, self.fx.registry())
+            self.assertIn("not enrolled", str(ctx.exception))
+        with self.assertRaises(core.ContractError):
+            service.run_service_tick({**self.fx.app_config(), "github_app": {**self.fx.app_config()["github_app"], "app_id": APP_ID + 1}},
+                                     self.fx.registry(), object(), object(), dry_run=True)
 
     def test_registry_cannot_live_in_source_checkout_state_or_proof_roots(self):
         document = json.loads(json.dumps({
@@ -752,6 +823,52 @@ class EntrypointTests(unittest.TestCase):
         self.assertFalse(ticked.wait(1.0), "worker ran a tick although ingress never bound")
         self.assertNotIn("review-conductor-service", [thread.name for thread in threading.enumerate()])
 
+    def test_worker_operational_failure_stops_the_whole_service(self):
+        self.enable_profile()
+        registry = self.root / "registry.json"
+        registry.write_text(json.dumps({
+            "schema": admission.REGISTRY_SCHEMA,
+            "enrollments": [{
+                "repository": REPOSITORY, "repository_id": REPOSITORY_ID,
+                "github_app": {"id": APP_ID, "installation_id": INSTALLATION_ID,
+                               "installation_account": "saari-co"},
+                "approved_policy": {"commit": POLICY_COMMIT,
+                                    "sha256": hashlib.sha256((ROOT / "examples/smcbd.review-conductor.json").read_bytes()).hexdigest()},
+            }],
+        }))
+        registry.chmod(0o600)
+        closed = threading.Event()
+
+        class FakeServer:
+            def __init__(self, *_args, **_kwargs):
+                self.stopped = threading.Event()
+
+            def serve_forever(self, poll_interval=0.5):
+                # Returns when shut down by the worker, or after a bounded wait as if
+                # an operator stopped it, so a silently dead worker is observable.
+                self.stopped.wait(3.0)
+
+            def shutdown(self):
+                self.stopped.set()
+
+            def server_close(self):
+                closed.set()
+
+        class Client:
+            def read_policy(self, *_):
+                raise AssertionError("policy transport ran")
+
+        with patch.object(userland, "read_inherited_value", return_value="fixture-secret"), \
+                patch.object(userland, "build_client", return_value=Client()), \
+                patch.object(userland, "OpenClawNotifier", return_value=object()), \
+                patch.object(service, "run_service_tick", side_effect=sqlite3.OperationalError("database is locked")), \
+                patch.object(runtime, "BoundedHTTPServer", FakeServer):
+            code, stderr = self.run_main(registry)
+        self.assertEqual(code, 2)
+        self.assertIn("worker failed; service stopped", stderr)
+        self.assertTrue(closed.is_set())
+        self.assertNotIn("review-conductor-service", [thread.name for thread in threading.enumerate()])
+
     def test_apply_flag_and_arguments_are_mandatory(self):
         for argv in [[], ["--profile", str(self.profile), "--registry", str(self.root)],
                      ["--profile", str(self.profile), "--apply"]]:
@@ -864,9 +981,37 @@ MUTANTS = [
     (
         "start the worker before ingress binds",
         "tools/service_entrypoint.py",
-        "    server = None\n    try:\n",
-        "    server = None\n    worker.start()\n    try:\n",
+        "    try:\n        # Bind ingress before any worker exists",
+        "    worker.start()\n    try:\n        # Bind ingress before any worker exists",
         "EntrypointTests.test_failed_ingress_bind_never_starts_the_worker",
+    ),
+    (
+        "mint tokens from an unvalidated permission map",
+        "tools/review_conductor_runtime.py",
+        '        if app.get("permissions") not in (APP_PERMISSIONS, STANDALONE_APP_PERMISSIONS):\n',
+        "        if False:\n",
+        "GitHubAdapterTests.test_token_is_exact_installation_repository_and_permission_scoped",
+    ),
+    (
+        "read the registry by pathname after validating the descriptor",
+        "tools/service_entrypoint.py",
+        '        raw = b"".join(chunks)\n',
+        '        raw = path.read_bytes()\n',
+        "AdmissionIngressTests.test_registry_is_read_from_the_validated_descriptor_not_the_pathname",
+    ),
+    (
+        "gate the worker without checking the profile enrollment",
+        "tools/service_runtime.py",
+        "    require_profile_enrolled(config, registry)\n",
+        "    pass\n",
+        "AdmissionIngressTests.test_worker_gate_requires_the_profile_to_be_the_registry_enrollment",
+    ),
+    (
+        "let the worker die silently on operational failure",
+        "tools/service_entrypoint.py",
+        "        except BaseException as exc:  # sqlite3.Error, OSError, or anything unexpected\n            failure.append(exc)\n            stop.set()\n",
+        "        except BaseException:\n            return\n            stop.set()\n",
+        "EntrypointTests.test_worker_operational_failure_stops_the_whole_service",
     ),
 ]
 
@@ -926,6 +1071,25 @@ class GitHubAdapterTests(unittest.TestCase):
         )
         self.assertEqual(client.read_policy(REPOSITORY, POLICY_COMMIT), self.fx.policy)
         token_call, content_call = calls
+        # A directly constructed client cannot request permissions outside the two
+        # closed allowlists, whatever map it is handed.
+        for permissions in [
+            {**runtime.STANDALONE_APP_PERMISSIONS, "contents": "write"},
+            {**runtime.STANDALONE_APP_PERMISSIONS, "administration": "write"},
+            {**runtime.APP_PERMISSIONS, "workflows": "write"},
+            {name: level for name, level in runtime.STANDALONE_APP_PERMISSIONS.items() if name != "metadata"},
+            {}, None, "contents:read",
+        ]:
+            config = self.fx.app_config()
+            config["github_app"]["permissions"] = permissions
+            with self.subTest(permissions=permissions), self.assertRaises(core.ContractError):
+                runtime.GitHubAppClient(config, "fixture-private-key", transport=transport,
+                                        signer=lambda *_: "fixture-jwt")
+        legacy_config = self.fx.app_config()
+        legacy_config["github_app"]["permissions"] = dict(runtime.APP_PERMISSIONS)
+        runtime.GitHubAppClient(legacy_config, "fixture-private-key", transport=transport,
+                                signer=lambda *_: "fixture-jwt")
+        self.assertEqual(len(calls), 2)
         self.assertEqual(token_call[0], "POST")
         self.assertTrue(token_call[1].endswith(f"/app/installations/{INSTALLATION_ID}/access_tokens"))
         self.assertEqual(token_call[2]["repositories"], ["openclaw-smcbd-suite"])

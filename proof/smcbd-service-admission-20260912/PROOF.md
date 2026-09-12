@@ -109,10 +109,35 @@ follow-up commit repairs every finding; none was dismissed:
    delivery back. Materializing the manifest as the engine profile remains
    listed as open work in `docs/migration.md`.
 
+## Second review repair after head `5796910` (Copilot, four new findings)
+
+The `5796910961caa3f124241dd36c3230fe4d2abcaa` results (local PASS; hosted run
+34694603956 success) are historical for that head. A fifth comment in that
+review was the original `fe7e5f3` policy-versus-profile thread re-anchored on
+unchanged context; it is addressed by `require_policy_matches_profile` above.
+
+7. **Unvalidated token permission map.** `GitHubAppClient.__init__` now refuses
+   any `github_app.permissions` that is not exactly the legacy or standalone
+   closed allowlist, so a directly constructed client cannot mint an
+   over-privileged installation token whatever map it is handed.
+8. **Registry TOCTOU.** `_registry_bytes` requires a same-user parent directory
+   without group/world write bits, opens the file `O_RDONLY|O_NOFOLLOW|O_CLOEXEC`,
+   runs the regular-file/owner/mode-0600/single-link/size checks on `fstat` of
+   that descriptor, and reads bounded bytes from the same descriptor. A racing
+   pathname swap after validation is proven to be ignored.
+9. **Worker gate without profile/registry agreement.** `require_current_bindings`
+   now performs the profile-to-registry lookup (`require_profile_enrolled`) on
+   every tick, so a valid registry for another App/installation cannot pass the
+   binding gate for a changed profile.
+10. **Silent worker death.** Fail-closed `ContractError` ticks retry; any other
+    worker exception is recorded, shuts the ingress server down and makes
+    `serve` raise `ServiceStopped`, so the process exits 2 instead of accepting
+    deliveries nothing will act on.
+
 ## Verification at the repaired head (local CPython 3.14.6, macOS arm64)
 
 - `make check` — PASS: legacy engine/activation/userland/profile suites,
-  scaffold and repository guards, trusted admission (18), service runtime (21,
+  scaffold and repository guards, trusted admission (18), service runtime (24,
   including the mutation harness), launcher transport, workflow contract,
   extraction provenance (14 files) and Python compilation, `git diff --check`.
 - `make build` — PASS; the packaged zipapp still excludes service, admission
@@ -137,7 +162,11 @@ must fail its named test and only that test):
 12. cache the registry instead of re-reading it;
 13. bind on `workflow_run` deliveries;
 14. bind without checking the policy against the engine profile;
-15. start the worker before ingress binds.
+15. start the worker before ingress binds;
+16. mint tokens from an unvalidated permission map;
+17. read the registry by pathname after validating the descriptor;
+18. gate the worker without checking the profile enrollment;
+19. let the worker die silently on operational failure.
 
 Only CPython 3.14 was exercised locally; 3.11/3.12 evidence comes from hosted
 exact-head CI on the PR, recorded in the PR conversation, not here.

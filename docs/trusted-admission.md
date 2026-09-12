@@ -121,8 +121,10 @@ epoch (for example `ready_for_review` or `reopened`), and the binding table
 refuses a conflicting rebinding outright. Before binding, the admitted manifest
 must agree with the engine profile's repository, default branch, CI workflow,
 quiet period and merge policy. That source is inactive until an external
-service registry (mode exactly 0600, outside source, checkout, state and proof
-roots, re-read on every delivery and tick) with at least one enrollment,
+service registry (mode exactly 0600, single link, non-writable same-user parent,
+outside source, checkout, state and proof roots, opened without following
+symlinks and read from the validated descriptor, re-read on every delivery and
+tick, and always enrolling the running profile) with at least one enrollment,
 credentials, an enabled profile and an HTTPS edge exist. No event
 outbox, deployment, live check publication, adjudication or merge behaviour is
 activated; the packaged scaffold still exposes only `validate-manifest`.

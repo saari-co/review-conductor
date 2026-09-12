@@ -36,12 +36,62 @@ def forbidden_registry_roots(config: dict) -> tuple[Path, ...]:
     return tuple(roots)
 
 
+def _registry_bytes(path: Path) -> bytes:
+    """Open once without following a symlink, validate the descriptor, read from it.
+
+    Every ownership/mode/size check runs on the opened descriptor, so a same-user
+    writer cannot swap the path between validation and the read.
+    """
+    try:
+        parent = os.stat(path.parent)
+    except OSError as exc:
+        raise service.ServiceError("service enrollment registry parent is unavailable") from exc
+    if (
+        not stat.S_ISDIR(parent.st_mode)
+        or parent.st_uid != os.getuid()
+        or parent.st_mode & 0o022
+    ):
+        raise service.ServiceError(
+            "service enrollment registry parent must be a same-user directory that is not group/world writable"
+        )
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        raise service.ServiceError("service enrollment registry is unavailable or is a symlink") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+            raise service.ServiceError("service enrollment registry must be a same-user regular file")
+        if stat.S_IMODE(metadata.st_mode) != REGISTRY_MODE:
+            raise service.ServiceError("service enrollment registry must have mode 0600 exactly")
+        if metadata.st_nlink != 1:
+            raise service.ServiceError("service enrollment registry must have exactly one link")
+        if metadata.st_size > admission.MAX_REGISTRY_BYTES:
+            raise service.ServiceError("service enrollment registry exceeds its bounded size")
+        chunks = []
+        remaining = admission.MAX_REGISTRY_BYTES + 1
+        while remaining > 0:
+            try:
+                chunk = os.read(descriptor, remaining)
+            except OSError as exc:
+                raise service.ServiceError("service enrollment registry could not be read") from exc
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        if len(raw) > admission.MAX_REGISTRY_BYTES:
+            raise service.ServiceError("service enrollment registry exceeds its bounded size")
+        return raw
+    finally:
+        os.close(descriptor)
+
+
 def read_service_registry(path: Path, forbidden_roots: Iterable[Path] = ()) -> admission.Registry:
-    if not isinstance(path, Path) or not path.is_absolute() or path.is_symlink():
+    if not isinstance(path, Path) or not path.is_absolute():
         raise service.ServiceError("service enrollment registry must be an absolute regular file")
     try:
         resolved = path.resolve(strict=True)
-        metadata = path.stat()
     except OSError as exc:
         raise service.ServiceError("service enrollment registry is unavailable") from exc
     for root in forbidden_roots:
@@ -53,15 +103,10 @@ def read_service_registry(path: Path, forbidden_roots: Iterable[Path] = ()) -> a
             raise service.ServiceError(
                 "service enrollment registry must be service-owned, outside source, checkout, state and proof roots"
             )
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
-        raise service.ServiceError("service enrollment registry must be a same-user regular file")
-    if stat.S_IMODE(metadata.st_mode) != REGISTRY_MODE:
-        raise service.ServiceError("service enrollment registry must have mode 0600 exactly")
-    if metadata.st_size > admission.MAX_REGISTRY_BYTES:
-        raise service.ServiceError("service enrollment registry exceeds its bounded size")
+    raw = _registry_bytes(path)
     try:
-        registry = admission.load_registry(path.read_bytes())
-    except (OSError, admission.AdmissionError) as exc:
+        registry = admission.load_registry(raw)
+    except admission.AdmissionError as exc:
         raise service.ServiceError("service enrollment registry failed validation") from exc
     if not registry.enrollments:
         raise service.ServiceError("service enrollment registry enrolls no repository")
@@ -92,6 +137,10 @@ def registry_provider(path: Path, config: dict):
     return provide
 
 
+class ServiceStopped(service.ServiceError):
+    """The worker hit an operational failure and stopped the whole service."""
+
+
 def serve(profile_path: Path, registry_path: Path) -> None:
     config = userland.load_config(profile_path)
     profiles.require_enabled(config)
@@ -103,12 +152,13 @@ def serve(profile_path: Path, registry_path: Path) -> None:
     client = userland.build_client(config)
     notifier = userland.OpenClawNotifier(config)
     stop = threading.Event()
+    failure: list[BaseException] = []
+    server = None
     worker = threading.Thread(
-        target=lambda: _worker_loop(config, provide_registry, client, notifier, stop),
+        target=lambda: _worker_loop(config, provide_registry, client, notifier, stop, failure, lambda: server),
         name="review-conductor-service",
         daemon=True,
     )
-    server = None
     try:
         # Bind ingress before any worker exists so a failed startup cannot leave a
         # detached worker draining actions, publishing checks or notifying.
@@ -132,16 +182,28 @@ def serve(profile_path: Path, registry_path: Path) -> None:
         if worker.is_alive():
             worker.join(timeout=config["worker"]["tick_seconds"] + 1)
         webhook_secret = ""
+    if failure:
+        # The worker stopped the service; surface its operational failure instead of
+        # letting ingress keep accepting deliveries that nothing will act on.
+        raise ServiceStopped("worker failed; service stopped") from failure[0]
 
 
-def _worker_loop(config, provide_registry, client, notifier, stop: threading.Event) -> None:
+def _worker_loop(config, provide_registry, client, notifier, stop, failure, get_server) -> None:
     while not stop.is_set():
         try:
             service.run_service_tick(
                 config, provide_registry, client, notifier, dry_run=False
             )
         except core.ContractError:
+            # Fail-closed admission/policy conditions are retried on the next tick.
             pass
+        except BaseException as exc:  # sqlite3.Error, OSError, or anything unexpected
+            failure.append(exc)
+            stop.set()
+            server = get_server()
+            if server is not None:
+                server.shutdown()
+            return
         if stop.wait(config["worker"]["tick_seconds"]):
             return
 

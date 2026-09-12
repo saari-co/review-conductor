@@ -249,6 +249,10 @@ class GitHubAppClient:
     ) -> None:
         core.require_enabled({"review_policy": config.get("review_policy", {})})
         app = config["github_app"]
+        # The adapter derives its token request from this map, so it must be one of
+        # the two closed allowlists regardless of how the client was constructed.
+        if app.get("permissions") not in (APP_PERMISSIONS, STANDALONE_APP_PERMISSIONS):
+            raise GitHubApiError("GitHub App permissions are outside the closed allowlists")
         if config.get("review_policy") and not config.get("clawsweeper"):
             raise RuntimeError("generalized profile requires its own ClawSweeper adapter")
         self._clawsweeper = config.get("clawsweeper", {"workflow_id": "clawsweeper-native-canary.yml", "ref": "main"})

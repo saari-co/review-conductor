@@ -39,6 +39,8 @@ activation.**
 The live enrollment registry is an external same-user regular file with mode
 exactly `0600`, never a target-repository file. The entrypoint refuses a registry
 located inside this source tree, the target checkout, or the state/proof roots,
+requires a same-user parent directory that is not group/world writable, opens the
+file without following symlinks and validates and reads the opened descriptor,
 and re-reads and re-validates the file on every delivery and worker tick, so a
 promotion or revocation takes effect without restart and a registry that stops
 validating fails every delivery and tick closed. It must contain exactly the repository/name/ID,
@@ -52,6 +54,13 @@ The engine still reads its rules from the core profile. A policy binds only when
 the admitted manifest's repository, default branch, CI workflow name/path, quiet
 period and merge policy agree exactly with that profile; promoting a manifest that
 changes any of them requires the matching profile change first.
+
+Every worker tick re-checks that the running profile's App, installation and
+repository are the registry's enrollment. Fail-closed admission conditions are
+retried on the next tick; any other worker failure (database, filesystem,
+unexpected) stops the whole service with exit status 2 rather than leaving
+ingress accepting deliveries that nothing will act on. The GitHub App client
+refuses any permission map that is not one of the two closed allowlists.
 
 Non-secret credential selectors are already isolated in the inactive profile:
 

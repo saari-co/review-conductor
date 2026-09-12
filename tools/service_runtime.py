@@ -333,9 +333,21 @@ def binding_for_current_head(
     return dict(row)
 
 
+def require_profile_enrolled(config: dict[str, Any], registry: admission.Registry) -> admission.Enrollment:
+    """The runtime profile's App/installation/repository must be the registry's enrollment."""
+    app = core.require_object(config.get("github_app"), "service GitHub App config")
+    try:
+        return registry.lookup(
+            app.get("repository"), app.get("repository_id"), app.get("app_id"), app.get("installation_id")
+        )
+    except admission.AdmissionError as exc:
+        raise ServiceError("runtime profile is not enrolled in the service registry") from exc
+
+
 def require_current_bindings(config: dict[str, Any], registry: RegistrySource) -> None:
     """Block every worker/projection tick if any live head lacks current policy."""
     registry = resolve_registry(registry)
+    require_profile_enrolled(config, registry)
     connection = core.open_database(
         Path(config["paths"]["state_root"]), config["github_app"]["repository"]
     )

@@ -2,13 +2,14 @@
   "base_main": "320534450bbfe924bf855b762a0f9358f0b40336",
   "candidate_source": "8e90d46b9287f37382dba1eb5569b0f824a28084",
   "candidate_source_branch": "openclaw/review-conductor-trusted-admission-fable (local only)",
-  "captured_utc": "2026-09-12T12:45:55Z",
+  "captured_utc": "2026-09-12T13:01:36Z",
   "repair_lineage": [
     "candidate 8e90d46 ported onto merged PR #2 main; tests/test_trusted_admission.py merged with the PR #2 manifest_bytes/reader-failure hardening plus App-ID binding",
     "service_entrypoint: AdmissionError from the profile enrollment lookup is normalized to ServiceError so main exits 2 instead of raising; empty registries are refused; stderr via sys",
     "test_service_runtime: registry spy proves no enrollment lookup before HMAC; config/registry App mismatch cases; post-promotion conflicting rebinding; full loopback HTTP matrix; entrypoint inactivity; executable disposable-copy mutants with subprocess watchdog",
     "docs: README profile-fixture row and trusted-admission single-binding semantics",
-    "Copilot review at fe7e5f374569de02d98a6bf26ab0818e42d16c2b (6 findings): registry provider re-read per delivery/tick; registry refused inside source/checkout/state/proof roots; mode exactly 0600; ingress bound before worker start; bindings only from accepted pull_request deliveries (never workflow_run, closed or duplicate); admitted manifest must agree with engine profile"
+    "Copilot review at fe7e5f374569de02d98a6bf26ab0818e42d16c2b (6 findings): registry provider re-read per delivery/tick; registry refused inside source/checkout/state/proof roots; mode exactly 0600; ingress bound before worker start; bindings only from accepted pull_request deliveries (never workflow_run, closed or duplicate); admitted manifest must agree with engine profile",
+    "Copilot review at 5796910961caa3f124241dd36c3230fe4d2abcaa (4 new findings): GitHubAppClient validates its permission map against the two closed allowlists; registry opened O_NOFOLLOW and validated/read via fstat descriptor with single-link and parent-directory checks; worker gate re-checks profile enrollment against the registry; worker operational failures stop the whole service (exit 2)"
   ],
   "files": {
     "Makefile": "b640756b3a3e3c877a0fa8201e1aaf2d1a3a506cdd4c7b7a412fe0d2e2baa0e9",
@@ -18,17 +19,17 @@
     "docs/bootstrap.md": "d7fab758e263f1b7ba1c8a1431fa435bfa17685cd533fc603720130d860cca87",
     "docs/integration-contract.md": "9a245f0cef202507eeceabee82b794f72041ed89a4225957744195c31d72c027",
     "docs/migration.md": "f0656d19c0d76e9ce8823745733790c744e505a3eb7f799ab2e20edbe1775fc2",
-    "docs/provenance.json": "575ccfd6d2719f7f5d46bd927be158833fe506eea89cb9de8ab85eeac5f2e0e8",
-    "docs/smcbd-pilot-handoff.md": "34403df224725a191da426ac19a87a26dc1b30f1705e4f1c3de6fa12e5c63c7d",
-    "docs/trusted-admission.md": "32ef36bafbe6fedb7688a398a8cfc808d1de880970c99166e5d41dcfbb598878",
+    "docs/provenance.json": "6e4cf9001783210ca07c45aa3bcdc5e3434c3b1c910b8721412265240cc6aa98",
+    "docs/smcbd-pilot-handoff.md": "d4ec6c6863b19a418f7b8fb8eae4e2745b0232666be58506b8f8f63afa4c500d",
+    "docs/trusted-admission.md": "21acc1dfc2e955f5f91dafe0efba701e70758e4a1747ad3ee98fc81da2adce21",
     "tests/test_review_conductor_profiles.py": "bafad178ef7e5e4c0adb5c58f5a6141d0607fa1fa5131053cfaccab3877a6c88",
-    "tests/test_service_runtime.py": "ad1d9cf4b709862dd0934281c8ea72fa592394e2de80abb945576e4c47549668",
+    "tests/test_service_runtime.py": "b16c74ca44176ac63c2b6c7764c91c8786c6a050a3d89617c40e7d2e1c4526cb",
     "tests/test_trusted_admission.py": "386b11d0c1ad637b94564e434063ff9e793841fb2bbd86b2e74e40da4b525ac2",
     "tools/review_conductor.py": "2b5ae0336b1f754866680eaeb775df5643cb73983fdb250600304b47a43c7097",
-    "tools/review_conductor_runtime.py": "e163dce2311803b4421de28adfd7880d5a23bfcb558eb8f531b773b6e11782b7",
+    "tools/review_conductor_runtime.py": "e4ad31db8de3bbe2f5e56fbf085f3d92a8516e6e2387b2133a6845daf3b17c8c",
     "tools/review_conductor_userland.py": "fee2a853922b38ffe79df6d572109f01794aba7005b6dd2ee3e5ea117e1b6a9d",
-    "tools/service_entrypoint.py": "4655822dcd3d7a7fc4c42096bfed241e62a36afb0873e301eb25cd6e5e602f2e",
-    "tools/service_runtime.py": "c0be0ba3299ff1bb4f51cfca52cfbb3f9d86c2f2f616d45c3c272c3dfc28af50",
+    "tools/service_entrypoint.py": "4d9a24166dff20ecb0bafa70951884ec3fc2cd3c3404a393c0ca66e1e514689a",
+    "tools/service_runtime.py": "e523d0d177aed780a6942b14dbc76aac6cceb1219fa3db352d4f75646fdc5689",
     "tools/trusted_admission.py": "169d8b6fe20900639d12a3edd6daf3a0d9ce703f7ac1d2589bbeb9ff8db1c2c6"
   }
 }
