@@ -43,13 +43,27 @@ not live admission.
 
 Keep numeric repository identity, approved policy commit/hash, reviewer actor map,
 App installation, webhook/adapter credential references, ingress and per-target
-checkout/state/proof paths outside target Git. Each installation, webhook secret,
-reviewer credential boundary and mutable store must be isolated. A target cannot
+checkout/state/proof paths outside target Git. The service implementation and
+read-only dashboard may be shared, but each tenant's installation, webhook
+secret, reviewer credential boundary, state, queue, proof and mutation authority
+must be isolated. A target cannot
 request another target's installation, read its evidence, or supply its reviewers.
 No credentials or live deployment files are included. The inactive SMCBD
 candidate pins App `4916376`, installation `161027021`, repository
 `saari-co/openclaw-smcbd-suite`, and repository ID `1366416798`; that identity
 record is not enrollment activation.
+
+The dedicated SMCBD pilot App remains restricted to the `saari-co` account and
+installed only on `openclaw-smcbd-suite`. The pilot does not require public or
+"Any account" visibility. A shared App or broader visibility is a later explicit
+isolation decision; future repository enrollment does not inherently require a
+new App per repository.
+
+Reviewer services own their native detailed findings and comments. Only the
+Conductor publishes the authoritative rail check names after validating the
+corresponding exact-revision evidence. Fence the previous writer before a
+cutover; never operate competing authoritative writers. Dashboard clients are
+read-only and no check result grants merge authority.
 
 ## Gateway/client contract (planned; no server or plugin installed)
 

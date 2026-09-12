@@ -43,9 +43,16 @@ configuration. The build excludes all historical profiles and legacy launchers.
 5. Separately authorize each target's manifest commit, installation and isolated
    credential/proof/state provisioning. SMCBD's missing identities/producers and
    PR #3 CI/rail ownership blockers remain unresolved.
-6. Plan a gated pilot cutover with exact deployed source, genuine artifact proof,
-   state/schema compatibility and rollback. Only after acceptance retire x-api
-   ownership in a separately reviewed change. No dual active conductor writers.
+6. Provision isolated credential storage, then transfer credentials through the
+   approved protected path. Start and qualify the service and HTTPS endpoint with
+   GitHub webhooks disabled. Obtain a separate webhook-activation go/no-go, run
+   the SMCBD shadow pilot while existing required-check bindings remain unchanged,
+   and prove genuine reviews, replay handling and stale-evidence rejection.
+7. Obtain a separate cutover go/no-go before transferring authoritative required
+   checks to the Conductor. Fence the prior writer first. Only after SMCBD and its
+   rollback are accepted, repeat for Blocks and prove cross-tenant isolation.
+   Retire x-api ownership in a separately reviewed change. No dual active
+   conductor writers.
 
 ## Untouched
 
