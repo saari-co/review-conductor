@@ -97,7 +97,38 @@ class RetryableIngestError(Exception):
     """
 
 
-def assert_authority(client: Any, operation: str) -> None:
+def tuple_authority(record: Any) -> dict[str, Any]:
+    """Return the canonical review tuple that owns a prospective side effect."""
+    try:
+        repository = record["repository"]
+        pr_number = record["pr_number"]
+        base_sha = record["base_sha"]
+        head_sha = record["head_sha"]
+        review_epoch = record["review_epoch"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError("side-effect authority is missing exact tuple identity") from exc
+    return {
+        "repository": core.require_text(repository, "authority repository", 200),
+        "pr_number": core.require_positive_int(pr_number, "authority PR number"),
+        "base_sha": core.require_sha(base_sha, "authority base SHA"),
+        "head_sha": core.require_sha(head_sha, "authority head SHA"),
+        "review_epoch": require_review_epoch(review_epoch, "authority review epoch"),
+    }
+
+
+def guarded_client_kwargs(client: Any, record: Any) -> dict[str, Any]:
+    """Pass tuple authority to clients that implement the live guard contract.
+
+    Legacy and test-only adapters have no authority-guard installer and retain
+    their historical signatures. A live service refuses such a client before a
+    tick starts, so this compatibility path cannot weaken the standalone route.
+    """
+    if callable(getattr(client, "set_authority_guard", None)):
+        return {"authority": tuple_authority(record)}
+    return {}
+
+
+def assert_authority(client: Any, operation: str, authority: Any | None = None) -> None:
     """Run the client's admission authority guard before a non-GitHub side effect.
 
     Worker phases that act outside the GitHub client (OpenClaw dispatch,
@@ -107,7 +138,12 @@ def assert_authority(client: Any, operation: str) -> None:
     check = getattr(client, "assert_authority", None)
     if check is not None:
         try:
-            check(operation)
+            if authority is not None and callable(
+                getattr(client, "set_authority_guard", None)
+            ):
+                check(operation, tuple_authority(authority))
+            else:
+                check(operation)
         except core.AuthorityDenied:
             raise
         except Exception as exc:
@@ -334,9 +370,12 @@ class GitHubAppClient:
         self._token: str | None = None
         self._token_expires = 0.0
         self._token_lock = threading.Lock()
-        self._authority_guard: Callable[[str, str], None] | None = None
+        self._authority_guard: Callable[[str, str, dict[str, Any] | None], None] | None = None
 
-    def set_authority_guard(self, guard: Callable[[str, str], None] | None) -> None:
+    def set_authority_guard(
+        self,
+        guard: Callable[[str, str, dict[str, Any] | None], None] | None,
+    ) -> None:
         """Install a check that runs before every mutating GitHub call.
 
         The service uses it to re-validate current admission (registry, reviewer
@@ -346,10 +385,12 @@ class GitHubAppClient:
         """
         self._authority_guard = guard
 
-    def assert_authority(self, operation: str) -> None:
+    def assert_authority(
+        self, operation: str, authority: dict[str, Any] | None = None
+    ) -> None:
         """Run the installed guard for a side effect that is not a GitHub call."""
         if self._authority_guard is not None:
-            self._authority_guard("SIDE_EFFECT", operation)
+            self._authority_guard("SIDE_EFFECT", operation, authority)
 
     @property
     def repository(self) -> str:
@@ -405,6 +446,7 @@ class GitHubAppClient:
         *,
         expected: set[int],
         app_jwt: str | None = None,
+        authority: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         _operation, raw = self._call_raw(
             method,
@@ -412,6 +454,7 @@ class GitHubAppClient:
             payload,
             expected=expected,
             app_jwt=app_jwt,
+            authority=authority,
         )
         if not raw:
             return {}
@@ -431,6 +474,7 @@ class GitHubAppClient:
         *,
         expected: set[int],
         app_jwt: str | None = None,
+        authority: dict[str, Any] | None = None,
     ) -> tuple[str, bytes]:
         operation = self._allow(method, path)
         token = app_jwt if operation == "installation-token" else self._installation_token()
@@ -452,7 +496,7 @@ class GitHubAppClient:
             and operation != "installation-token"
         ):
             try:
-                self._authority_guard(method, path)
+                self._authority_guard(method, path, authority)
             except core.AuthorityDenied:
                 raise
             except Exception as exc:
@@ -543,7 +587,15 @@ class GitHubAppClient:
             raise GitHubApiError("approved policy content has an invalid bounded size")
         return content
 
-    def create_check(self, name: str, head_sha: str, external_id: str, state: str) -> int:
+    def create_check(
+        self,
+        name: str,
+        head_sha: str,
+        external_id: str,
+        state: str,
+        *,
+        authority: dict[str, Any] | None = None,
+    ) -> int:
         if name not in CHECK_NAMES:
             raise GitHubApiError("check name is outside the fixed allowlist")
         payload = check_payload(name, head_sha, external_id, state)
@@ -552,10 +604,20 @@ class GitHubAppClient:
             f"/repos/{self.repository}/check-runs",
             payload,
             expected={201},
+            authority=authority,
         )
         return core.require_positive_int(response.get("id"), "GitHub check run id")
 
-    def update_check(self, check_id: int, name: str, head_sha: str, external_id: str, state: str) -> None:
+    def update_check(
+        self,
+        check_id: int,
+        name: str,
+        head_sha: str,
+        external_id: str,
+        state: str,
+        *,
+        authority: dict[str, Any] | None = None,
+    ) -> None:
         if name not in CHECK_NAMES:
             raise GitHubApiError("check name is outside the fixed allowlist")
         self._call(
@@ -563,27 +625,36 @@ class GitHubAppClient:
             f"/repos/{self.repository}/check-runs/{check_id}",
             check_payload(name, head_sha, external_id, state),
             expected={200},
+            authority=authority,
         )
 
-    def add_ready_label(self, pr_number: int) -> None:
+    def add_ready_label(
+        self, pr_number: int, *, authority: dict[str, Any] | None = None
+    ) -> None:
         self._call(
             "POST",
             f"/repos/{self.repository}/issues/{pr_number}/labels",
             {"labels": [READY_LABEL]},
             expected={200},
+            authority=authority,
         )
 
-    def remove_ready_label(self, pr_number: int) -> None:
+    def remove_ready_label(
+        self, pr_number: int, *, authority: dict[str, Any] | None = None
+    ) -> None:
         encoded = urllib.parse.quote(READY_LABEL, safe="")
         self._call(
             "DELETE",
             f"/repos/{self.repository}/issues/{pr_number}/labels/{encoded}",
             None,
             expected={200, 204, 404},
+            authority=authority,
         )
 
     def dispatch_clawsweeper(
-        self, *, pr_number: int, base_sha: str, head_sha: str, publish: bool, review_epoch: int | None = None
+        self, *, pr_number: int, base_sha: str, head_sha: str, publish: bool,
+        review_epoch: int | None = None,
+        authority: dict[str, Any] | None = None,
     ) -> None:
         core.require_sha(base_sha, "ClawSweeper dispatch base_sha")
         core.require_sha(head_sha, "ClawSweeper dispatch head_sha")
@@ -607,6 +678,7 @@ class GitHubAppClient:
                 },
             },
             expected={204},
+            authority=authority,
         )
 
     def list_run_artifacts(self, workflow_run_id: int) -> list[dict[str, Any]]:
@@ -849,6 +921,7 @@ def reconcile_projection(
         rows = connection.execute(query, params).fetchall()
         for row in rows:
             projection = ensure_projection_row(connection, row)
+            authority_kwargs = guarded_client_kwargs(client, row)
             state = core.state_projection(dict(row))
             clawsweeper_publication_owner = False
             if row["state"] == "clawsweeper_queued":
@@ -940,7 +1013,11 @@ def reconcile_projection(
                         raise RuntimeError("check creation claim became stale before projection")
                     try:
                         check_id = client.create_check(
-                            name, row["head_sha"], external_id, check_state
+                            name,
+                            row["head_sha"],
+                            external_id,
+                            check_state,
+                            **authority_kwargs,
                         )
                     except core.AuthorityDenied:
                         connection.execute(
@@ -973,16 +1050,23 @@ def reconcile_projection(
                         ),
                     )
                 else:
-                    client.update_check(check_id, name, row["head_sha"], external_id, check_state)
+                    client.update_check(
+                        check_id,
+                        name,
+                        row["head_sha"],
+                        external_id,
+                        check_state,
+                        **authority_kwargs,
+                    )
             desired = bool(state["ready_for_human_label"])
             label_action = item["ready_label_action"]
             if label_action == "ensure_present":
-                client.add_ready_label(row["pr_number"])
+                client.add_ready_label(row["pr_number"], **authority_kwargs)
             elif label_action in {
                 "ensure_absent",
                 "ensure_absent_before_clawsweeper_publication",
             }:
-                client.remove_ready_label(row["pr_number"])
+                client.remove_ready_label(row["pr_number"], **authority_kwargs)
             if label_action != "hold_for_clawsweeper_publication":
                 connection.execute(
                     """
@@ -1232,8 +1316,9 @@ def dispatch_clawsweeper_action(
             raise RuntimeError("ClawSweeper action is not safely claimable")
         if not claim_clawsweeper_preparation(connection, action, config, "cp1-worker"):
             return {"action_id": action_id, "result": "not_claimed", "merge_dispatched": False}
+        authority_kwargs = guarded_client_kwargs(client, action)
         try:
-            client.remove_ready_label(action["pr_number"])
+            client.remove_ready_label(action["pr_number"], **authority_kwargs)
         except Exception:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
@@ -1326,6 +1411,7 @@ def dispatch_clawsweeper_action(
                 head_sha=payload["head_sha"],
                 publish=payload["publish"],
                 **({"review_epoch": payload["review_epoch"]} if config.get("review_policy") else {}),
+                **authority_kwargs,
             )
         except core.AuthorityDenied:
             connection.execute("BEGIN IMMEDIATE")
@@ -1440,6 +1526,21 @@ def drain_actions(
             )
             continue
         if action["kind"] == "openclaw.enqueue":
+            authority = tuple_authority(action)
+
+            def before_external_command(
+                index: int,
+                _command: list[str],
+                *,
+                action_id: str = action["action_id"],
+                exact_authority: dict[str, Any] = authority,
+            ) -> None:
+                assert_authority(
+                    client,
+                    f"openclaw.enqueue:{action_id}:step:{index + 1}",
+                    exact_authority,
+                )
+
             args = argparse.Namespace(
                 config=Path(config["core_config"]),
                 state_root=Path(config["paths"]["state_root"]),
@@ -1449,14 +1550,16 @@ def drain_actions(
                 retry=action["status"] == "failed",
                 claim_owner="cp1-worker",
                 claim_lease_seconds=config["worker"]["claim_lease_seconds"],
-                before_external_command=lambda index, _command, action_id=action["action_id"]: assert_authority(
-                    client, f"openclaw.enqueue:{action_id}:step:{index + 1}"
-                ),
+                before_external_command=before_external_command,
             )
             # Each OpenClaw dispatch is an external side effect; fence it like a
             # GitHub write so revoked authority stops the whole drain here instead
             # of being recorded as an adapter rejection of this one action.
-            assert_authority(client, f"openclaw.enqueue:{action['action_id']}")
+            assert_authority(
+                client,
+                f"openclaw.enqueue:{action['action_id']}",
+                authority,
+            )
             try:
                 with service_transport_environment(config):
                     outcomes.append(core.dispatch_action(args))

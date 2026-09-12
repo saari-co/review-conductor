@@ -1158,6 +1158,180 @@ class AdmissionIngressTests(unittest.TestCase):
             )
         self.assertIn("install and assert", str(ctx.exception))
 
+    def test_tuple_guard_rejects_superseded_work_under_a_new_valid_binding(self):
+        self.fx.ingest("initial", self.fx.payload())
+        connection = core.open_database(self.fx.state, REPOSITORY)
+        try:
+            old_head = connection.execute(
+                "SELECT * FROM heads WHERE repository=? AND is_current=1",
+                (REPOSITORY,),
+            ).fetchone()
+            old_authority = runtime.tuple_authority(old_head)
+        finally:
+            connection.close()
+
+        newer = self.fx.payload()
+        newer["action"] = "synchronize"
+        newer["pull_request"]["head"]["sha"] = "3" * 40
+        newer["pull_request"]["updated_at"] = "2026-08-29T20:01:00Z"
+        calls = []
+
+        def transport(method, url, headers, body, timeout):
+            calls.append((method, url))
+            if url.endswith("/access_tokens"):
+                return 201, json.dumps(
+                    {
+                        "token": "fixture-token",
+                        "expires_at": "2099-01-01T00:00:00Z",
+                    }
+                ).encode()
+            return 201, json.dumps({"id": 11}).encode()
+
+        client = runtime.GitHubAppClient(
+            self.fx.app_config(),
+            "fixture-private-key",
+            transport=transport,
+            signer=lambda *_: "fixture-jwt",
+        )
+        registry = self.fx.registry()
+
+        def fake_tick(config, tick_client, notifier, *, dry_run):
+            # Tuple B is admitted after tuple A was selected. The repository-wide
+            # gate is healthy for B, but it must not authorize A's pending write.
+            self.assertEqual(
+                self.fx.ingest("superseding", newer, registry=registry)["result"],
+                "accepted",
+            )
+            service.require_current_bindings(config, registry)
+            tick_client.create_check(
+                "OpenClaw Review Rail",
+                old_authority["head_sha"],
+                "external",
+                "queued",
+                authority=old_authority,
+            )
+            return {"result": "unreachable"}
+
+        with patch.object(userland, "run_tick", fake_tick):
+            with self.assertRaises(core.AuthorityDenied):
+                service.run_service_tick(
+                    self.fx.app_config(), registry, client, object(), dry_run=False
+                )
+        self.assertEqual(
+            [url for method, url in calls if method != "GET" and "check-runs" in url],
+            [],
+        )
+        with self.assertRaises(core.ContractError):
+            service.require_exact_current_binding(
+                self.fx.app_config(), registry, old_authority
+            )
+        connection = core.open_database(self.fx.state, REPOSITORY)
+        try:
+            new_head = connection.execute(
+                "SELECT * FROM heads WHERE repository=? AND is_current=1",
+                (REPOSITORY,),
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(new_head["head_sha"], "3" * 40)
+        self.assertIsNotNone(
+            service.require_exact_current_binding(
+                self.fx.app_config(), registry, runtime.tuple_authority(new_head)
+            )
+        )
+
+    def test_superseded_review_notification_cannot_use_the_new_heads_binding(self):
+        self.fx.ingest("initial", self.fx.payload())
+        connection = core.open_database(self.fx.state, REPOSITORY)
+        try:
+            userland.ensure_userland_tables(connection)
+            old_head = connection.execute(
+                "SELECT * FROM heads WHERE repository=? AND is_current=1",
+                (REPOSITORY,),
+            ).fetchone()
+            payload = {
+                "schema": userland.NOTIFICATION_SCHEMA,
+                "event_key": "stale-review",
+                "repository": old_head["repository"],
+                "pr_number": old_head["pr_number"],
+                "base_sha": old_head["base_sha"],
+                "head_sha": old_head["head_sha"],
+                "review_epoch": old_head["review_epoch"],
+                "state": old_head["state"],
+                "repair_cycle": old_head["repair_cycle"],
+                "message": "stale review result",
+                "merge_authorized": False,
+            }
+            connection.execute(
+                """
+                INSERT INTO notification_deliveries(
+                  event_key, channel, repository, pr_number, base_sha, head_sha,
+                  review_epoch, state, payload_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payload["event_key"],
+                    "discord",
+                    payload["repository"],
+                    payload["pr_number"],
+                    payload["base_sha"],
+                    payload["head_sha"],
+                    payload["review_epoch"],
+                    payload["state"],
+                    core.canonical_json(payload),
+                    core.utc_now(),
+                    core.utc_now(),
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        newer = self.fx.payload()
+        newer["action"] = "synchronize"
+        newer["pull_request"]["head"]["sha"] = "3" * 40
+        newer["pull_request"]["updated_at"] = "2026-08-29T20:01:00Z"
+        registry = self.fx.registry()
+        client = runtime.GitHubAppClient(
+            self.fx.app_config(),
+            "fixture-private-key",
+            transport=lambda *_: (500, b""),
+            signer=lambda *_: "fixture-jwt",
+        )
+        sent = []
+
+        class Notifier:
+            def send(self, channel, message):
+                sent.append((channel, message))
+
+        def fake_tick(config, tick_client, notifier, *, dry_run):
+            self.fx.ingest("superseding-notification", newer, registry=registry)
+            return userland.deliver_notifications(
+                config,
+                notifier,
+                dry_run=False,
+                authority_client=tick_client,
+            )
+
+        with patch.object(userland, "run_tick", fake_tick), patch.object(
+            userland, "queue_notifications", lambda _config: 0
+        ):
+            with self.assertRaises(core.AuthorityDenied):
+                service.run_service_tick(
+                    self.fx.app_config(), registry, client, Notifier(), dry_run=False
+                )
+        self.assertEqual(sent, [])
+        connection = core.open_database(self.fx.state, REPOSITORY)
+        try:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT status FROM notification_deliveries WHERE event_key='stale-review'"
+                ).fetchone()[0],
+                "pending",
+            )
+        finally:
+            connection.close()
+
     # --- Invariant 1: enrollment/profile identity -------------------------------
 
     def test_profile_disabled_after_startup_fails_every_gate_closed(self):
@@ -1289,7 +1463,11 @@ class AdmissionIngressTests(unittest.TestCase):
         client = runtime.GitHubAppClient(self.fx.app_config(), "fixture-private-key", transport=transport,
                                          signer=lambda *_: "fixture-jwt")
         config = self.fx.app_config()
-        client.set_authority_guard(lambda _m, _p: service.require_current_bindings(config, lambda: state["registry"]))
+        client.set_authority_guard(
+            lambda _m, _p, _authority: service.require_current_bindings(
+                config, lambda: state["registry"]
+            )
+        )
         with self.assertRaises(core.ContractError):
             client.create_check("OpenClaw Review Rail", HEAD, "external", "queued")
         self.assertEqual([url.rsplit("/", 1)[-1] for _m, url in calls], ["access_tokens"])
@@ -2550,16 +2728,23 @@ MUTANTS = [
     (
         "dispatch OpenClaw work without the authority fence",
         "tools/review_conductor_runtime.py",
-        "            assert_authority(client, f\"openclaw.enqueue:{action['action_id']}\")\n",
+        '            assert_authority(\n                client,\n                f"openclaw.enqueue:{action[\'action_id\']}",\n                authority,\n            )\n',
         "",
         "AdmissionIngressTests.test_openclaw_dispatch_and_notifications_are_fenced_by_the_authority_guard",
     ),
     (
         "deliver notifications without the authority fence",
         "tools/review_conductor_userland.py",
-        '            runtime.assert_authority(\n                authority_client,\n                f"notification:{row[\'event_key\']}:{row[\'channel\']}",\n            )\n',
+        '            runtime.assert_authority(\n                authority_client,\n                f"notification:{row[\'event_key\']}:{row[\'channel\']}",\n                authority,\n            )\n',
         "",
         "AdmissionIngressTests.test_each_notification_send_has_a_fresh_authority_fence",
+    ),
+    (
+        "authorize a superseded notification under the repository-level gate",
+        "tools/review_conductor_userland.py",
+        '            runtime.assert_authority(\n                authority_client,\n                f"notification:{row[\'event_key\']}:{row[\'channel\']}",\n                authority,\n            )\n',
+        '            runtime.assert_authority(\n                authority_client,\n                f"notification:{row[\'event_key\']}:{row[\'channel\']}",\n            )\n',
+        "AdmissionIngressTests.test_superseded_review_notification_cannot_use_the_new_heads_binding",
     ),
     (
         "assert automatic redelivery of a 503",
@@ -2571,14 +2756,14 @@ MUTANTS = [
     (
         "skip the authority guard before mutating GitHub calls",
         "tools/review_conductor_runtime.py",
-        '        if (\n            self._authority_guard is not None\n            and method != "GET"\n            and operation != "installation-token"\n        ):\n            try:\n                self._authority_guard(method, path)\n            except core.AuthorityDenied:\n                raise\n            except Exception as exc:\n                raise core.AuthorityDenied(\n                    "authority revoked before GitHub request"\n                ) from exc\n',
+        '        if (\n            self._authority_guard is not None\n            and method != "GET"\n            and operation != "installation-token"\n        ):\n            try:\n                self._authority_guard(method, path, authority)\n            except core.AuthorityDenied:\n                raise\n            except Exception as exc:\n                raise core.AuthorityDenied(\n                    "authority revoked before GitHub request"\n                ) from exc\n',
         "        pass\n",
         "AdmissionIngressTests.test_tick_side_effects_revalidate_admission_before_each_mutating_call",
     ),
     (
         "run a live tick without arming the authority guard",
         "tools/service_runtime.py",
-        "        install(lambda _method, _path: require_current_bindings(config, registry))\n",
+        "        install(authority_guard)\n",
         "        pass\n",
         "AdmissionIngressTests.test_tick_side_effects_revalidate_admission_before_each_mutating_call",
     ),
@@ -2620,9 +2805,16 @@ MUTANTS = [
     (
         "touch the checkout before a fresh authority fence",
         "tools/review_conductor_userland.py",
-        '        runtime.assert_authority(\n            authority_client, f"checkout-hydration:{row[\'action_id\']}"\n        )\n',
+        '        runtime.assert_authority(\n            authority_client,\n            f"checkout-hydration:{row[\'action_id\']}",\n            authority,\n        )\n',
         "",
         "AdmissionIngressTests.test_checkout_hydration_is_fenced_before_the_checkout_is_touched",
+    ),
+    (
+        "authorize superseded work under a newer valid binding",
+        "tools/service_runtime.py",
+        "                require_exact_current_binding(config, registry, authority)\n",
+        "                require_current_bindings(config, registry)\n",
+        "AdmissionIngressTests.test_tuple_guard_rejects_superseded_work_under_a_new_valid_binding",
     ),
     (
         "run both OpenClaw commands under one stale fence",
@@ -2853,7 +3045,7 @@ class GitHubAdapterTests(unittest.TestCase):
             signer=lambda *_: "fixture-jwt",
         )
         guarded.set_authority_guard(
-            lambda _method, _path: (_ for _ in ()).throw(
+            lambda _method, _path, _authority: (_ for _ in ()).throw(
                 service.ServiceError("old binding is stale")
             )
         )

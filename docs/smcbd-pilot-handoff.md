@@ -83,10 +83,12 @@ still answer 400. The delivery hook re-reads the registry inside the delivery
 transaction and resolves the enrollment against the engine's freshly reloaded
 profile before staging or persisting a binding; a profile with
 `review_policy.enabled` no longer true fails closed everywhere. The tick's
-opening gate is re-run before every external side effect (each mutating GitHub
-call after token minting, each OpenClaw dispatch, notification delivery)
-through the client's authority guard, so a revocation or profile edit after the
-gate stops the rest of that tick. Installation-token minting is synchronized
+opening gate is followed by an exact repository/PR/base/head/epoch guard
+immediately before every current review side effect (each mutating GitHub call
+after token minting, each OpenClaw dispatch, and each review-result notification
+delivery), so a newer valid binding cannot authorize superseded work selected
+for an older tuple. Superseded-check cleanup and unbound operator alerts use the
+repository-level gate. Installation-token minting is synchronized
 but deliberately not fenced by an old binding, because ingress must be able to
 retrieve a newly promoted policy; the subsequent repository mutation is fenced
 after token minting. Checkout hydration is fenced before the checkout is

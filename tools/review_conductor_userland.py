@@ -1387,12 +1387,15 @@ def hydrate_exact_pr_head(
     original_head = core.require_sha(current_head.stdout.strip(), "Blocks checkout HEAD")
     head_sha = core.require_sha(action["head_sha"], "OpenClaw action head")
     base_sha = core.require_sha(action["base_sha"], "OpenClaw action base")
+    authority = runtime.tuple_authority(action)
 
     available = git("cat-file", "-e", f"{head_sha}^{{commit}}")
     fetched = False
     if available.returncode != 0:
         runtime.assert_authority(
-            authority_client, f"checkout-hydration:{action['action_id']}:fetch"
+            authority_client,
+            f"checkout-hydration:{action['action_id']}:fetch",
+            authority,
         )
         pull_ref = f"refs/pull/{core.require_positive_int(action['pr_number'], 'PR number')}/head"
         fetched_result = git(
@@ -1470,11 +1473,14 @@ def hydrate_pending_openclaw_heads(
         ]
     outcomes: list[dict[str, Any]] = []
     for row in rows:
+        authority = runtime.tuple_authority(row)
         # Admission revocation is not a checkout failure. Keep the fence outside
         # the adapter-error handler so it stops the tick instead of marking the
         # action failed and continuing under revoked authority.
         runtime.assert_authority(
-            authority_client, f"checkout-hydration:{row['action_id']}"
+            authority_client,
+            f"checkout-hydration:{row['action_id']}",
+            authority,
         )
         try:
             outcomes.append(
@@ -1858,9 +1864,16 @@ def deliver_notifications(
             if dry_run:
                 outcomes.append({"event_key": row["event_key"], "channel": row["channel"], "result": "planned"})
                 continue
+            # Operator alerts are intentionally unbound repository-level
+            # maintenance. Review-result notifications carry and revalidate the
+            # exact tuple that produced them.
+            authority = (
+                None if int(row["pr_number"]) == 0 else runtime.tuple_authority(row)
+            )
             runtime.assert_authority(
                 authority_client,
                 f"notification:{row['event_key']}:{row['channel']}",
+                authority,
             )
             try:
                 notifier.send(row["channel"], payload["message"])

@@ -149,7 +149,9 @@ candidate, reads the policy bytes from an in-memory stage; if they are not
 staged it unwinds the transaction (nothing written), the service fetches the
 bounded bytes outside any lock, hash-verifies them against the enrollment,
 keeps at most eight immutable `(repository, commit, sha256)` entries under a
-lock that is never held during a fetch, and re-runs the delivery once. Closed,
+lock that is never held during a fetch, and makes at most three engine attempts
+(at most two completed staging cycles) before returning a retryable failure if
+registry or cache changes keep racing admission. Closed,
 duplicate and stale deliveries therefore never touch the policy dependency. A
 transient transport failure (connection error, timeout, HTTP 429/5xx) is a
 retryable service failure: the webhook answers 503 `dependency_unavailable` and
@@ -163,9 +165,13 @@ promotion is staged for the promoted enrollment before the delivery is re-run.
 A profile whose `review_policy.enabled` is no longer true fails every provider
 read, delivery and tick closed. Every external side effect of a worker tick —
 each mutating GitHub call (fenced after token minting, immediately before the
-request), checkout hydration, each OpenClaw command and notification delivery — re-runs the tick's
-admission gate through the adapter's authority guard, using a read-only view of
-the engine database so it can run while a phase holds the write lock. A denial
+request), checkout hydration, each OpenClaw command and review-result
+notification delivery — re-runs the adapter's authority guard against the exact
+repository/PR/base/head/review-epoch tuple that owns the side effect, using a
+fresh read-only view of the engine database. A newer valid binding cannot clear
+superseded work selected for an older tuple. Superseded-check cleanup and
+unbound operator alerts remain repository-level maintenance and still require
+all live tuples to be bound. A denial
 before transport is a distinct recoverable outcome: the claim is released and
 left pending, rather than being terminalized as a failed or uncertain external
 side effect.

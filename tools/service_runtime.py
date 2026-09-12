@@ -662,6 +662,62 @@ def require_current_binding(
     return binding
 
 
+def require_exact_current_binding(
+    config: dict[str, Any],
+    registry: RegistrySource,
+    authority: Any,
+) -> dict[str, Any]:
+    """Require the exact tuple owning one imminent external side effect.
+
+    A newer valid head must not authorize work selected for an older one. Each
+    invocation resolves the registry and opens a fresh read-only database view,
+    then matches repository, PR, base, head and review epoch before accepting
+    the tuple's still-current policy binding.
+    """
+    exact = runtime.tuple_authority(authority)
+    registry = resolve_registry(registry)
+    core_config = core.load_config(Path(config["core_config"]))
+    enrolled = require_profile_enrolled(config, registry, core_config)
+    if exact["repository"] != enrolled.repository:
+        raise ServiceError("side-effect tuple repository contradicts service enrollment")
+    connection = _gate_connection(Path(config["paths"]["state_root"]))
+    if connection is None:
+        raise ServiceError("side-effect tuple has no admission-gate database")
+    try:
+        # Keep the head and binding reads on one snapshot. A promotion observed
+        # between two autocommit SELECTs must not pair tuple A with tuple B's
+        # otherwise-valid binding.
+        connection.execute("BEGIN")
+        head = core.exact_current_head(
+            connection,
+            exact["repository"],
+            exact["pr_number"],
+            exact["base_sha"],
+            exact["head_sha"],
+        )
+        if (
+            head is None
+            or head["state"] in {"closed", "closed_merged"}
+            or int(head["review_epoch"]) != exact["review_epoch"]
+        ):
+            raise ServiceError("side-effect tuple is not the live current review tuple")
+        binding = binding_for_current_head(
+            connection,
+            registry,
+            exact["repository"],
+            exact["pr_number"],
+            core_config,
+            config,
+        )
+        if binding is None:
+            raise ServiceError("side-effect tuple lacks a current approved-policy binding")
+        if any(binding[key] != exact[key] for key in exact):
+            raise ServiceError("approved-policy binding contradicts side-effect tuple")
+        return binding
+    finally:
+        connection.close()
+
+
 def run_service_tick(
     config: dict[str, Any],
     registry: RegistrySource,
@@ -687,5 +743,19 @@ def run_service_tick(
             raise ServiceError(
                 "tick client must install and assert the admission authority guard"
             )
-        install(lambda _method, _path: require_current_bindings(config, registry))
+        def authority_guard(
+            _method: str,
+            _path: str,
+            authority: dict[str, Any] | None,
+        ) -> None:
+            # Explicit stale-check cleanup and unbound operator alerts are
+            # repository-level maintenance. Every current review/check action
+            # supplies an exact tuple and must still own that tuple here.
+            if authority is None:
+                require_current_bindings(config, registry)
+            else:
+                require_current_bindings(config, registry)
+                require_exact_current_binding(config, registry, authority)
+
+        install(authority_guard)
     return userland.run_tick(config, client, notifier, dry_run=dry_run)
