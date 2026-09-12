@@ -7,6 +7,7 @@ publishes a check by importing it.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from pathlib import Path
@@ -19,6 +20,7 @@ from target_manifest import unique_object, validate_manifest
 
 
 BINDING_TABLE_SCHEMA = "review-conductor.service-policy-binding.v1"
+PROFILE_DIGEST_SCHEMA = "review-conductor.engine-profile-digest.v1"
 PolicyReader = Callable[[str, str], bytes]
 RegistrySource = Union[admission.Registry, Callable[[], admission.Registry]]
 
@@ -132,6 +134,30 @@ def require_policy_matches_profile(policy: admission.AdmittedPolicy, config: dic
             raise ServiceError("approved policy contradicts the engine profile")
 
 
+def profile_policy_digest(core_config: dict[str, Any]) -> str:
+    """Digest of every engine-profile field the admitted policy governs.
+
+    Stored with each binding and recompared on every tick, so a profile edited
+    after admission (for example across a restart) cannot keep an old binding
+    unlocking projection under rules the admitted policy never approved.
+    """
+    review_policy = core.require_object(core_config.get("review_policy"), "core review_policy")
+    ci = core.require_object(core_config.get("ci"), "core ci")
+    canonical = json.dumps(
+        {
+            "schema": PROFILE_DIGEST_SCHEMA,
+            "repository": core_config.get("repository"),
+            "repository_id": core_config.get("repository_id"),
+            "default_branch": core_config.get("default_branch"),
+            "ci": {"workflow_name": ci.get("workflow_name"), "workflow_path": ci.get("workflow_path")},
+            "quiet_seconds": review_policy.get("quiet_seconds"),
+            "merge_policy": core_config.get("merge_policy"),
+        },
+        sort_keys=True, separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _ensure_binding_table(connection: sqlite3.Connection) -> None:
     connection.execute(
         """
@@ -147,6 +173,9 @@ def _ensure_binding_table(connection: sqlite3.Connection) -> None:
           policy_sha256 TEXT NOT NULL,
           policy_id TEXT NOT NULL,
           binding_id TEXT NOT NULL,
+          reviewer_openclaw TEXT NOT NULL,
+          reviewer_clawsweeper TEXT NOT NULL,
+          profile_digest TEXT NOT NULL,
           created_at TEXT NOT NULL,
           PRIMARY KEY (repository, pr_number, base_sha, head_sha, review_epoch)
         )
@@ -154,7 +183,12 @@ def _ensure_binding_table(connection: sqlite3.Connection) -> None:
     )
 
 
-def _persist_binding(connection: sqlite3.Connection, value: admission.Admission) -> None:
+def _persist_binding(
+    connection: sqlite3.Connection,
+    value: admission.Admission,
+    enrolled: admission.Enrollment,
+    profile_digest: str,
+) -> None:
     _ensure_binding_table(connection)
     identity = (
         value.review.repository,
@@ -165,7 +199,8 @@ def _persist_binding(connection: sqlite3.Connection, value: admission.Admission)
     )
     prior = connection.execute(
         """
-        SELECT app_id, installation_id, policy_commit, policy_sha256, policy_id, binding_id
+        SELECT app_id, installation_id, policy_commit, policy_sha256, policy_id, binding_id,
+               reviewer_openclaw, reviewer_clawsweeper, profile_digest
         FROM service_policy_bindings
         WHERE repository=? AND pr_number=? AND base_sha=? AND head_sha=? AND review_epoch=?
         """,
@@ -178,6 +213,9 @@ def _persist_binding(connection: sqlite3.Connection, value: admission.Admission)
         value.policy.sha256,
         value.policy.policy_id,
         value.binding_id,
+        enrolled.reviewer_openclaw,
+        enrolled.reviewer_clawsweeper,
+        profile_digest,
     )
     if prior is not None and tuple(prior) != expected:
         raise ServiceError("exact review tuple already has a conflicting policy binding")
@@ -186,8 +224,9 @@ def _persist_binding(connection: sqlite3.Connection, value: admission.Admission)
         INSERT OR IGNORE INTO service_policy_bindings(
           repository, pr_number, base_sha, head_sha, review_epoch,
           app_id, installation_id, policy_commit, policy_sha256,
-          policy_id, binding_id, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          policy_id, binding_id, reviewer_openclaw, reviewer_clawsweeper,
+          profile_digest, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (*identity, *expected, core.utc_now()),
     )
@@ -237,7 +276,7 @@ def _admission_hook(
         except admission.AdmissionError as exc:
             raise ServiceError("approved policy could not be bound to the exact review tuple") from exc
         require_policy_matches_profile(bound.policy, config)
-        _persist_binding(connection, bound)
+        _persist_binding(connection, bound, enrolled, profile_policy_digest(config))
         return {
             "schema": BINDING_TABLE_SCHEMA,
             "binding_id": bound.binding_id,
@@ -306,8 +345,14 @@ def binding_for_current_head(
     registry: admission.Registry,
     repository: str,
     pr_number: int,
+    core_config: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Return the current binding only while the registry still approves it."""
+    """Return the current binding only while every authority it was admitted under holds.
+
+    The registry must still approve the same policy commit/hash and name the same
+    reviewer actors, and the engine profile must still digest to what it was at
+    admission; otherwise the tuple must be re-admitted under a new head/epoch.
+    """
     head = core.current_head(connection, repository, pr_number)
     if head is None:
         return None
@@ -332,6 +377,13 @@ def binding_for_current_head(
         enrolled.approved_policy_commit != row["policy_commit"]
         or enrolled.approved_policy_sha256 != row["policy_sha256"]
     ):
+        return None
+    if (
+        enrolled.reviewer_openclaw != row["reviewer_openclaw"]
+        or enrolled.reviewer_clawsweeper != row["reviewer_clawsweeper"]
+    ):
+        return None
+    if profile_policy_digest(core_config) != row["profile_digest"]:
         return None
     return dict(row)
 
@@ -366,7 +418,8 @@ def require_profile_enrolled(
 def require_current_bindings(config: dict[str, Any], registry: RegistrySource) -> None:
     """Block every worker/projection tick if any live head lacks current policy."""
     registry = resolve_registry(registry)
-    require_profile_enrolled(config, registry)
+    core_config = core.load_config(Path(config["core_config"]))
+    require_profile_enrolled(config, registry, core_config)
     connection = core.open_database(
         Path(config["paths"]["state_root"]), config["github_app"]["repository"]
     )
@@ -381,7 +434,7 @@ def require_current_bindings(config: dict[str, Any], registry: RegistrySource) -
         ).fetchall()
         for row in rows:
             if binding_for_current_head(
-                connection, registry, row["repository"], row["pr_number"]
+                connection, registry, row["repository"], row["pr_number"], core_config
             ) is None:
                 raise ServiceError("current review tuple lacks a current approved-policy binding")
     finally:

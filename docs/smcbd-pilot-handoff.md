@@ -58,8 +58,11 @@ the admitted manifest's repository, default branch, CI workflow name/path, quiet
 period and merge policy agree exactly with that profile; promoting a manifest that
 changes any of them requires the matching profile change first.
 
-Every worker tick re-checks that the running profile's App, installation and
-repository are the registry's enrollment. Fail-closed admission conditions are
+Every worker tick re-checks that the running profile's App, installation,
+repository and reviewer actors are the registry's enrollment, and that each live
+head's binding was admitted under the same policy, reviewer actors and
+policy-governed profile fields that hold now; rotating reviewers or editing the
+profile blocks projection until each head is re-admitted. Fail-closed admission conditions are
 retried on the next tick; any other worker failure (database, filesystem,
 unexpected) stops the whole service with exit status 2 rather than leaving
 ingress accepting deliveries that nothing will act on. The GitHub App client

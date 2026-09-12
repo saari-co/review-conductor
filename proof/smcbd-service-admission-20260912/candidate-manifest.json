@@ -2,7 +2,7 @@
   "base_main": "320534450bbfe924bf855b762a0f9358f0b40336",
   "candidate_source": "8e90d46b9287f37382dba1eb5569b0f824a28084",
   "candidate_source_branch": "openclaw/review-conductor-trusted-admission-fable (local only)",
-  "captured_utc": "2026-09-12T13:21:08Z",
+  "captured_utc": "2026-09-12T13:34:31Z",
   "repair_lineage": [
     "candidate 8e90d46 ported onto merged PR #2 main; tests/test_trusted_admission.py merged with the PR #2 manifest_bytes/reader-failure hardening plus App-ID binding",
     "service_entrypoint: AdmissionError from the profile enrollment lookup is normalized to ServiceError so main exits 2 instead of raising; empty registries are refused; stderr via sys",
@@ -10,7 +10,8 @@
     "docs: README profile-fixture row and trusted-admission single-binding semantics",
     "Copilot review at fe7e5f374569de02d98a6bf26ab0818e42d16c2b (6 findings): registry provider re-read per delivery/tick; registry refused inside source/checkout/state/proof roots; mode exactly 0600; ingress bound before worker start; bindings only from accepted pull_request deliveries (never workflow_run, closed or duplicate); admitted manifest must agree with engine profile",
     "Copilot review at 5796910961caa3f124241dd36c3230fe4d2abcaa (4 new findings): GitHubAppClient validates its permission map against the two closed allowlists; registry opened O_NOFOLLOW and validated/read via fstat descriptor with single-link and parent-directory checks; worker gate re-checks profile enrollment against the registry; worker operational failures stop the whole service (exit 2)",
-    "Copilot review at 8009e5e3e806098e132f4e81e7802d926f103fbb (2 new findings): registry path walked with held directory descriptors (O_DIRECTORY|O_NOFOLLOW, dir_fd) and forbidden roots checked by device/inode; enrollment schema gains authoritative reviewers block and the profile's review_policy.reviewers must agree on every provide/tick/delivery"
+    "Copilot review at 8009e5e3e806098e132f4e81e7802d926f103fbb (2 new findings): registry path walked with held directory descriptors (O_DIRECTORY|O_NOFOLLOW, dir_fd) and forbidden roots checked by device/inode; enrollment schema gains authoritative reviewers block and the profile's review_policy.reviewers must agree on every provide/tick/delivery",
+    "Copilot review at 83668102fdc1df8337eaa32af14571cf87e1164c (2 new findings): each binding persists the enrollment's reviewer actors and a digest of the policy-governed engine-profile fields; binding currency requires both to still hold on every tick, so reviewer rotation or a profile edit after admission blocks projection until re-admission"
   ],
   "files": {
     "Makefile": "b640756b3a3e3c877a0fa8201e1aaf2d1a3a506cdd4c7b7a412fe0d2e2baa0e9",
@@ -21,16 +22,16 @@
     "docs/integration-contract.md": "9a245f0cef202507eeceabee82b794f72041ed89a4225957744195c31d72c027",
     "docs/migration.md": "f0656d19c0d76e9ce8823745733790c744e505a3eb7f799ab2e20edbe1775fc2",
     "docs/provenance.json": "6e4cf9001783210ca07c45aa3bcdc5e3434c3b1c910b8721412265240cc6aa98",
-    "docs/smcbd-pilot-handoff.md": "fc1d130baac1c431abc5e13f58c462c235db0527bffd8b8eb6e21f28e16e5198",
-    "docs/trusted-admission.md": "8ef67981c7562e2a82d83fbbfe05ab0a60a5bc3b5d2baf09f1ddba6ebbf1a185",
+    "docs/smcbd-pilot-handoff.md": "71f18692d669fb844b256c846c51578adf884d7dbccc0de9e32c4a80a17ad2ca",
+    "docs/trusted-admission.md": "e56c1f7d350adfd79100a42498ffc881136edf98889c5fb6e8fbe4774cbf3d83",
     "tests/test_review_conductor_profiles.py": "bafad178ef7e5e4c0adb5c58f5a6141d0607fa1fa5131053cfaccab3877a6c88",
-    "tests/test_service_runtime.py": "fbc41b8e3715a59bcda79e1ea9e0d0c61c094a9d1cab5a4a3bf3c404e43ae42a",
+    "tests/test_service_runtime.py": "0dfa231e68a76670309e11ca396e1d02a1a06ec5befcbd02a0169005cde1c9e6",
     "tests/test_trusted_admission.py": "74f6167561bcfb03ba162a07ef7128eef0c52fd9889ed5476c3b3e8001c4433b",
     "tools/review_conductor.py": "2b5ae0336b1f754866680eaeb775df5643cb73983fdb250600304b47a43c7097",
     "tools/review_conductor_runtime.py": "e4ad31db8de3bbe2f5e56fbf085f3d92a8516e6e2387b2133a6845daf3b17c8c",
     "tools/review_conductor_userland.py": "fee2a853922b38ffe79df6d572109f01794aba7005b6dd2ee3e5ea117e1b6a9d",
     "tools/service_entrypoint.py": "348f42f60058d3ab0434c467c378335f1ba4f390e7d3d400c8496eadb52cb158",
-    "tools/service_runtime.py": "32327a1cb7b2caa3bc4d51c3b2fa7132d173e013bc5fdd86bfae229c883d3c80",
+    "tools/service_runtime.py": "cb5be0c765cb248889373aff4fd75493c9eb4a81595860c26803a53db268e60b",
     "tools/trusted_admission.py": "bfc0ae24bc7e1db054eaf852076601d96537f11ee6b0fb83263023a18678f2e5"
   }
 }

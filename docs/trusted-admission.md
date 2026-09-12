@@ -126,7 +126,12 @@ binding, so a promoted policy applies only to a newly admitted head or review
 epoch (for example `ready_for_review` or `reopened`), and the binding table
 refuses a conflicting rebinding outright. Before binding, the admitted manifest
 must agree with the engine profile's repository, default branch, CI workflow,
-quiet period and merge policy. That source is inactive until an external
+quiet period and merge policy. Each binding records the App, installation,
+policy commit/hash, the enrollment's reviewer actors and a digest of those
+policy-governed profile fields; a binding is current only while the registry
+still approves the same policy and names the same reviewers and the engine
+profile still digests identically, so reviewer rotation or a profile edit after
+admission blocks projection until the tuple is re-admitted. That source is inactive until an external
 service registry (mode exactly 0600, single link, non-writable same-user parent,
 outside source, checkout, state and proof roots, opened without following
 symlinks and read from the validated descriptor, re-read on every delivery and

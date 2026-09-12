@@ -143,6 +143,9 @@ class ServiceFixture:
             service_config=service_config or self.app_config(),
         )
 
+    def core_config(self):
+        return core.load_config(self.config_path)
+
     def binding_rows(self):
         connection = core.open_database(self.state, REPOSITORY)
         try:
@@ -180,7 +183,7 @@ class AdmissionIngressTests(unittest.TestCase):
         self.assertRegex(receipt["admission_binding_id"], r"^[0-9a-f]{64}$")
         connection = core.open_database(self.fx.state, REPOSITORY)
         try:
-            binding = service.binding_for_current_head(connection, self.fx.registry(), REPOSITORY, 7)
+            binding = service.binding_for_current_head(connection, self.fx.registry(), REPOSITORY, 7, self.fx.core_config())
             self.assertEqual(binding["app_id"], APP_ID)
             self.assertEqual(binding["installation_id"], INSTALLATION_ID)
             self.assertEqual(binding["binding_id"], receipt["admission_binding_id"])
@@ -289,7 +292,7 @@ class AdmissionIngressTests(unittest.TestCase):
         connection = core.open_database(self.fx.state, REPOSITORY)
         try:
             self.assertIsNone(
-                service.binding_for_current_head(connection, promoted_registry, REPOSITORY, 7)
+                service.binding_for_current_head(connection, promoted_registry, REPOSITORY, 7, self.fx.core_config())
             )
         finally:
             connection.close()
@@ -316,7 +319,8 @@ class AdmissionIngressTests(unittest.TestCase):
         connection = core.open_database(self.fx.state, REPOSITORY)
         try:
             with self.assertRaises(core.ContractError):
-                service._persist_binding(connection, conflicting)
+                service._persist_binding(connection, conflicting, promoted_registry.enrollments[0],
+                                         service.profile_policy_digest(self.fx.core_config()))
             connection.rollback()
         finally:
             connection.close()
@@ -421,6 +425,86 @@ class AdmissionIngressTests(unittest.TestCase):
         # the pathname points at afterwards.
         self.assertEqual(loaded.enrollments[0].app_id, APP_ID)
         self.assertEqual(entrypoint.read_service_registry(path).enrollments[0].app_id, APP_ID + 1)
+
+    def test_reviewer_rotation_invalidates_existing_bindings_until_readmission(self):
+        self.fx.ingest("initial", self.fx.payload())
+        service.require_current_bindings(self.fx.app_config(), self.fx.registry())
+        rows = self.fx.binding_rows()
+        self.assertEqual((rows[0]["reviewer_openclaw"], rows[0]["reviewer_clawsweeper"]),
+                         (REVIEWERS["openclaw"], REVIEWERS["clawsweeper"]))
+        # Rotate the authoritative actors consistently in registry and profile: the old
+        # binding was admitted under authority that no longer exists, so projection is
+        # blocked until a new head/epoch is admitted under the rotated actors.
+        rotated = {"openclaw": "rotated-openclaw", "clawsweeper": REVIEWERS["clawsweeper"]}
+        registry_doc = {"schema": admission.REGISTRY_SCHEMA, "enrollments": [{
+            "repository": REPOSITORY, "repository_id": REPOSITORY_ID,
+            "github_app": {"id": APP_ID, "installation_id": INSTALLATION_ID, "installation_account": "saari-co"},
+            "approved_policy": {"commit": POLICY_COMMIT, "sha256": hashlib.sha256(self.fx.policy).hexdigest()},
+            "reviewers": rotated}]}
+        rotated_registry = admission.load_registry(json.dumps(registry_doc).encode())
+        core_config = json.loads(self.fx.config_path.read_text())
+        core_config["review_policy"]["reviewers"] = rotated
+        self.fx.config_path.write_text(json.dumps(core_config) + "\n")
+        with self.assertRaises(core.ContractError):
+            service.require_current_bindings(self.fx.app_config(), rotated_registry)
+        connection = core.open_database(self.fx.state, REPOSITORY)
+        try:
+            self.assertIsNone(service.binding_for_current_head(
+                connection, rotated_registry, REPOSITORY, 7, self.fx.core_config()))
+        finally:
+            connection.close()
+        ready = self.fx.payload()
+        ready["action"] = "ready_for_review"
+        ready["pull_request"]["updated_at"] = "2026-08-30T20:11:00Z"
+        self.assertEqual(self.fx.ingest("readmit", ready, registry=rotated_registry)["result"], "accepted")
+        self.assertEqual([(row["review_epoch"], row["reviewer_openclaw"]) for row in self.fx.binding_rows()],
+                         [(0, REVIEWERS["openclaw"]), (1, "rotated-openclaw")])
+        service.require_current_bindings(self.fx.app_config(), rotated_registry)
+
+    def test_profile_change_after_admission_invalidates_existing_bindings(self):
+        self.fx.ingest("initial", self.fx.payload())
+        service.require_current_bindings(self.fx.app_config(), self.fx.registry())
+        original = self.fx.config_path.read_text()
+        digest = self.fx.binding_rows()[0]["profile_digest"]
+        self.assertEqual(digest, service.profile_policy_digest(self.fx.core_config()))
+        # Simulate a restart with an edited engine profile while the registry still
+        # approves the same policy commit/hash: every policy-governed field change
+        # blocks projection of the old binding.
+        edits = {
+            "quiet_seconds": lambda c: c["review_policy"].__setitem__("quiet_seconds", 600),
+            "default_branch": lambda c: c.__setitem__("default_branch", "release"),
+            "workflow_name": lambda c: c["ci"].__setitem__("workflow_name", "Other pipeline"),
+            "workflow_path": lambda c: c["ci"].__setitem__("workflow_path", ".github/workflows/other.yml"),
+            "merge_policy": lambda c: c.__setitem__("merge_policy", "auto"),
+        }
+        for label, edit in edits.items():
+            changed = json.loads(original)
+            edit(changed)
+            if label == "quiet_seconds":
+                # The engine pins 600 for generalized profiles; prove the digest itself
+                # is sensitive instead.
+                variant = json.loads(original)
+                variant["review_policy"]["quiet_seconds"] = 900
+                self.assertNotEqual(service.profile_policy_digest(variant), digest)
+                continue
+            self.fx.config_path.write_text(json.dumps(changed) + "\n")
+            try:
+                loaded = self.fx.core_config()
+            except core.ContractError:
+                # Profiles the engine itself refuses cannot unlock anything either.
+                with self.subTest(label=label), self.assertRaises(core.ContractError):
+                    service.require_current_bindings(self.fx.app_config(), self.fx.registry())
+                continue
+            self.assertNotEqual(service.profile_policy_digest(loaded), digest)
+            with self.subTest(label=label), self.assertRaises(core.ContractError):
+                service.require_current_bindings(self.fx.app_config(), self.fx.registry())
+        self.fx.config_path.write_text(original)
+        service.require_current_bindings(self.fx.app_config(), self.fx.registry())
+        # Non-policy edits (for example reviewer-independent operator fields) do not
+        # change the digest.
+        cosmetic = json.loads(original)
+        cosmetic["max_repair_cycles"] = 1
+        self.assertEqual(service.profile_policy_digest(cosmetic), digest)
 
     def test_registry_ancestor_swapped_for_symlink_after_canonicalization_is_refused(self):
         document = json.dumps({
@@ -1115,7 +1199,7 @@ MUTANTS = [
     (
         "gate the worker without checking the profile enrollment",
         "tools/service_runtime.py",
-        "    require_profile_enrolled(config, registry)\n",
+        "    require_profile_enrolled(config, registry, core_config)\n",
         "    pass\n",
         "AdmissionIngressTests.test_worker_gate_requires_the_profile_to_be_the_registry_enrollment",
     ),
@@ -1132,6 +1216,20 @@ MUTANTS = [
         '    if review_policy.get("reviewers") != enrolled.reviewers:\n        raise ServiceError("runtime reviewer identities contradict service enrollment")\n',
         "    pass\n",
         "AdmissionIngressTests.test_reviewer_actors_come_from_enrollment_not_the_profile",
+    ),
+    (
+        "keep bindings current after reviewer rotation",
+        "tools/service_runtime.py",
+        '        enrolled.reviewer_openclaw != row["reviewer_openclaw"]\n        or enrolled.reviewer_clawsweeper != row["reviewer_clawsweeper"]\n',
+        "        False\n",
+        "AdmissionIngressTests.test_reviewer_rotation_invalidates_existing_bindings_until_readmission",
+    ),
+    (
+        "keep bindings current after the engine profile changes",
+        "tools/service_runtime.py",
+        '    if profile_policy_digest(core_config) != row["profile_digest"]:\n',
+        "    if False:\n",
+        "AdmissionIngressTests.test_profile_change_after_admission_invalidates_existing_bindings",
     ),
     (
         "let the worker die silently on operational failure",

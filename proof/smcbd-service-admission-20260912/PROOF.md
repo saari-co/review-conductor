@@ -155,10 +155,28 @@ The `8009e5e3e806098e132f4e81e7802d926f103fbb` results (local PASS; hosted run
     the enrollment from the profile and compares the delivery against it, so
     the profile-to-registry lookup is a single guard.
 
+## Fourth review repair after head `8366810` (Copilot, two new findings)
+
+The `83668102fdc1df8337eaa32af14571cf87e1164c` results (local PASS; hosted run
+34696196053 success) are historical for that head.
+
+13. **Reviewer rotation left bindings valid.** Each binding row now records
+    the enrollment's `reviewer_openclaw`/`reviewer_clawsweeper`;
+    `binding_for_current_head` returns nothing unless the registry still names
+    the same actors, so a consistent rotation in registry and profile blocks
+    projection of every existing head until it is re-admitted under a new
+    head/epoch.
+14. **Profile edits after admission left bindings valid.** Each binding row now
+    records `profile_digest`, the SHA-256 of the policy-governed engine-profile
+    fields (repository, numeric ID, default branch, CI workflow name/path, quiet
+    period, merge policy); the gate recomputes it from the currently loaded
+    profile on every tick and refuses a mismatch, so a restart with an edited
+    profile cannot unlock old bindings under different rules.
+
 ## Verification at the repaired head (local CPython 3.14.6, macOS arm64)
 
 - `make check` — PASS: legacy engine/activation/userland/profile suites,
-  scaffold and repository guards, trusted admission (18), service runtime (26,
+  scaffold and repository guards, trusted admission (18), service runtime (28,
   including the mutation harness), launcher transport, workflow contract,
   extraction provenance (14 files) and Python compilation, `git diff --check`.
 - `make build` — PASS; the packaged zipapp still excludes service, admission
@@ -189,7 +207,9 @@ must fail its named test and only that test):
 18. gate the worker without checking the profile enrollment;
 19. let the worker die silently on operational failure;
 20. follow a symlinked ancestor while walking the registry path;
-21. trust the profile's reviewer actors instead of enrollment.
+21. trust the profile's reviewer actors instead of enrollment;
+22. keep bindings current after reviewer rotation;
+23. keep bindings current after the engine profile changes.
 
 Only CPython 3.14 was exercised locally; 3.11/3.12 evidence comes from hosted
 exact-head CI on the PR, recorded in the PR conversation, not here.
