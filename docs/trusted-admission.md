@@ -86,6 +86,19 @@ approves exactly the bound commit and hash for that repository and installation.
 Policy promotion, de-enrollment or a changed hash makes in-flight evidence stale;
 the service must re-admit at the current tuple rather than carry evidence forward.
 
+## Object coherence
+
+Every dataclass validates its own invariants in `__post_init__`: `Enrollment`
+and `AdmittedPolicy` are pinned to `INITIAL_ENROLLMENT_SCOPE` names and numeric
+IDs; `Registry` enforces uniqueness; `Admission` requires a positive-int
+installation and that the review tuple and policy identify the same repository
+and numeric ID. `Admission.revalidate()` rebuilds every component from its
+fields, so an object crafted around `__post_init__` (for example with
+`object.__setattr__`) fails. `binding_id` calls it before hashing and
+`policy_is_current` returns false for any malformed or incoherent object. A
+well-formed object naming another enrollment's installation is only detectable
+against the registry, where it is never current and cannot be re-admitted.
+
 ## What this does not do
 
 No GitHub App, installation, webhook, credential, transport, database, event

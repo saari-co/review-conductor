@@ -265,6 +265,72 @@ class BindingTests(unittest.TestCase):
         same_commit_new_hash["enrollments"][0]["approved_policy"]["sha256"] = sha(promoted)
         self.assertFalse(ta.policy_is_current(admission, self.fx.registry(same_commit_new_hash)))
 
+    def test_directly_constructed_incoherent_objects_fail_closed(self):
+        good = ta.admit(self.registry, request(), self.fx.read)
+        smcbd_policy = ta.admit(self.registry, request(repository=SMCBD, repository_id=1366416798,
+                                                       installation_id=SMCBD_INSTALL, policy_commit=SMCBD_COMMIT),
+                                self.fx.read).policy
+        # Constructor invariants: mismatched repository/ID between tuple and policy, bad installation.
+        for args in [(good.review, BLOCKS_INSTALL, smcbd_policy),
+                     (good.review, 0, good.policy), (good.review, "1001", good.policy),
+                     (good.review, True, good.policy), (good.review, None, good.policy),
+                     ("dinkuskit/blocks", BLOCKS_INSTALL, good.policy), (good.review, BLOCKS_INSTALL, {"commit": BLOCKS_COMMIT})]:
+            with self.subTest(args=args), self.assertRaises(ta.AdmissionError):
+                ta.Admission(*args)
+        for kwargs in [{"repository": SMCBD}, {"repository_id": 1366416798}, {"repository": "attacker/blocks"},
+                       {"repository_id": "1306882611"}, {"commit": HEAD.upper()}, {"sha256": "z" * 64},
+                       {"quiet_seconds": 0}, {"quiet_seconds": True}, {"default_branch": ""}]:
+            with self.subTest(kwargs=kwargs), self.assertRaises(ta.AdmissionError):
+                dataclasses.replace(good.policy, **kwargs)
+        for kwargs in [{"repository": SMCBD}, {"repository_id": 1366416798}, {"installation_id": 0},
+                       {"installation_account": "saari-co"}, {"approved_policy_commit": "main"}]:
+            with self.subTest(kwargs=kwargs), self.assertRaises(ta.AdmissionError):
+                dataclasses.replace(self.registry.enrollments[0], **kwargs)
+        with self.assertRaises(ta.AdmissionError):
+            ta.Registry((self.registry.enrollments[0], self.registry.enrollments[0]))
+        with self.assertRaises(ta.AdmissionError):
+            ta.Registry(("dinkuskit/blocks",))
+        # Crafted objects that bypass __post_init__ must yield neither currency nor a binding.
+        crafted = []
+        item = ta.Admission(good.review, BLOCKS_INSTALL, good.policy)
+        object.__setattr__(item, "policy", smcbd_policy); crafted.append(item)
+        item = ta.Admission(good.review, BLOCKS_INSTALL, good.policy)
+        object.__setattr__(item, "installation_id", "1001"); crafted.append(item)
+        review = dataclasses.replace(good.review)
+        object.__setattr__(review, "repository", SMCBD)
+        item = ta.Admission(good.review, BLOCKS_INSTALL, good.policy)
+        object.__setattr__(item, "review", review); crafted.append(item)
+        review = dataclasses.replace(good.review)
+        object.__setattr__(review, "head_sha", review.base_sha)
+        item = ta.Admission(good.review, BLOCKS_INSTALL, good.policy)
+        object.__setattr__(item, "review", review); crafted.append(item)
+        policy = dataclasses.replace(good.policy)
+        object.__setattr__(policy, "repository_id", 1366416798)
+        item = ta.Admission(good.review, BLOCKS_INSTALL, good.policy)
+        object.__setattr__(item, "policy", policy); crafted.append(item)
+        item = ta.Admission(good.review, BLOCKS_INSTALL, good.policy)
+        object.__setattr__(item, "review", None); crafted.append(item)
+        for item in crafted:
+            with self.subTest(item=item):
+                self.assertFalse(ta.policy_is_current(item, self.registry))
+                with self.assertRaises(ta.AdmissionError):
+                    item.binding_id
+                with self.assertRaises(ta.AdmissionError):
+                    item.revalidate()
+        # A well-formed object bound to the other account's installation is only detectable
+        # against the registry: never current, and it cannot be re-admitted.
+        borrowed = ta.Admission(good.review, BLOCKS_INSTALL, good.policy)
+        object.__setattr__(borrowed, "installation_id", SMCBD_INSTALL)
+        self.assertFalse(ta.policy_is_current(borrowed, self.registry))
+        with self.assertRaises(ta.AdmissionError):
+            ta.admit(self.registry, request(installation_id=borrowed.installation_id), self.fx.read)
+        self.assertNotEqual(borrowed.binding_id, good.binding_id)
+        self.assertTrue(ta.policy_is_current(good, self.registry))
+        self.assertEqual(good.revalidate(), good)
+        # A policy that is genuinely approved for SMCBD is still not current for a Blocks tuple.
+        self.assertFalse(ta.policy_is_current(crafted[0], self.registry))
+        self.assertNotEqual(good.binding_id, ta.Admission(good.review, BLOCKS_INSTALL, good.policy).binding_id + "x")
+
     def test_library_is_inert_in_packaged_scaffold_and_cli(self):
         for name in ["tools/conductor_cli.py", "scripts/build.py", "bin/review-conductor"]:
             self.assertNotIn("trusted_admission", (ROOT / name).read_text(), name)

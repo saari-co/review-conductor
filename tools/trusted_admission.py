@@ -69,10 +69,30 @@ class Enrollment:
     approved_policy_commit: str
     approved_policy_sha256: str
 
+    def __post_init__(self):
+        if self.repository not in INITIAL_ENROLLMENT_SCOPE:
+            _fail("repository is outside the initial enrollment scope")
+        if type(self.repository_id) is not int or self.repository_id != INITIAL_ENROLLMENT_SCOPE[self.repository]:
+            _fail("enrollment repository_id contradicts the recorded numeric identity")
+        _positive_int(self.installation_id, "installation id")
+        if self.installation_account != self.repository.split("/", 1)[0]:
+            _fail("installation account must own the enrolled repository")
+        _sha1(self.approved_policy_commit, "approved policy commit")
+        _sha256(self.approved_policy_sha256, "approved policy sha256")
+
 
 @dataclass(frozen=True)
 class Registry:
     enrollments: tuple
+
+    def __post_init__(self):
+        if not isinstance(self.enrollments, tuple) or not all(isinstance(e, Enrollment) for e in self.enrollments):
+            _fail("registry enrollments must be Enrollment values")
+        names = [e.repository for e in self.enrollments]
+        ids = [e.repository_id for e in self.enrollments]
+        installations = [e.installation_id for e in self.enrollments]
+        if len(set(names)) != len(names) or len(set(ids)) != len(ids) or len(set(installations)) != len(installations):
+            _fail("enrollment identities must be unique across the registry")
 
     def lookup(self, repository, repository_id, installation_id):
         """Resolve one enrollment; every identity component must agree."""
@@ -106,28 +126,15 @@ def load_registry(raw):
     for item in value["enrollments"]:
         _exact(item, ["repository", "repository_id", "installation", "approved_policy"], "enrollment")
         repository = item["repository"]
-        if repository not in INITIAL_ENROLLMENT_SCOPE:
+        if not isinstance(repository, str) or repository not in INITIAL_ENROLLMENT_SCOPE:
             _fail("repository is outside the initial enrollment scope")
         repository_id = _positive_int(item["repository_id"], "enrollment repository_id")
-        if repository_id != INITIAL_ENROLLMENT_SCOPE[repository]:
-            _fail("enrollment repository_id contradicts the recorded numeric identity")
         installation = item["installation"]
         _exact(installation, ["id", "account"], "installation")
-        installation_id = _positive_int(installation["id"], "installation id")
-        account = installation["account"]
-        if not isinstance(account, str) or account != repository.split("/", 1)[0]:
-            _fail("installation account must own the enrolled repository")
         policy = item["approved_policy"]
         _exact(policy, ["commit", "sha256"], "approved policy")
-        enrollments.append(Enrollment(
-            repository, repository_id, installation_id, account,
-            _sha1(policy["commit"], "approved policy commit"),
-            _sha256(policy["sha256"], "approved policy sha256")))
-    names = [e.repository for e in enrollments]
-    ids = [e.repository_id for e in enrollments]
-    installations = [e.installation_id for e in enrollments]
-    if len(set(names)) != len(names) or len(set(ids)) != len(ids) or len(set(installations)) != len(installations):
-        _fail("enrollment identities must be unique across the registry")
+        enrollments.append(Enrollment(repository, repository_id, installation["id"], installation["account"],
+                                      policy["commit"], policy["sha256"]))
     return Registry(tuple(enrollments))
 
 
@@ -139,6 +146,18 @@ class AdmittedPolicy:
     sha256: str
     quiet_seconds: int
     default_branch: str
+
+    def __post_init__(self):
+        if self.repository not in INITIAL_ENROLLMENT_SCOPE:
+            _fail("policy repository is outside the initial enrollment scope")
+        if type(self.repository_id) is not int or self.repository_id != INITIAL_ENROLLMENT_SCOPE[self.repository]:
+            _fail("policy repository_id contradicts the recorded numeric identity")
+        _sha1(self.commit, "policy commit")
+        _sha256(self.sha256, "policy sha256")
+        if type(self.quiet_seconds) is not int or not 600 <= self.quiet_seconds <= 86400:
+            _fail("policy quiet_seconds is outside the v1 contract")
+        if not isinstance(self.default_branch, str) or not self.default_branch:
+            _fail("policy default_branch is required")
 
     @property
     def policy_id(self):
@@ -210,8 +229,27 @@ class Admission:
     installation_id: int
     policy: AdmittedPolicy
 
+    def __post_init__(self):
+        if not isinstance(self.review, ReviewTuple) or not isinstance(self.policy, AdmittedPolicy):
+            _fail("admission requires a validated review tuple and admitted policy")
+        _positive_int(self.installation_id, "admission installation_id")
+        if (self.review.repository != self.policy.repository
+                or self.review.repository_id != self.policy.repository_id):
+            _fail("admission review tuple and policy identify different repositories")
+
+    def revalidate(self):
+        """Re-run every invariant; a crafted object bypassing __post_init__ fails here."""
+        try:
+            review = ReviewTuple(*(getattr(self.review, f) for f in ReviewTuple.__dataclass_fields__))
+            policy = AdmittedPolicy(*(getattr(self.policy, f) for f in AdmittedPolicy.__dataclass_fields__))
+            Admission(review, self.installation_id, policy)
+        except (AttributeError, TypeError) as exc:
+            raise AdmissionError("admission object is malformed") from exc
+        return self
+
     @property
     def binding_id(self):
+        self.revalidate()
         canonical = json.dumps(
             {"schema": BINDING_SCHEMA, "repository": self.review.repository,
              "repository_id": self.review.repository_id, "pr_number": self.review.pr_number,
@@ -247,9 +285,13 @@ def policy_is_current(admission, registry):
     if not isinstance(admission, Admission) or not isinstance(registry, Registry):
         return False
     try:
+        admission.revalidate()
         enrollment = registry.lookup(admission.review.repository, admission.review.repository_id,
                                      admission.installation_id)
     except AdmissionError:
         return False
-    return (enrollment.approved_policy_commit == admission.policy.commit
+    return (enrollment.repository == admission.policy.repository
+            and enrollment.repository_id == admission.policy.repository_id
+            and enrollment.installation_id == admission.installation_id
+            and enrollment.approved_policy_commit == admission.policy.commit
             and enrollment.approved_policy_sha256 == admission.policy.sha256)

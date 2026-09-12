@@ -41,12 +41,20 @@ Source-only, standard library only, inactive by default.
   `binding_id` hashes canonical JSON over the full tuple, installation and
   `policy_id`. `policy_is_current` reports stale bindings after promotion,
   hash change or de-enrollment.
+- Follow-up (review finding on the first commit): every dataclass now enforces
+  its own invariants in `__post_init__` (`Enrollment`/`AdmittedPolicy` pinned to
+  the enrollment scope and numeric IDs, `Registry` uniqueness, `Admission`
+  positive-int installation and review-tuple/policy repository+ID coherence).
+  `Admission.revalidate()` rebuilds all components; `binding_id` calls it and
+  `policy_is_current` returns false for malformed, incoherent or crafted objects
+  and additionally compares enrollment repository/ID/installation, not only
+  commit/hash.
 
 Not packaged: `scripts/build.py` allowlist and the packaged-namelist regression
 are unchanged; the CLI still exposes only `validate-manifest`. No imports of
 os/sqlite3/subprocess/urllib/socket; a regression asserts that.
 
-## Tests (`tests/test_trusted_admission.py`, 15 tests)
+## Tests (`tests/test_trusted_admission.py`, 16 tests)
 
 - Registry scope exactly two repositories; forks, case variants, this repo and
   x-api rejected.
@@ -70,16 +78,26 @@ os/sqlite3/subprocess/urllib/socket; a regression asserts that.
 - Stale policy: promotion invalidates the in-flight binding; re-admission at the
   new commit yields a new binding; old registry does not vouch for the new one.
 - Library inert in CLI/build sources.
+- Direct construction: `Admission` with an SMCBD policy on a Blocks tuple, bad
+  installation types, non-dataclass components; `dataclasses.replace` on policy
+  and enrollment with foreign names/IDs/accounts/invalid fields; duplicate or
+  non-`Enrollment` registry entries; and `object.__setattr__`-crafted admissions
+  (foreign policy, string installation, foreign tuple repository, base == head,
+  foreign policy ID, `None` tuple) are never current and raise on `binding_id`
+  and `revalidate()`.
 
 Mutation spot-check during development: disabling the numeric-ID pin, hash
 check, commit check, installation check, epoch in the binding or manifest-name
-check each produced at least one failing test.
+check each produced at least one failing test. For the follow-up, removing the
+tuple/policy coherence check, the `revalidate()` call in `policy_is_current` or
+`binding_id`, the admission installation check, or the policy numeric-ID pin
+each produced failing tests.
 
 ## Applicable local checks (all passed, candidate hashes in `candidate-manifest.json`)
 
 - `make check`: repository guard; extracted integration, shared-adapter, 18
   userland and 9 profile regressions unchanged and passing; 6 scaffold tests;
-  15 trusted-admission tests; 5 guard tests; 14-file provenance and compile;
+  16 trusted-admission tests; 5 guard tests; 14-file provenance and compile;
   `git diff --check`.
 - `make build`: deterministic zipapp; packaged reproducibility/allowlist test
   passes with the new module excluded.
