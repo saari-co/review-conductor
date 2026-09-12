@@ -153,6 +153,19 @@ class PolicyLoadingTests(unittest.TestCase):
             with self.subTest(label=label), self.assertRaises(ta.AdmissionError):
                 ta.load_approved_policy(self.blocks, BLOCKS_COMMIT, self.fx.read)
 
+    def test_policy_reader_failures_use_the_public_admission_error_contract(self):
+        failures = [TimeoutError("transport unavailable"), OSError("connection reset"),
+                    RuntimeError("reader failed")]
+        for failure in failures:
+            def broken_reader(*_args, failure=failure):
+                raise failure
+
+            with self.subTest(failure=type(failure).__name__), \
+                    self.assertRaises(ta.AdmissionError) as ctx:
+                ta.load_approved_policy(self.blocks, BLOCKS_COMMIT, broken_reader)
+            self.assertIs(ctx.exception.__cause__, failure)
+            self.assertEqual(str(ctx.exception), "approved policy content is unavailable")
+
     def test_hash_matching_but_invalid_or_misnamed_manifest_is_refused(self):
         renamed = json.loads(self.fx.smcbd); renamed["repository"] = BLOCKS
         raw = json.dumps(renamed).encode()
@@ -279,7 +292,10 @@ class BindingTests(unittest.TestCase):
                 ta.Admission(*args)
         for kwargs in [{"repository": SMCBD}, {"repository_id": 1366416798}, {"repository": "attacker/blocks"},
                        {"repository_id": "1306882611"}, {"commit": HEAD.upper()}, {"sha256": "z" * 64},
-                       {"quiet_seconds": 0}, {"quiet_seconds": True}, {"default_branch": ""}]:
+                       {"quiet_seconds": 0}, {"quiet_seconds": True}, {"quiet_seconds": 601},
+                       {"default_branch": ""}, {"default_branch": "forged"},
+                       {"manifest_bytes": good.policy.manifest_bytes + b"\n"},
+                       {"manifest_bytes": good.policy.manifest_bytes.decode()}]:
             with self.subTest(kwargs=kwargs), self.assertRaises(ta.AdmissionError):
                 dataclasses.replace(good.policy, **kwargs)
         for kwargs in [{"repository": SMCBD}, {"repository_id": 1366416798}, {"installation_id": 0},
@@ -306,6 +322,14 @@ class BindingTests(unittest.TestCase):
         object.__setattr__(item, "review", review); crafted.append(item)
         policy = dataclasses.replace(good.policy)
         object.__setattr__(policy, "repository_id", 1366416798)
+        item = ta.Admission(good.review, BLOCKS_INSTALL, good.policy)
+        object.__setattr__(item, "policy", policy); crafted.append(item)
+        policy = dataclasses.replace(good.policy)
+        object.__setattr__(policy, "quiet_seconds", 601)
+        item = ta.Admission(good.review, BLOCKS_INSTALL, good.policy)
+        object.__setattr__(item, "policy", policy); crafted.append(item)
+        policy = dataclasses.replace(good.policy)
+        object.__setattr__(policy, "default_branch", "forged")
         item = ta.Admission(good.review, BLOCKS_INSTALL, good.policy)
         object.__setattr__(item, "policy", policy); crafted.append(item)
         item = ta.Admission(good.review, BLOCKS_INSTALL, good.policy)

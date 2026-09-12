@@ -64,7 +64,11 @@ enrollment's values fail.
 4. Validates the bytes with the v1 manifest validator and requires
    `manifest.repository == enrollment.repository`.
 
-The result is a frozen `AdmittedPolicy`; `policy_id` is the SHA-256 of a
+The result is a frozen `AdmittedPolicy` that retains the exact immutable manifest
+bytes. Construction and revalidation recompute their digest, parse them again and
+require the exposed `quiet_seconds` and `default_branch` values to match the
+validated content. Shape-valid replacement or crafted-object mutation therefore
+cannot preserve a current binding. `policy_id` is the SHA-256 of a
 canonical JSON of `(schema, repository, repository_id, commit, sha256)`. Same
 inputs always produce the same identity; any component change produces a
 different one.
@@ -90,7 +94,8 @@ the service must re-admit at the current tuple rather than carry evidence forwar
 
 Every dataclass validates its own invariants in `__post_init__`: `Enrollment`
 and `AdmittedPolicy` are pinned to `INITIAL_ENROLLMENT_SCOPE` names and numeric
-IDs; `Registry` enforces uniqueness; `Admission` requires a positive-int
+IDs, and `AdmittedPolicy` re-derives its exposed policy fields from the exact
+hash-bound manifest bytes; `Registry` enforces uniqueness; `Admission` requires a positive-int
 installation and that the review tuple and policy identify the same repository
 and numeric ID. `Admission.revalidate()` rebuilds every component from its
 fields, so an object crafted around `__post_init__` (for example with

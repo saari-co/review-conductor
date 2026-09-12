@@ -146,6 +146,7 @@ class AdmittedPolicy:
     sha256: str
     quiet_seconds: int
     default_branch: str
+    manifest_bytes: bytes
 
     def __post_init__(self):
         if self.repository not in INITIAL_ENROLLMENT_SCOPE:
@@ -154,10 +155,24 @@ class AdmittedPolicy:
             _fail("policy repository_id contradicts the recorded numeric identity")
         _sha1(self.commit, "policy commit")
         _sha256(self.sha256, "policy sha256")
+        if type(self.manifest_bytes) is not bytes or len(self.manifest_bytes) > MAX_BYTES:
+            _fail("policy manifest bytes are unavailable or oversized")
+        if hashlib.sha256(self.manifest_bytes).hexdigest() != self.sha256:
+            _fail("policy manifest bytes do not match the admitted digest")
+        try:
+            manifest = validate_manifest(self.manifest_bytes)
+        except ValueError as exc:
+            raise AdmissionError("policy manifest bytes are not a valid manifest") from exc
+        if manifest["repository"] != self.repository:
+            _fail("policy manifest bytes name a different repository")
         if type(self.quiet_seconds) is not int or not 600 <= self.quiet_seconds <= 86400:
             _fail("policy quiet_seconds is outside the v1 contract")
         if not isinstance(self.default_branch, str) or not self.default_branch:
             _fail("policy default_branch is required")
+        if self.quiet_seconds != manifest["review"]["quiet_seconds"]:
+            _fail("policy quiet_seconds contradicts the approved manifest bytes")
+        if self.default_branch != manifest["default_branch"]:
+            _fail("policy default_branch contradicts the approved manifest bytes")
 
     @property
     def policy_id(self):
@@ -184,7 +199,10 @@ def load_approved_policy(enrollment, commit, read_policy):
         _fail("enrollment is required")
     if commit != enrollment.approved_policy_commit:
         _fail("policy commit is not the approved base commit")
-    raw = read_policy(enrollment.repository, commit)
+    try:
+        raw = read_policy(enrollment.repository, commit)
+    except Exception as exc:
+        raise AdmissionError("approved policy content is unavailable") from exc
     if not isinstance(raw, (bytes, bytearray)) or len(raw) > MAX_BYTES:
         _fail("approved policy content is unavailable or oversized")
     raw = bytes(raw)
@@ -198,7 +216,7 @@ def load_approved_policy(enrollment, commit, read_policy):
     if manifest["repository"] != enrollment.repository:
         _fail("approved policy names a different repository")
     return AdmittedPolicy(enrollment.repository, enrollment.repository_id, commit, digest,
-                          manifest["review"]["quiet_seconds"], manifest["default_branch"])
+                          manifest["review"]["quiet_seconds"], manifest["default_branch"], raw)
 
 
 @dataclass(frozen=True)
