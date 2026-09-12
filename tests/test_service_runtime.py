@@ -230,6 +230,15 @@ class ServiceCoreTests(unittest.TestCase):
             self.fx.ingest("foreign-app", self.fx.payload(), service_config=changed)
         self.assertEqual(self.fx.binding_rows(), [])
 
+    def test_reviewer_identity_mismatch_leaves_no_binding(self):
+        changed = self.fx.service_config()
+        config = json.loads(self.fx.config_path.read_text())
+        config["review_policy"]["reviewers"]["openclaw"] = "foreign-openclaw"
+        self.fx.write_config(config)
+        with self.assertRaises(service.ServiceError):
+            self.fx.ingest("foreign-reviewer", self.fx.payload(), service_config=changed)
+        self.assertEqual(self.fx.binding_rows(), [])
+
     def test_policy_hash_and_profile_mismatch_roll_back_all_state(self):
         wrong_registry = self.fx.registry(policy=b"different approved bytes")
         with self.assertRaises(service.ServiceError):

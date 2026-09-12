@@ -106,7 +106,10 @@ class RegistryTests(unittest.TestCase):
         doc = self.fx.registry_doc()
         dup_repo = {**doc, "enrollments": [doc["enrollments"][0], doc["enrollments"][0]]}
         shared_install = copy.deepcopy(doc); shared_install["enrollments"][1]["github_app"]["installation_id"] = BLOCKS_INSTALL
-        for candidate in [dup_repo, shared_install, {**doc, "schema": "review-conductor.enrollment.v2"},
+        empty_reviewer = copy.deepcopy(doc); empty_reviewer["enrollments"][0]["reviewers"]["openclaw"] = ""
+        duplicate_reviewer = copy.deepcopy(doc); duplicate_reviewer["enrollments"][0]["reviewers"]["clawsweeper"] = duplicate_reviewer["enrollments"][0]["reviewers"]["openclaw"]
+        for candidate in [dup_repo, shared_install, empty_reviewer, duplicate_reviewer,
+                          {**doc, "schema": "review-conductor.enrollment.v2"},
                           {**doc, "enrollments": {}}, {**doc, "extra": 1}, {"schema": ta.REGISTRY_SCHEMA}]:
             with self.subTest(candidate=candidate), self.assertRaises(ta.AdmissionError):
                 self.fx.registry(candidate)
