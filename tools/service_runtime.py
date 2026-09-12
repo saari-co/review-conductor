@@ -38,8 +38,12 @@ class PolicyNotStaged(Exception):
     """Raised inside the engine transaction when a binding needs unstaged policy bytes.
 
     The transaction is rolled back with nothing written; the caller stages the
-    bytes outside any lock and re-runs the delivery.
+    bytes for exactly the enrollment the hook resolved and re-runs the delivery.
     """
+
+    def __init__(self, enrolled: admission.Enrollment) -> None:
+        super().__init__(enrolled.repository)
+        self.enrolled = enrolled
 
 
 def clear_staged_policies() -> None:
@@ -226,6 +230,7 @@ def profile_policy_digest(core_config: dict[str, Any], service_config: dict[str,
     review_policy = core.require_object(core_config.get("review_policy"), "core review_policy")
     ci = core.require_object(core_config.get("ci"), "core ci")
     clawsweeper = core.require_object(core_config.get("clawsweeper"), "core clawsweeper")
+    openclaw = core.require_object(core_config.get("openclaw"), "core openclaw")
     adapter = service_config.get("adapter")
     if adapter is not None:
         adapter = core.require_object(adapter, "service adapter")
@@ -242,6 +247,9 @@ def profile_policy_digest(core_config: dict[str, Any], service_config: dict[str,
             },
             "adapter": None if adapter is None else {
                 "contract": adapter.get("contract"), "artifact_prefix": adapter.get("artifact_prefix")
+            },
+            "openclaw": {
+                key: openclaw.get(key) for key in ("operator_id", "transport", "remote_worktree_shelf")
             },
             "quiet_seconds": review_policy.get("quiet_seconds"),
             "merge_policy": core_config.get("merge_policy"),
@@ -326,8 +334,7 @@ def _persist_binding(
 
 
 def _admission_hook(
-    registry: admission.Registry,
-    enrolled: admission.Enrollment,
+    registry_source: RegistrySource,
     service_config: dict[str, Any],
 ) -> Callable[[sqlite3.Connection, dict[str, Any], str, dict[str, Any], dict[str, Any]], dict[str, Any] | None]:
     def hook(
@@ -347,6 +354,12 @@ def _admission_hook(
             or payload.get("action") == "closed"
         ):
             return None
+        # Re-read the registry immediately before admission, inside the same
+        # transaction that persists the binding: a promotion or revocation after
+        # preflight is observed here, and the delivery must still be within the
+        # enrollment that ``config`` (the engine-reloaded profile) resolves to.
+        registry = resolve_registry(registry_source)
+        enrolled = preflight_enrollment(service_config, registry, payload, config)
         pr_number, event_head = _pull_request_tuple(payload)
         row = core.current_head(connection, enrolled.repository, pr_number)
         if row is None:
@@ -364,17 +377,12 @@ def _admission_hook(
             "review_epoch": row["review_epoch"],
             "policy_commit": enrolled.approved_policy_commit,
         }
-        # ``config`` is the core profile the engine reloaded for this delivery, which
-        # may differ from the one preflight saw; it must still be the registry's
-        # enrollment (App, installation, repository and reviewer actors) before any
-        # binding is staged or persisted under it.
-        require_profile_enrolled(service_config, registry, config)
         # The engine has classified this delivery as a binding candidate. Only now
         # are policy bytes required; if they are not staged, unwind the transaction
         # (nothing written) so the caller can fetch them outside the lock.
         staged = staged_policy(enrolled)
         if staged is None:
-            raise PolicyNotStaged(enrolled.repository)
+            raise PolicyNotStaged(enrolled)
         try:
             bound = admission.admit(registry, request, _staged_reader(enrolled, staged))
         except admission.AdmissionError as exc:
@@ -408,7 +416,10 @@ def ingest_service_delivery(
     core.verify_github_signature(body, signature, secret)
     payload = _strict_payload(body)
     core_config = core.load_config(config_path)
-    registry = resolve_registry(registry)
+    registry_source = registry
+    # Early rejection only; the admission hook re-resolves the registry inside
+    # the engine transaction and is the authority for what gets persisted.
+    registry = resolve_registry(registry_source)
     enrolled = preflight_enrollment(service_config, registry, payload, core_config)
     if (
         core_config["repository"] != enrolled.repository
@@ -418,9 +429,10 @@ def ingest_service_delivery(
     # Policy transport runs only when the engine, inside its transaction, has
     # classified the delivery as a new non-closed binding candidate; closed,
     # duplicate and stale deliveries never touch the policy dependency. The
-    # fetch itself happens after the transaction has been rolled back, and the
-    # delivery is re-run once with the staged bytes.
-    for _attempt in range(2):
+    # fetch itself happens after the transaction has been rolled back, for the
+    # enrollment the hook resolved at that moment, and the delivery is re-run;
+    # a promotion observed on the re-run stages once more before giving up.
+    for _attempt in range(3):
         try:
             return core.ingest_github_delivery(
                 config_path=config_path,
@@ -430,11 +442,11 @@ def ingest_service_delivery(
                 signature=signature,
                 body=body,
                 secret=secret,
-                admission_hook=_admission_hook(registry, enrolled, service_config),
+                admission_hook=_admission_hook(registry_source, service_config),
             )
-        except PolicyNotStaged:
-            stage_approved_policy(enrolled, read_policy)
-    raise runtime.RetryableIngestError("approved policy staging raced cache eviction")
+        except PolicyNotStaged as pending:
+            stage_approved_policy(pending.enrolled, read_policy)
+    raise runtime.RetryableIngestError("approved policy staging raced registry or cache changes")
 
 
 def build_service_http_handler(
@@ -471,7 +483,12 @@ def binding_for_current_head(
     head = core.current_head(connection, repository, pr_number)
     if head is None:
         return None
-    _ensure_binding_table(connection)
+    # Read-only: the gate may run while a worker phase holds the write lock, so
+    # it never creates the table; a database without it simply has no bindings.
+    if connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='service_policy_bindings'"
+    ).fetchone() is None:
+        return None
     row = connection.execute(
         """
         SELECT * FROM service_policy_bindings
@@ -525,9 +542,29 @@ def require_profile_enrolled(
     if core_config is None:
         core_config = core.load_config(Path(config["core_config"]))
     review_policy = core.require_object(core_config.get("review_policy"), "core review_policy")
+    # A profile deactivated after startup must fail every provider read, delivery
+    # and tick closed, not merely stop admitting new heads.
+    if review_policy.get("enabled") is not True:
+        raise ServiceError("runtime core profile is not enabled")
     if review_policy.get("reviewers") != enrolled.reviewers:
         raise ServiceError("runtime reviewer identities contradict service enrollment")
     return enrolled
+
+
+def _gate_connection(state_root: Path) -> sqlite3.Connection | None:
+    """A read-only view of the engine database for the admission gate.
+
+    The gate also runs from the per-side-effect authority guard while a worker
+    phase may hold the engine's write transaction (WAL mode), so it must never
+    take the write lock or migrate; a database that does not exist yet has no
+    live heads to gate.
+    """
+    database = core.ensure_state_root(Path(state_root)) / "review-conductor.sqlite3"
+    if not database.exists():
+        return None
+    connection = sqlite3.connect(database, timeout=10)
+    connection.row_factory = sqlite3.Row
+    return connection
 
 
 def require_current_bindings(config: dict[str, Any], registry: RegistrySource) -> None:
@@ -535,9 +572,9 @@ def require_current_bindings(config: dict[str, Any], registry: RegistrySource) -
     registry = resolve_registry(registry)
     core_config = core.load_config(Path(config["core_config"]))
     require_profile_enrolled(config, registry, core_config)
-    connection = core.open_database(
-        Path(config["paths"]["state_root"]), config["github_app"]["repository"]
-    )
+    connection = _gate_connection(Path(config["paths"]["state_root"]))
+    if connection is None:
+        return
     try:
         rows = connection.execute(
             """

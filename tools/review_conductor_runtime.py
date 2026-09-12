@@ -97,6 +97,18 @@ class RetryableIngestError(Exception):
     """
 
 
+def assert_authority(client: Any, operation: str) -> None:
+    """Run the client's admission authority guard before a non-GitHub side effect.
+
+    Worker phases that act outside the GitHub client (OpenClaw dispatch,
+    notifications) call this so the same per-side-effect fence applies to them.
+    Clients without a guard (legacy route, dry runs) are unaffected.
+    """
+    check = getattr(client, "assert_authority", None)
+    if check is not None:
+        check(operation)
+
+
 def require_absolute_path(value: Any, label: str) -> Path:
     text = core.require_text(value, label, 900)
     path = Path(text)
@@ -314,6 +326,11 @@ class GitHubAppClient:
         """
         self._authority_guard = guard
 
+    def assert_authority(self, operation: str) -> None:
+        """Run the installed guard for a side effect that is not a GitHub call."""
+        if self._authority_guard is not None:
+            self._authority_guard("SIDE_EFFECT", operation)
+
     @property
     def repository(self) -> str:
         return self._app["repository"]
@@ -324,10 +341,18 @@ class GitHubAppClient:
             ("POST", rf"/app/installations/{self._app['installation_id']}/access_tokens", "installation-token"),
             ("POST", rf"/repos/{repository}/check-runs", "check-create"),
             ("PATCH", rf"/repos/{repository}/check-runs/[1-9][0-9]*", "check-update"),
-            (
-                "GET",
-                rf"/repos/{repository}/contents/\.review-conductor\.json\?ref=[0-9a-f]{{40}}",
-                "approved-policy-read",
+            # Approved-policy retrieval is a generalized-profile capability; the
+            # legacy allowlist never reaches repository contents.
+            *(
+                (
+                    (
+                        "GET",
+                        rf"/repos/{repository}/contents/\.review-conductor\.json\?ref=[0-9a-f]{{40}}",
+                        "approved-policy-read",
+                    ),
+                )
+                if self._strict_adapter
+                else ()
             ),
             ("POST", rf"/repos/{repository}/issues/[1-9][0-9]*/labels", "label-add"),
             ("DELETE", rf"/repos/{repository}/issues/[1-9][0-9]*/labels/.+", "label-remove"),
@@ -388,8 +413,6 @@ class GitHubAppClient:
         app_jwt: str | None = None,
     ) -> tuple[str, bytes]:
         operation = self._allow(method, path)
-        if self._authority_guard is not None and method != "GET":
-            self._authority_guard(method, path)
         token = app_jwt if operation == "installation-token" else self._installation_token()
         headers = {
             "Accept": "application/vnd.github+json",
@@ -401,6 +424,10 @@ class GitHubAppClient:
         if payload is not None:
             body = core.canonical_json(payload).encode()
             headers["Content-Type"] = "application/json"
+        # Fence immediately before the mutating request itself: token minting above
+        # is a separate call, and authority may have been revoked while it ran.
+        if self._authority_guard is not None and method != "GET":
+            self._authority_guard(method, path)
         status, raw = self._transport(
             method, self._app["api_base"] + path, headers, body, 15.0
         )
@@ -1344,6 +1371,10 @@ def drain_actions(
                 claim_owner="cp1-worker",
                 claim_lease_seconds=config["worker"]["claim_lease_seconds"],
             )
+            # Each OpenClaw dispatch is an external side effect; fence it like a
+            # GitHub write so revoked authority stops the whole drain here instead
+            # of being recorded as an adapter rejection of this one action.
+            assert_authority(client, f"openclaw.enqueue:{action['action_id']}")
             try:
                 with service_transport_environment(config):
                     outcomes.append(core.dispatch_action(args))

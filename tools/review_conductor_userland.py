@@ -1903,6 +1903,8 @@ def run_tick(
         else runtime.drain_bridge_inboxes(config)
     )
     projection = runtime.reconcile_projection(config, client, dry_run=dry_run)
+    if not dry_run:
+        runtime.assert_authority(client, "notifications")
     notifications = deliver_notifications(
         config,
         notifier,

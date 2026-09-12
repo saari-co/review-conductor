@@ -40,7 +40,8 @@ The live enrollment registry is an external same-user regular file with mode
 exactly `0600`, never a target-repository file. The entrypoint refuses a registry
 located inside this source tree, the target checkout, or the state/proof roots,
 canonicalizes only the ancestors, walks them with held directory descriptors
-(refusing any symlink component and any forbidden root by device/inode),
+(refusing any symlink component and any forbidden root by device/inode, and
+re-checking the forbidden roots against every walked directory after the walk),
 requires the held parent to be the very directory that was canonicalized (same
 device/inode, so a real directory renamed into place is refused) and a same-user
 directory that is not group/world writable, opens
@@ -67,7 +68,8 @@ Every worker tick re-checks that the running profile's App, installation,
 repository and reviewer actors are the registry's enrollment, and that each live
 head's binding was admitted under the same policy, reviewer actors and
 policy-governed profile fields that hold now; rotating reviewers or editing the
-profile (including the ClawSweeper workflow, ref or adapter artifact prefix)
+profile (including the ClawSweeper workflow, ref, adapter artifact prefix or
+OpenClaw operator/transport/worktree shelf)
 blocks projection until each head is re-admitted. Approved-policy transport
 runs only for deliveries the engine has classified as new binding candidates,
 never inside its write transaction, and is hash-verified against the enrollment;
@@ -75,11 +77,14 @@ closed, duplicate and stale deliveries never touch it. A transient GitHub
 failure answers the webhook with 503 `dependency_unavailable` and writes
 nothing, so the delivery can be redelivered from GitHub's delivery log or API
 (GitHub does not retry automatically), while malformed or foreign deliveries
-still answer 400. The delivery hook re-checks the engine's freshly reloaded
-profile against the enrollment before staging or persisting a binding, and the
-tick's opening gate is re-run before every mutating GitHub call (check
-creation/update, ClawSweeper dispatch) through the client's authority guard, so
-a revocation or profile edit after the gate stops the rest of that tick. Fail-closed admission conditions are
+still answer 400. The delivery hook re-reads the registry inside the delivery
+transaction and resolves the enrollment against the engine's freshly reloaded
+profile before staging or persisting a binding; a profile with
+`review_policy.enabled` no longer true fails closed everywhere. The tick's
+opening gate is re-run before every external side effect (each mutating GitHub
+call after token minting, each OpenClaw dispatch, notification delivery)
+through the client's authority guard, so a revocation or profile edit after the
+gate stops the rest of that tick. Fail-closed admission conditions are
 retried on the next tick; any other worker failure (database, filesystem,
 unexpected) stops the whole service with exit status 2 rather than leaving
 ingress accepting deliveries that nothing will act on. The GitHub App client

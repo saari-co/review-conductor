@@ -129,7 +129,8 @@ must agree with the engine profile's repository, default branch, CI workflow,
 quiet period and merge policy. Each binding records the App, installation,
 policy commit/hash, the enrollment's reviewer actors and a digest of those
 policy-governed profile fields plus the adapter authority fields (ClawSweeper
-workflow id/name/path/ref/publish and the adapter contract/artifact prefix);
+workflow id/name/path/ref/publish, the adapter contract/artifact prefix and the
+OpenClaw operator id/transport/worktree shelf);
 a binding is current only while the registry
 still approves the same policy and names the same reviewers and the engine
 profile still digests identically, so reviewer rotation or a profile edit after
@@ -148,10 +149,17 @@ transient transport failure (connection error, timeout, HTTP 429/5xx) is a
 retryable service failure: the webhook answers 503 `dependency_unavailable` and
 nothing is written, so the delivery can be redelivered from GitHub's delivery
 log or API (GitHub does not retry automatically). Malformed, foreign or
-otherwise rejected deliveries still answer 400. Before staging or persisting,
-the hook re-validates the core profile the engine reloaded for that delivery
-against the enrollment, and every mutating GitHub call made by a worker tick
-re-runs the tick's admission gate through the adapter's authority guard.
+otherwise rejected deliveries still answer 400. The hook re-reads the registry
+inside the delivery transaction, immediately before admission, and resolves the
+enrollment against the core profile the engine reloaded for that delivery; a
+revocation after preflight rejects the delivery with nothing written, and a
+promotion is staged for the promoted enrollment before the delivery is re-run.
+A profile whose `review_policy.enabled` is no longer true fails every provider
+read, delivery and tick closed. Every external side effect of a worker tick —
+each mutating GitHub call (fenced after token minting, immediately before the
+request), each OpenClaw dispatch and notification delivery — re-runs the tick's
+admission gate through the adapter's authority guard, using a read-only view of
+the engine database so it can run while a phase holds the write lock.
 
 That source is inactive until an external
 service registry (mode exactly 0600, single link, non-writable same-user parent,

@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import base64
 import copy
+import contextlib
 import dataclasses
 import hashlib
 import hmac
 import http.client
 import io
 import os
+import re
 import json
 from pathlib import Path
 import shutil
@@ -489,6 +491,10 @@ class AdmissionIngressTests(unittest.TestCase):
                 workflow_id="other-review.yml", workflow_path=".github/workflows/other-review.yml"),
             "clawsweeper_ref": lambda c: c["clawsweeper"].__setitem__("ref", "release"),
             "clawsweeper_workflow_name": lambda c: c["clawsweeper"].__setitem__("workflow_name", "Other review"),
+            # OpenClaw adapter authority: which operator account and worktree run the review.
+            "openclaw_operator_id": lambda c: c["openclaw"].__setitem__("operator_id", "other-operator"),
+            "openclaw_transport": lambda c: c["openclaw"].__setitem__("transport", "ssh"),
+            "openclaw_shelf": lambda c: c["openclaw"].__setitem__("remote_worktree_shelf", "/tmp/other-shelf"),
         }
         for label, edit in edits.items():
             changed = json.loads(original)
@@ -1040,6 +1046,232 @@ class AdmissionIngressTests(unittest.TestCase):
         self.assertIsNotNone(client._authority_guard)
         with self.assertRaises(core.ContractError):
             service.run_service_tick(self.fx.app_config(), lambda: current, object(), object(), dry_run=False)
+
+    # --- Invariant 1: enrollment/profile identity -------------------------------
+
+    def test_profile_disabled_after_startup_fails_every_gate_closed(self):
+        self.fx.ingest("initial", self.fx.payload())
+        service.require_current_bindings(self.fx.app_config(), self.fx.registry())
+        original = self.fx.config_path.read_text()
+        disabled = json.loads(original)
+        disabled["review_policy"]["enabled"] = False
+        self.fx.config_path.write_text(json.dumps(disabled) + "\n")
+        with self.assertRaises(core.ContractError) as ctx:
+            service.require_current_bindings(self.fx.app_config(), self.fx.registry())
+        self.assertIn("not enabled", str(ctx.exception))
+        with self.assertRaises(core.ContractError):
+            service.require_profile_enrolled(self.fx.app_config(), self.fx.registry())
+        ready = self.fx.payload()
+        ready["action"] = "ready_for_review"
+        ready["pull_request"]["updated_at"] = "2026-08-30T20:11:00Z"
+        with self.assertRaises(core.ContractError):
+            self.fx.ingest("while-disabled", ready)
+        self.assertEqual(len(self.fx.binding_rows()), 1)
+        self.fx.config_path.write_text(original)
+        service.require_current_bindings(self.fx.app_config(), self.fx.registry())
+
+    # --- Invariant 2: registry filesystem authority -------------------------------
+
+    def test_forbidden_root_created_during_walk_is_refused(self):
+        root = self.fx.root.resolve()
+        parent = root / "service"
+        parent.mkdir()
+        path = parent / "registry.json"
+        path.write_text(json.dumps(self.fx.registry_document()))
+        path.chmod(0o600)
+        state_root = root / "state-root"  # does not exist when identities are snapshotted
+        real_open = os.open
+        created = threading.Event()
+
+        def racing_open(name, flags, *args, **kwargs):
+            # After the forbidden-root snapshot, the state root appears and points at
+            # the registry's parent; by path the registry is now inside it.
+            if not created.is_set() and "dir_fd" in kwargs:
+                created.set()
+                state_root.symlink_to(parent)
+            return real_open(name, flags, *args, **kwargs)
+
+        with patch.object(entrypoint.os, "open", racing_open):
+            with self.assertRaises(core.ContractError) as ctx:
+                entrypoint.read_service_registry(path, [state_root])
+        self.assertTrue(created.is_set())
+        self.assertIn("entered a forbidden root", str(ctx.exception))
+        state_root.unlink()
+        self.assertEqual(entrypoint.read_service_registry(path, [state_root]).enrollments[0].app_id, APP_ID)
+
+    # --- Invariant 3: policy fetch / replay / transaction -------------------------
+
+    def test_hook_reresolves_registry_inside_the_transaction_before_admission(self):
+        current = self.fx.registry()
+        revoked = self.fx.registry(app_id=APP_ID + 1)
+        resolutions = []
+
+        def revoking_provider():
+            # Preflight sees the enrollment; the hook, inside the transaction, sees it
+            # revoked for this App.
+            resolutions.append(len(resolutions))
+            return current if len(resolutions) == 1 else revoked
+
+        with self.assertRaises(core.ContractError):
+            self.fx.ingest("revoked-in-flight", self.fx.payload(), registry=revoking_provider)
+        self.assertEqual(len(resolutions), 2)
+        self.assertEqual(self.fx.binding_rows(), [])
+        connection = core.open_database(self.fx.state, REPOSITORY)
+        try:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0], 0)
+        finally:
+            connection.close()
+        # A promotion observed by the hook is staged for the promoted enrollment and
+        # the binding lands under the promoted policy, never the preflight one.
+        promoted_policy = self.fx.policy + b"\n"
+        promoted = self.fx.registry(policy=promoted_policy)
+        resolutions.clear()
+
+        def promoting_provider():
+            resolutions.append(len(resolutions))
+            if len(resolutions) >= 3:
+                self.fx.policy = promoted_policy
+                return promoted
+            return current
+
+        receipt = self.fx.ingest("promoted-in-flight", self.fx.payload(), registry=promoting_provider)
+        self.assertEqual(receipt["result"], "accepted")
+        rows = self.fx.binding_rows()
+        self.assertEqual([row["policy_sha256"] for row in rows], [hashlib.sha256(promoted_policy).hexdigest()])
+        self.assertEqual(self.fx.reads, [(REPOSITORY, POLICY_COMMIT)] * 2)
+
+    # --- Invariant 4: adapter least privilege / immutable config -------------------
+
+    def test_legacy_client_cannot_read_repository_contents(self):
+        calls = []
+
+        def transport(method, url, headers, body, timeout):
+            calls.append((method, url))
+            return 200, b"{}"
+
+        legacy = {k: v for k, v in self.fx.app_config().items() if k not in ("review_policy", "clawsweeper", "adapter")}
+        legacy["github_app"]["permissions"] = dict(runtime.APP_PERMISSIONS)
+        client = runtime.GitHubAppClient(legacy, "fixture-private-key", transport=transport, signer=lambda *_: "fixture-jwt")
+        with self.assertRaises(core.ContractError):
+            client.read_policy(REPOSITORY, POLICY_COMMIT)
+        with self.assertRaises(core.ContractError):
+            client._call("GET", f"/repos/{REPOSITORY}/contents/.review-conductor.json?ref={POLICY_COMMIT}", None, expected={200})
+        self.assertEqual(calls, [])
+
+    # --- Invariant 5: worker/tick side-effect fencing ------------------------------
+
+    def test_guard_runs_after_token_minting_immediately_before_the_mutating_request(self):
+        self.fx.ingest("initial", self.fx.payload())
+        current = self.fx.registry()
+        revoked = self.fx.registry(policy=self.fx.policy + b"\n")
+        state = {"registry": current}
+        calls = []
+
+        def transport(method, url, headers, body, timeout):
+            calls.append((method, url))
+            if url.endswith("/access_tokens"):
+                # Authority is revoked while the token is being minted.
+                state["registry"] = revoked
+                return 201, json.dumps({"token": "***", "expires_at": "2099-01-01T00:00:00Z"}).encode()
+            return 201, json.dumps({"id": 11}).encode()
+
+        client = runtime.GitHubAppClient(self.fx.app_config(), "fixture-private-key", transport=transport,
+                                         signer=lambda *_: "fixture-jwt")
+        config = self.fx.app_config()
+        client.set_authority_guard(lambda _m, _p: service.require_current_bindings(config, lambda: state["registry"]))
+        with self.assertRaises(core.ContractError):
+            client.create_check("OpenClaw Review Rail", HEAD, "external", "queued")
+        self.assertEqual([url.rsplit("/", 1)[-1] for _m, url in calls], ["access_tokens"])
+
+    def test_openclaw_dispatch_and_notifications_are_fenced_by_the_authority_guard(self):
+        self.fx.ingest("initial", self.fx.payload())
+        connection = core.open_database(self.fx.state, REPOSITORY)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("UPDATE heads SET state='openclaw_queued' WHERE is_current=1")
+            row = connection.execute("SELECT * FROM heads WHERE is_current=1").fetchone()
+            action_id, idempotency_key = core.action_identity(
+                "openclaw.enqueue", row["repository"], row["pr_number"], row["base_sha"], row["head_sha"],
+                core.review_action_suffix(int(row["review_epoch"])),
+            )
+            connection.execute(
+                """INSERT INTO actions(action_id, idempotency_key, kind, repository, pr_number, base_sha, head_sha,
+                   review_epoch, status, payload_json, created_at, updated_at)
+                   VALUES (?, ?, 'openclaw.enqueue', ?, ?, ?, ?, ?, 'pending', '{}', ?, ?)""",
+                (action_id, idempotency_key, row["repository"], row["pr_number"], row["base_sha"], row["head_sha"],
+                 row["review_epoch"], core.utc_now(), core.utc_now()),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        config = {**self.fx.app_config(), "worker": {"max_actions_per_wake": 5, "claim_lease_seconds": 60},
+                  "paths": {**self.fx.app_config()["paths"], "blocks_checkout": str(self.fx.root / "checkout")}}
+        current = self.fx.registry()
+        revoked = self.fx.registry(policy=self.fx.policy + b"\n")
+        resolutions = []
+
+        def provider():
+            resolutions.append(len(resolutions))
+            return current if len(resolutions) == 1 else revoked
+
+        client = runtime.GitHubAppClient(self.fx.app_config(), "fixture-private-key",
+                                         transport=lambda *_: (500, b""), signer=lambda *_: "fixture-jwt")
+        dispatched = []
+        neutral = lambda *args, **kwargs: {}
+        with patch.object(core, "dispatch_action", lambda args: dispatched.append(args.action_id) or {}), \
+                patch.object(runtime, "recover_abandoned_actions", lambda _config: []), \
+                patch.object(runtime, "service_transport_environment", lambda _config: contextlib.nullcontext()), \
+                patch.object(runtime, "drain_bridge_inboxes", neutral), \
+                patch.object(userland, "hydrate_pending_openclaw_heads", neutral):
+            with self.assertRaises(core.ContractError):
+                service.run_service_tick(config, provider, client, object(), dry_run=False)
+        # The opening gate passed; the per-dispatch fence saw the revocation and no
+        # OpenClaw dispatch ran. Without the fence the pending action is dispatched.
+        self.assertEqual(len(resolutions), 2)
+        self.assertEqual(dispatched, [])
+        connection = core.open_database(self.fx.state, REPOSITORY)
+        try:
+            self.assertEqual([row["status"] for row in connection.execute("SELECT status FROM actions")], ["pending"])
+        finally:
+            connection.close()
+        # Notifications are fenced too: with every earlier phase neutralised, a
+        # revocation before the notification phase stops the tick there.
+        phases = []
+
+        class FencedClient:
+            def __init__(self):
+                self.guard = None
+
+            def set_authority_guard(self, guard):
+                self.guard = guard
+
+            def assert_authority(self, operation):
+                phases.append(operation)
+                self.guard("SIDE_EFFECT", operation)
+
+        fenced = FencedClient()
+        resolutions.clear()
+        with patch.object(runtime, "drain_bridge_inboxes", neutral), \
+                patch.object(userland, "hydrate_pending_openclaw_heads", neutral), \
+                patch.object(runtime, "drain_actions", neutral), \
+                patch.object(userland, "collect_openclaw_terminals", neutral), \
+                patch.object(userland, "collect_clawsweeper_terminals", neutral), \
+                patch.object(runtime, "reconcile_projection", neutral), \
+                patch.object(userland, "deliver_notifications", lambda *a, **k: phases.append("delivered") or {}):
+            with self.assertRaises(core.ContractError):
+                service.run_service_tick(config, provider, fenced, object(), dry_run=False)
+        self.assertEqual(phases, ["notifications"])
+
+    # --- Invariant 6: evidence accuracy --------------------------------------------
+
+    def test_evidence_never_claims_automatic_github_redelivery(self):
+        root = Path(__file__).resolve().parents[1]
+        claim = re.compile(r"GitHub\s+(automatically\s+)?redelivers|automatically\s+redeliver|GitHub\s+retries", re.IGNORECASE)
+        offenders = []
+        for file in [*root.glob("docs/*.md"), *root.glob("proof/*/PROOF.md"), *root.glob("tools/*.py"), root / "README.md"]:
+            if file.exists() and claim.search(file.read_text()):
+                offenders.append(str(file.relative_to(root)))
+        self.assertEqual(offenders, [])
 
     def test_registry_ancestor_swapped_for_symlink_after_canonicalization_is_refused(self):
         document = json.dumps({
@@ -1794,8 +2026,8 @@ MUTANTS = [
     (
         "stage policy for every pull_request delivery before the engine classifies it",
         "tools/service_runtime.py",
-        "    for _attempt in range(2):\n        try:\n            return core.ingest_github_delivery(\n",
-        "    stage_approved_policy(enrolled, read_policy)\n    for _attempt in range(2):\n        try:\n            return core.ingest_github_delivery(\n",
+        "    for _attempt in range(3):\n        try:\n            return core.ingest_github_delivery(\n",
+        "    stage_approved_policy(enrolled, read_policy)\n    for _attempt in range(3):\n        try:\n            return core.ingest_github_delivery(\n",
         "AdmissionIngressTests.test_closed_duplicate_and_stale_deliveries_never_touch_policy_transport",
     ),
     (
@@ -1892,9 +2124,72 @@ MUTANTS = [
     (
         "persist a binding under a reloaded profile that is no longer enrolled",
         "tools/service_runtime.py",
-        "        require_profile_enrolled(service_config, registry, config)\n        # The engine has classified",
-        "        # The engine has classified",
+        "        enrolled = preflight_enrollment(service_config, registry, payload, config)\n",
+        "        enrolled = registry.enrollments[0]\n",
         "AdmissionIngressTests.test_hook_revalidates_the_reloaded_core_profile_before_persisting",
+    ),
+    (
+        "keep serving a profile disabled after startup",
+        "tools/service_runtime.py",
+        '    if review_policy.get("enabled") is not True:\n        raise ServiceError("runtime core profile is not enabled")\n',
+        "",
+        "AdmissionIngressTests.test_profile_disabled_after_startup_fails_every_gate_closed",
+    ),
+    (
+        "ignore the OpenClaw adapter authority in the profile digest",
+        "tools/service_runtime.py",
+        '            "openclaw": {\n                key: openclaw.get(key) for key in ("operator_id", "transport", "remote_worktree_shelf")\n            },\n',
+        '            "openclaw": None,\n',
+        "AdmissionIngressTests.test_profile_change_after_admission_invalidates_existing_bindings",
+    ),
+    (
+        "trust the pre-walk forbidden-root snapshot",
+        "tools/service_entrypoint.py",
+        "        if _forbidden_identities(forbidden_roots) & set(walked):\n",
+        "        if False:\n",
+        "AdmissionIngressTests.test_forbidden_root_created_during_walk_is_refused",
+    ),
+    (
+        "admit under the preflight registry snapshot instead of re-reading in the transaction",
+        "tools/service_runtime.py",
+        "                admission_hook=_admission_hook(registry_source, service_config),\n",
+        "                admission_hook=_admission_hook(registry, service_config),\n",
+        "AdmissionIngressTests.test_hook_reresolves_registry_inside_the_transaction_before_admission",
+    ),
+    (
+        "stage policy for the preflight enrollment instead of the one the hook resolved",
+        "tools/service_runtime.py",
+        "            stage_approved_policy(pending.enrolled, read_policy)\n",
+        "            stage_approved_policy(enrolled, read_policy)\n",
+        "AdmissionIngressTests.test_hook_reresolves_registry_inside_the_transaction_before_admission",
+    ),
+    (
+        "expose repository contents to the legacy allowlist",
+        "tools/review_conductor_runtime.py",
+        "                if self._strict_adapter\n                else ()\n",
+        "                if True\n                else ()\n",
+        "AdmissionIngressTests.test_legacy_client_cannot_read_repository_contents",
+    ),
+    (
+        "dispatch OpenClaw work without the authority fence",
+        "tools/review_conductor_runtime.py",
+        "            assert_authority(client, f\"openclaw.enqueue:{action['action_id']}\")\n",
+        "",
+        "AdmissionIngressTests.test_openclaw_dispatch_and_notifications_are_fenced_by_the_authority_guard",
+    ),
+    (
+        "deliver notifications without the authority fence",
+        "tools/review_conductor_userland.py",
+        '    if not dry_run:\n        runtime.assert_authority(client, "notifications")\n',
+        "",
+        "AdmissionIngressTests.test_openclaw_dispatch_and_notifications_are_fenced_by_the_authority_guard",
+    ),
+    (
+        "assert automatic redelivery of a 503",
+        "tools/review_conductor_runtime.py",
+        "    foreign, so the HTTP edge answers 503 and leaves the delivery redeliverable\n    from GitHub's delivery log or API (GitHub does not retry automatically).\n",
+        "    foreign, so the HTTP edge answers 503 and GitHub redelivers it.\n",
+        "AdmissionIngressTests.test_evidence_never_claims_automatic_github_redelivery",
     ),
     (
         "skip the authority guard before mutating GitHub calls",

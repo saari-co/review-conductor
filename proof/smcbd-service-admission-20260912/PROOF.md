@@ -265,14 +265,60 @@ The `7c16089346ad756a998d0f057e9a71e915d59b8b` results (local PASS; hosted run
     a client that cannot carry the guard.
 
 The two inline nits (PROOF.md item 16 and the `RetryableIngestError`
-docstring still saying GitHub redelivers) are corrected: a 503 leaves the
+docstring still describing automatic redelivery) are corrected: a 503 leaves the
 delivery redeliverable from GitHub's delivery log or API; GitHub does not retry
 automatically.
+
+## Final bounded cycle after head `4816fd1` (owner-frozen scope; six invariants)
+
+The `4816fd1e0298aab3d00660c6dab99474f589e2dc` results (local PASS; hosted run
+34699184970 success) are historical for that head. The Copilot review at that
+head listed two inline and five suppressed findings; the owner froze scope to
+one final cycle, with every finding grouped under six invariants, each carrying
+a direct negative regression and an executable mutant.
+
+31. **Enrollment/profile identity.** `require_profile_enrolled` now requires
+    the reloaded profile's `review_policy.enabled` to be true, so deactivation
+    after startup fails every provider read, delivery and tick closed. The
+    profile digest additionally covers the OpenClaw operator id, transport and
+    remote worktree shelf. Mutants: keep serving a disabled profile; ignore
+    the OpenClaw adapter authority in the digest.
+32. **Registry filesystem authority.** After the descriptor walk, every
+    forbidden root path is re-stat'ed and compared with every walked directory
+    identity (parent included); a root created or re-pointed during validation
+    that now resolves to a walked directory refuses the registry. Mutant: trust
+    the pre-walk snapshot.
+33. **Policy fetch/replay/transaction.** The admission hook re-reads the
+    registry provider inside the delivery transaction, immediately before
+    admission, and resolves the enrollment against the engine-reloaded profile;
+    `PolicyNotStaged` carries that enrollment so staging follows it, and the
+    delivery is re-run up to three times so a promotion observed in flight is
+    staged and bound, never the preflight policy. Mutants: admit under the
+    preflight snapshot; stage for the preflight enrollment.
+34. **Adapter least privilege / immutable config.** The repository-contents
+    read rule exists only for generalized (standalone) profiles; a legacy
+    client cannot reach `.review-conductor.json` at all. Mutant: expose
+    repository contents to the legacy allowlist.
+35. **Worker/tick side-effect fencing.** The authority guard now runs after
+    installation-token minting, immediately before the mutating request; each
+    OpenClaw dispatch in `drain_actions` and the notification phase in
+    `run_tick` call `assert_authority` as well. The gate reads the engine
+    database through a read-only connection so it can run while a phase holds
+    the write lock. Mutants: skip the guard; dispatch without the fence;
+    notify without the fence.
+36. **Evidence accuracy.** A regression scans docs, proof and tools for any
+    claim of automatic redelivery or retry by GitHub; a mutant reinstates
+    that claim in the adapter docstring.
+
+Local at this head (CPython 3.14.6): `make check` PASS (service runtime 50
+tests, 49 executable mutants), `make build` PASS, `compileall` PASS,
+`scripts/check_whitespace.py <base> <head>` PASS. Any finding the final Copilot
+review raises is reported to the owner rather than repaired in PR #3.
 
 ## Verification at the repaired head (local CPython 3.14.6, macOS arm64)
 
 - `make check` — PASS: legacy engine/activation/userland/profile suites,
-  scaffold and repository guards, trusted admission (18), service runtime (43,
+  scaffold and repository guards, trusted admission (18), service runtime (50,
   including the mutation harness), launcher transport, workflow contract,
   extraction provenance (14 files) and Python compilation, `git diff --check`.
 - `make build` — PASS; the packaged zipapp still excludes service, admission
@@ -295,34 +341,43 @@ must fail its named test and only that test):
 10. accept any owner-only registry mode;
 11. accept a registry inside a checkout or state root;
 12. cache the registry instead of re-reading it;
-13. bind on `workflow_run` deliveries;
+13. bind on workflow_run deliveries;
 14. bind without checking the policy against the engine profile;
 15. start the worker before ingress binds;
 16. mint tokens from an unvalidated permission map;
 17. read the registry by pathname after validating the descriptor;
 18. gate the worker without checking the profile enrollment;
-19. let the worker die silently on operational failure;
-20. follow a symlinked ancestor while walking the registry path;
-21. trust the profile's reviewer actors instead of enrollment;
-22. keep bindings current after reviewer rotation;
-23. keep bindings current after the engine profile changes;
-24. stage policy for every pull_request delivery before the engine classifies it;
-25. reject transient policy failures instead of asking for redelivery;
-26. answer 400 for a retryable dependency failure;
-27. classify transient GitHub statuses as rejected operations;
-28. follow a symlinked registry leaf;
-29. let a symlink loop escape as a traceback;
-30. drop the App id from binding identity;
-31. accept a real directory renamed into the canonical parent's place;
-32. keep the caller's GitHub App map by reference;
-33. ignore ClawSweeper workflow authority in the profile digest;
-34. ignore the adapter artifact namespace in the profile digest;
-35. keep the caller's ClawSweeper map by reference;
-36. accept either permission allowlist regardless of profile kind;
-37. open the registry leaf without O_NONBLOCK;
-38. persist a binding under a reloaded profile that is no longer enrolled;
-39. skip the authority guard before mutating GitHub calls;
-40. run a live tick without arming the authority guard.
+19. follow a symlinked ancestor while walking the registry path;
+20. trust the profile's reviewer actors instead of enrollment;
+21. keep bindings current after reviewer rotation;
+22. keep bindings current after the engine profile changes;
+23. stage policy for every pull_request delivery before the engine classifies it;
+24. accept a real directory renamed into the canonical parent's place;
+25. keep the caller's GitHub App map by reference;
+26. ignore ClawSweeper workflow authority in the profile digest;
+27. ignore the adapter artifact namespace in the profile digest;
+28. reject transient policy failures instead of asking for redelivery;
+29. answer 400 for a retryable dependency failure;
+30. classify transient GitHub statuses as rejected operations;
+31. follow a symlinked registry leaf;
+32. let a symlink loop escape as a traceback;
+33. drop the App id from binding identity;
+34. keep the caller's ClawSweeper map by reference;
+35. accept either permission allowlist regardless of profile kind;
+36. open the registry leaf without O_NONBLOCK;
+37. persist a binding under a reloaded profile that is no longer enrolled;
+38. keep serving a profile disabled after startup;
+39. ignore the OpenClaw adapter authority in the profile digest;
+40. trust the pre-walk forbidden-root snapshot;
+41. admit under the preflight registry snapshot instead of re-reading in the transaction;
+42. stage policy for the preflight enrollment instead of the one the hook resolved;
+43. expose repository contents to the legacy allowlist;
+44. dispatch OpenClaw work without the authority fence;
+45. deliver notifications without the authority fence;
+46. assert automatic redelivery of a 503;
+47. skip the authority guard before mutating GitHub calls;
+48. run a live tick without arming the authority guard;
+49. let the worker die silently on operational failure.
 
 Only CPython 3.14 was exercised locally; 3.11/3.12 evidence comes from hosted
 exact-head CI on the PR, recorded in the PR conversation, not here.

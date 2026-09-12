@@ -21,15 +21,15 @@
       "source_path": "tools/review_conductor_runtime.py",
       "destination_path": "tools/review_conductor_runtime.py",
       "source_sha256": "22fff3925db126de0fc27e9c61be03cd710d24d9140342ff8367e9831e683d40",
-      "destination_sha256": "dfb8bfa9a4c2c5918d72ca3e6d5d9acd82e2c833883e79e23d1e43d4ca209e8d",
-      "adaptation": "standalone policy-read/check adapter: Contents-read allowlist selected by profile kind and validated on a snapshot of the caller's App and ClawSweeper maps, injected signer seam, admitted HTTP ingestor, transient transport/429/5xx classification, retryable-ingest 503 mapping and a per-call admission authority guard before mutating GitHub operations"
+      "destination_sha256": "e856aa7ae8f5b735fa690fe2bfe51281228cc3517e1b8d7888ef2b3153ad6c86",
+      "adaptation": "standalone policy-read/check adapter: Contents-read allowlist only for generalized profiles, permission allowlist selected by profile kind and validated on snapshots of the caller's App and ClawSweeper maps, injected signer seam, admitted HTTP ingestor, transient transport/429/5xx classification, retryable-ingest 503 mapping, and a per-side-effect admission authority guard (mutating GitHub calls after token minting, OpenClaw dispatch, notifications)"
     },
     {
       "source_path": "tools/review_conductor_userland.py",
       "destination_path": "tools/review_conductor_userland.py",
       "source_sha256": "0f19c2143f568117fa44b29bd56cb652df511f6e19c6ea8d100389dc2605a106",
-      "destination_sha256": "fee2a853922b38ffe79df6d572109f01794aba7005b6dd2ee3e5ea117e1b6a9d",
-      "adaptation": "generalized standalone profiles require Contents read and the trusted service entrypoint for activation; legacy Blocks permissions and CLI route remain accepted unchanged"
+      "destination_sha256": "62d0ff3bae65cc37e17b18e5b813f749574053134ca14d578cee13e3d25222d1",
+      "adaptation": "generalized standalone profiles require Contents read and the trusted service entrypoint for activation; legacy Blocks permissions and CLI route remain accepted unchanged; the tick fences notification delivery through the client's admission authority guard"
     },
     {
       "source_path": "tools/review_conductor_userland_launcher.py",

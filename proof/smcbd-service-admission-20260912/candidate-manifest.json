@@ -2,7 +2,7 @@
   "base_main": "320534450bbfe924bf855b762a0f9358f0b40336",
   "candidate_source": "8e90d46b9287f37382dba1eb5569b0f824a28084",
   "candidate_source_branch": "openclaw/review-conductor-trusted-admission-fable (local only)",
-  "captured_utc": "2026-09-12T14:24:12Z",
+  "captured_utc": "2026-09-12T15:00:01Z",
   "repair_lineage": [
     "candidate 8e90d46 ported onto merged PR #2 main; tests/test_trusted_admission.py merged with the PR #2 manifest_bytes/reader-failure hardening plus App-ID binding",
     "service_entrypoint: AdmissionError from the profile enrollment lookup is normalized to ServiceError so main exits 2 instead of raising; empty registries are refused; stderr via sys",
@@ -14,7 +14,8 @@
     "Copilot review at 83668102fdc1df8337eaa32af14571cf87e1164c (2 new findings): each binding persists the enrollment's reviewer actors and a digest of the policy-governed engine-profile fields; binding currency requires both to still hold on every tick, so reviewer rotation or a profile edit after admission blocks projection until re-admission",
     "Suppressed Copilot findings from the reviews at 8009e5e and 8366810 (6 items still open at cfe7908): approved-policy transport staged before BEGIN IMMEDIATE with a bounded hash-verified cache and an I/O-free hook reader; transient transport/429/5xx failures become RetryableIngestError mapped to HTTP 503 dependency_unavailable with nothing written; registry ancestors canonicalized only and the original leaf opened O_NOFOLLOW under the held parent; resolve() symlink-loop RuntimeError normalized to a fail-closed ServiceError (main exits 2); binascii.Error explicitly normalized in read_policy; direct cross-App binding_id regression and mutant",
     "Copilot review at 0033873c80f99ca4107a58562cf6bca921e654ce (3 inline + 2 suppressed): policy staging is on demand (hook signals PolicyNotStaged inside the transaction, rollback, fetch outside any lock, one re-run) so closed/duplicate/stale deliveries never touch the policy dependency; staged cache guarded by a lock with post-fetch re-check; canonical parent identity pinned by device/inode against a real directory renamed into place; GitHubAppClient snapshots the caller's App map; profile digest extended with ClawSweeper workflow id/name/path/ref/publish and adapter contract/artifact prefix; docs corrected: GitHub does not retry webhook deliveries automatically",
-    "Copilot review at 7c16089346ad756a998d0f057e9a71e915d59b8b (2 inline wording nits + 5 suppressed): ClawSweeper map snapshotted; permission allowlist selected by profile kind; registry leaf opened O_NONBLOCK (FIFO cannot stall startup); hook re-validates the engine-reloaded profile against enrollment before staging/persisting; GitHubAppClient authority guard re-runs require_current_bindings before every mutating call during a tick; remaining 'GitHub redelivers' wording corrected"
+    "Copilot review at 7c16089346ad756a998d0f057e9a71e915d59b8b (2 inline wording nits + 5 suppressed): ClawSweeper map snapshotted; permission allowlist selected by profile kind; registry leaf opened O_NONBLOCK (FIFO cannot stall startup); hook re-validates the engine-reloaded profile against enrollment before staging/persisting; GitHubAppClient authority guard re-runs require_current_bindings before every mutating call during a tick; remaining 'GitHub redelivers' wording corrected",
+    "Final bounded cycle after the Copilot review at 4816fd1e0298aab3d00660c6dab99474f589e2dc (2 inline + 5 suppressed), grouped under six invariants: (1) enrollment/profile identity \u2014 reloaded profile must be enabled, OpenClaw operator/transport/shelf in the digest; (2) registry filesystem authority \u2014 forbidden roots re-checked against walked directories after the walk; (3) policy fetch/replay/transaction \u2014 hook re-reads the registry inside the transaction, staging follows the hook's enrollment; (4) adapter least privilege \u2014 contents read only for generalized profiles; (5) tick side-effect fencing \u2014 guard after token minting immediately before the request, OpenClaw dispatch and notifications fenced, read-only gate view; (6) evidence accuracy \u2014 no claim of automatic GitHub redelivery, scan test + mutant. Scope frozen by owner; further findings are reported, not repaired."
   ],
   "files": {
     "Makefile": "b640756b3a3e3c877a0fa8201e1aaf2d1a3a506cdd4c7b7a412fe0d2e2baa0e9",
@@ -24,17 +25,17 @@
     "docs/bootstrap.md": "d7fab758e263f1b7ba1c8a1431fa435bfa17685cd533fc603720130d860cca87",
     "docs/integration-contract.md": "9a245f0cef202507eeceabee82b794f72041ed89a4225957744195c31d72c027",
     "docs/migration.md": "f0656d19c0d76e9ce8823745733790c744e505a3eb7f799ab2e20edbe1775fc2",
-    "docs/provenance.json": "04d1e429e1087847fcb9b5d7951628085a5d3f81c451fd49d30dedc27c639e7b",
-    "docs/smcbd-pilot-handoff.md": "26bbd616c7c279164655b45e3b9a78815591f4f23ba2e25cf3da04ade284ffbd",
-    "docs/trusted-admission.md": "6b255dcc0271cad5b804730dc2171bf07f2495dfb076356535fccd8d99f455aa",
+    "docs/provenance.json": "6a1cbddcd66fd2dc465477d771dfa5b220eab50e2dd3d548f89495ceb9ef7bea",
+    "docs/smcbd-pilot-handoff.md": "cde5d288514dcc98aab8aaa43b389ac5e5f08254d683ce2b58ab99411df75d5c",
+    "docs/trusted-admission.md": "7f2eaac6ad82e3dcd9ed1b5f8ee545e4f9c5ab759a30a642a907d0904f610b3c",
     "tests/test_review_conductor_profiles.py": "bafad178ef7e5e4c0adb5c58f5a6141d0607fa1fa5131053cfaccab3877a6c88",
-    "tests/test_service_runtime.py": "1b3418e964dc176eedbba9f4631360075f7248a3d0a5e9b2cd29eeb79e247cbf",
+    "tests/test_service_runtime.py": "ef2297f8fca188ce3aeb024cde13edcbe2e544a4c5db5836393c7dbd86c26b8b",
     "tests/test_trusted_admission.py": "c197cf28dd920497fb034c863402619b6843134ca21a7935d77dbf3beeb2316a",
     "tools/review_conductor.py": "2b5ae0336b1f754866680eaeb775df5643cb73983fdb250600304b47a43c7097",
-    "tools/review_conductor_runtime.py": "dfb8bfa9a4c2c5918d72ca3e6d5d9acd82e2c833883e79e23d1e43d4ca209e8d",
-    "tools/review_conductor_userland.py": "fee2a853922b38ffe79df6d572109f01794aba7005b6dd2ee3e5ea117e1b6a9d",
-    "tools/service_entrypoint.py": "e8032e2f48bfe4eebb608f777e24dd90f765cb3b56c25f4ae3dba563a7d13509",
-    "tools/service_runtime.py": "f169efd6faee5f7403a77dabac884e2858e83ce74117d4759a1505ab7b3cf17d",
+    "tools/review_conductor_runtime.py": "e856aa7ae8f5b735fa690fe2bfe51281228cc3517e1b8d7888ef2b3153ad6c86",
+    "tools/review_conductor_userland.py": "62d0ff3bae65cc37e17b18e5b813f749574053134ca14d578cee13e3d25222d1",
+    "tools/service_entrypoint.py": "afbc854442afc7ad9a3b1229e39b317d4b058ca36546e65770174a1f1ec531d9",
+    "tools/service_runtime.py": "4f3b717984e7559c57e153f320a0abdb022bd9d6f1aca896dd30d2854b0d7baa",
     "tools/trusted_admission.py": "bfc0ae24bc7e1db054eaf852076601d96537f11ee6b0fb83263023a18678f2e5"
   }
 }

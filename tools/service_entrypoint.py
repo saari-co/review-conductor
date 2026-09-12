@@ -63,6 +63,7 @@ def _open_registry_descriptor(
     is refused too.
     """
     forbidden = _forbidden_identities(forbidden_roots)
+    walked: list[tuple[int, int]] = []
     parts = parent.parts
     if not parts or name in ("", ".", "..") or "/" in name:
         raise service.ServiceError("service enrollment registry must be a file below the filesystem root")
@@ -72,6 +73,8 @@ def _open_registry_descriptor(
     except OSError as exc:
         raise service.ServiceError("service enrollment registry path is unavailable") from exc
     try:
+        root_metadata = os.fstat(held)
+        walked.append((root_metadata.st_dev, root_metadata.st_ino))
         for component in parts[1:]:
             try:
                 following = os.open(component, directory_flags, dir_fd=held)
@@ -82,10 +85,19 @@ def _open_registry_descriptor(
             os.close(held)
             held = following
             metadata = os.fstat(held)
+            walked.append((metadata.st_dev, metadata.st_ino))
             if (metadata.st_dev, metadata.st_ino) in forbidden:
                 raise service.ServiceError(
                     "service enrollment registry must be service-owned, outside source, checkout, state and proof roots"
                 )
+        # The forbidden identities above were a snapshot taken before the walk. A
+        # root created, renamed or re-pointed meanwhile must not now resolve to any
+        # directory that was walked (the parent included), so re-stat every root
+        # path against the walked identities before the leaf is opened.
+        if _forbidden_identities(forbidden_roots) & set(walked):
+            raise service.ServiceError(
+                "service enrollment registry path entered a forbidden root during validation"
+            )
         parent_metadata = os.fstat(held)
         if (parent_metadata.st_dev, parent_metadata.st_ino) != parent_identity:
             raise service.ServiceError(
