@@ -1,0 +1,34 @@
+{
+  "schema": "smoky.review-conductor.config.v1",
+  "repository": "saari-co/openclaw-smcbd-suite",
+  "repository_id": 1366416798,
+  "default_branch": "main",
+  "ci": {
+    "workflow_name": "Exact-head review pipeline",
+    "workflow_path": ".github/workflows/ci.yml"
+  },
+  "openclaw": {
+    "operator_id": "review-conductor-smcbd-suite",
+    "remote_worktree_shelf": "/home/smoky/Developer/_machine-runs/smcbd-suite-review-worktrees",
+    "transport": "bundle"
+  },
+  "clawsweeper": {
+    "workflow_id": "clawsweeper-exact-tuple.yml",
+    "workflow_name": "ClawSweeper exact-tuple review",
+    "workflow_path": ".github/workflows/clawsweeper-exact-tuple.yml",
+    "ref": "main",
+    "publish": true
+  },
+  "max_repair_cycles": 2,
+  "merge_policy": "human_only",
+  "review_policy": {
+    "enabled": false,
+    "require_ready": true,
+    "quiet_seconds": 600,
+    "comprehensive": true,
+    "reviewers": {
+      "openclaw": null,
+      "clawsweeper": null
+    }
+  }
+}

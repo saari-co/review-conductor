@@ -1,0 +1,18 @@
+{
+  "starting_head": "dadcf07c8c714e2437c7957bdafd1b93b04347ef",
+  "base": "c01a44382bfa66c0e3be39905dd2b9f47c6c7333",
+  "files": {
+    ".github/workflows/ci.yml": "56b3fa8dcda3ec243bf9fdc2dad726bc9950d57f523d15f78dab8674573c61a9",
+    "Makefile": "f2e9d0b37011da03ed45393fda7ff9dff21548577a0f3fb87b3b968ea21b4361",
+    "SECURITY.md": "32138321182e2578ae671b97df10ae4bc49fe80eba9ace519d213d2c4ab79674",
+    "docs/migration.md": "9227d4d69da83eb3cb0a73eb26b457267cba71e34ef42ffdf7be0a3c26d4c1a7",
+    "docs/provenance.json": "94161a43eb04b2ca4e08024e8672c9a79332938d752c8c4b1c1e45e0bf629177",
+    "proof/hardening-20260911/PROOF.md": "e31df615d4a24eb1c6f864a39fe2e88e7450a7a90d0fe3d84d70e7f5829a6d18",
+    "proof/review-repairs-20260911/PROOF.md": "77320d25a46b2c110c176218d6c27d79cad6460f64f1a92ab548ab041327e52b",
+    "proof/scaffold-20260911/PROOF.md": "6535e143a52a8b60a7d7235eb82dd5044a2777516d52a3699d8531c8e912af41",
+    "scripts/check_whitespace.py": "912bdbaefc978012ce302aad3da6b124546d599d748bca93202f971072ebca17",
+    "tests/test_launcher_transport.py": "baeaff09bf828c132b20cec6de6300db6de2bee1a0707d805220e15506a538c1",
+    "tests/test_workflow_contract.py": "756a8af799cc4042c108649c26bb3960b223d1bb00bf04258489c16d4bad9f8c",
+    "tools/review_conductor_userland_launcher.py": "0e6f0f6296516c6e32726332514c09a041a3d2996bc47d39219fe04398fdc511"
+  }
+}

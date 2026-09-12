@@ -1,0 +1,24 @@
+{
+  "schema": "smoky.review-conductor.config.v1",
+  "repository": "dinkuskit/blocks",
+  "repository_id": 1306882611,
+  "default_branch": "main",
+  "ci": {
+    "workflow_name": "CI",
+    "workflow_path": ".github/workflows/ci.yml"
+  },
+  "openclaw": {
+    "operator_id": "review-conductor",
+    "remote_worktree_shelf": "/home/smoky/Developer/_machine-runs/spark-openclaw-review-worktrees",
+    "transport": "bundle"
+  },
+  "clawsweeper": {
+    "workflow_id": "clawsweeper-native-canary.yml",
+    "workflow_name": "ClawSweeper native canary",
+    "workflow_path": ".github/workflows/clawsweeper-native-canary.yml",
+    "ref": "main",
+    "publish": true
+  },
+  "max_repair_cycles": 2,
+  "merge_policy": "human_only"
+}

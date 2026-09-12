@@ -1,0 +1,2180 @@
+#!/usr/bin/env bash
+# lane-class: runnable
+# lanes/spark-openclaw-autoreview/run.sh - Spark-2 host-native OpenClaw/autoreviewer lane.
+set -uo pipefail
+
+TARGET="${SPARK_OPENCLAW_AUTOREVIEW_TARGET:-spark-2}"
+REMOTE_WORKTREE=""
+MODE="local"
+BASE=""
+ENGINE="codex"
+REVIEWERS=""
+MODEL=""
+THINKING=""
+PR_URL=""
+OPERATOR_ID="${SPARK_OPENCLAW_OPERATOR_ID:-}"
+DRY=0
+QUEUE=0
+QUEUE_STATUS=0
+WATCH_ONCE=0
+WATCHER_STATUS=0
+QUEUE_STATE=""
+REQUEST_ID=""
+QUEUE_REQUEST_ID=""
+ACTIVATION_PREFLIGHT=0
+
+require_value() {
+  local opt="${1:-}"
+  if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
+    echo "run.sh: $opt requires a value" >&2
+    exit 2
+  fi
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --target) require_value "$1" "${2:-}"; TARGET="$2"; shift 2 ;;
+    --remote-worktree|--repo) require_value "$1" "${2:-}"; REMOTE_WORKTREE="$2"; shift 2 ;;
+    --mode) require_value "$1" "${2:-}"; MODE="$2"; shift 2 ;;
+    --base) require_value "$1" "${2:-}"; BASE="$2"; shift 2 ;;
+    --engine) require_value "$1" "${2:-}"; ENGINE="$2"; REVIEWERS=""; shift 2 ;;
+    --reviewers|--panel) require_value "$1" "${2:-}"; REVIEWERS="$2"; shift 2 ;;
+    --model) require_value "$1" "${2:-}"; MODEL="$2"; shift 2 ;;
+    --thinking) require_value "$1" "${2:-}"; THINKING="$2"; shift 2 ;;
+    --pr-url) require_value "$1" "${2:-}"; PR_URL="$2"; shift 2 ;;
+    --operator-id) require_value "$1" "${2:-}"; OPERATOR_ID="$2"; shift 2 ;;
+    --queue-state) require_value "$1" "${2:-}"; QUEUE_STATE="$2"; shift 2 ;;
+    --request-id) require_value "$1" "${2:-}"; REQUEST_ID="$2"; shift 2 ;;
+    --queue-request-id) require_value "$1" "${2:-}"; QUEUE_REQUEST_ID="$2"; shift 2 ;;
+    --activation-preflight) ACTIVATION_PREFLIGHT=1; shift ;;
+    --watch-once) WATCH_ONCE=1; shift ;;
+    --watcher-status) WATCHER_STATUS=1; shift ;;
+    --queue-status) QUEUE_STATUS=1; shift ;;
+    --queue) QUEUE=1; shift ;;
+    --dry) DRY=1; shift ;;
+    -h|--help) sed -n '3,45p' "$0"; exit 0 ;;
+    *) echo "run.sh: unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+if [ "$ACTIVATION_PREFLIGHT" = "1" ]; then
+  REMOTE_WORKTREE="${REMOTE_WORKTREE:-__activation_preflight__}"
+fi
+
+[ -z "$REQUEST_ID" ] || case "$REQUEST_ID" in
+  -*|.*|*/*|*[^A-Za-z0-9._-]*)
+    echo "run.sh: unsafe --request-id: $REQUEST_ID" >&2
+    exit 2
+    ;;
+esac
+[ -z "$QUEUE_REQUEST_ID" ] || case "$QUEUE_REQUEST_ID" in
+  -*|.*|*/*|*[^A-Za-z0-9._-]*)
+    echo "run.sh: unsafe --queue-request-id: $QUEUE_REQUEST_ID" >&2
+    exit 2
+    ;;
+esac
+[ -z "$OPERATOR_ID" ] || case "$OPERATOR_ID" in
+  -*|.*|*/*|*[^A-Za-z0-9._-]*)
+    echo "run.sh: unsafe --operator-id: $OPERATOR_ID" >&2
+    exit 2
+    ;;
+esac
+
+if [ -z "$REQUEST_ID" ] && [ "$QUEUE_STATUS" != "1" ] && [ "$WATCH_ONCE" != "1" ] && [ "$WATCHER_STATUS" != "1" ]; then
+  [ -n "$REMOTE_WORKTREE" ] || { echo "run.sh: --remote-worktree <spark-2-path> required" >&2; exit 2; }
+fi
+[ "$QUEUE" = "1" ] && [ "$WATCH_ONCE" = "1" ] && { echo "run.sh: --queue and --watch-once are separate modes" >&2; exit 2; }
+[ "$QUEUE" = "1" ] && [ "$WATCHER_STATUS" = "1" ] && { echo "run.sh: --queue and --watcher-status are separate modes" >&2; exit 2; }
+[ "$QUEUE" = "1" ] && [ "$QUEUE_STATUS" = "1" ] && { echo "run.sh: --queue and --queue-status are separate modes" >&2; exit 2; }
+[ "$QUEUE_STATUS" = "1" ] && [ "$WATCH_ONCE" = "1" ] && { echo "run.sh: --queue-status and --watch-once are separate modes" >&2; exit 2; }
+[ "$QUEUE_STATUS" = "1" ] && [ "$WATCHER_STATUS" = "1" ] && { echo "run.sh: --queue-status and --watcher-status are separate modes" >&2; exit 2; }
+[ "$QUEUE_STATUS" = "1" ] && [ -n "$REQUEST_ID" ] && { echo "run.sh: --queue-status and --request-id are separate modes" >&2; exit 2; }
+[ "$WATCH_ONCE" = "1" ] && [ "$WATCHER_STATUS" = "1" ] && { echo "run.sh: --watch-once and --watcher-status are separate modes" >&2; exit 2; }
+[ -n "$REQUEST_ID" ] && [ "$QUEUE" = "1" ] && { echo "run.sh: --request-id and --queue are separate modes" >&2; exit 2; }
+[ -z "$QUEUE_REQUEST_ID" ] || [ "$QUEUE" = "1" ] || { echo "run.sh: --queue-request-id requires --queue" >&2; exit 2; }
+[ -n "$REQUEST_ID" ] && [ "$WATCH_ONCE" = "1" ] && { echo "run.sh: --request-id and --watch-once are separate modes" >&2; exit 2; }
+[ -n "$REQUEST_ID" ] && [ "$WATCHER_STATUS" = "1" ] && { echo "run.sh: --request-id and --watcher-status are separate modes" >&2; exit 2; }
+[ "$QUEUE" = "1" ] && [ -z "$OPERATOR_ID" ] && { echo "run.sh: --queue requires --operator-id <safe-id> for multi-operator review proof" >&2; exit 2; }
+[ "$WATCH_ONCE" = "1" ] && [ -z "$QUEUE_STATE" ] && { echo "run.sh: --watch-once requires --queue-state <spark-state-root>" >&2; exit 2; }
+if [ "$ACTIVATION_PREFLIGHT" = "1" ]; then
+  [ "$QUEUE" = "1" ] && { echo "run.sh: --queue and --activation-preflight are separate modes" >&2; exit 2; }
+  [ "$QUEUE_STATUS" = "1" ] && { echo "run.sh: --queue-status and --activation-preflight are separate modes" >&2; exit 2; }
+  [ "$WATCH_ONCE" = "1" ] && { echo "run.sh: --watch-once and --activation-preflight are separate modes" >&2; exit 2; }
+  [ "${WATCHER_STATUS:-0}" = "1" ] && { echo "run.sh: --watcher-status and --activation-preflight are separate modes" >&2; exit 2; }
+  [ -n "$REQUEST_ID" ] && { echo "run.sh: --request-id and --activation-preflight are separate modes" >&2; exit 2; }
+fi
+
+case "$MODE" in
+  local|branch|commit) ;;
+  *) echo "run.sh: --mode must be local, branch, or commit" >&2; exit 2 ;;
+esac
+
+if [ -z "$REQUEST_ID" ] && [ -n "$PR_URL" ] && [ "$MODE" = "local" ]; then
+  echo "run.sh: --pr-url review proof requires --mode branch --base <ref> or --mode commit; omit --pr-url for local queue smoke" >&2
+  exit 2
+fi
+
+if [ -z "$REQUEST_ID" ] && [ -n "$PR_URL" ] && [ "$MODE" = "branch" ] && [ -z "$BASE" ]; then
+  echo "run.sh: --pr-url --mode branch requires --base <ref>" >&2
+  exit 2
+fi
+
+case "$TARGET" in
+  spark-2|spark-2.swarm) ;;
+  -*) echo "run.sh: --target must be spark-2 or spark-2.swarm" >&2; exit 2 ;;
+  *) echo "run.sh: --target must be spark-2 or spark-2.swarm" >&2; exit 2 ;;
+esac
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "run.sh: not in a git repo" >&2; exit 2; }
+cd "$REPO_ROOT" || exit 2
+
+. "$REPO_ROOT/lanes/lib/lane-receipt.sh"
+lane_receipt_init spark-openclaw-autoreview
+LANE_HOST="spark-2"
+
+mark_swarmdash_publish_needed() {
+  local event_name="$1"
+  local detail="${2:-}"
+  local recorder="$REPO_ROOT/tonight-lab/scripts/record-swarm-event.sh"
+  local suffix
+  local out_file
+  local err_file
+
+  suffix="$(printf '%s' "$event_name" | tr -c 'A-Za-z0-9._-' '_')"
+  out_file="$local_dir/swarmdash-publish-needed-$suffix.txt"
+  err_file="$local_dir/swarmdash-publish-needed-$suffix.err"
+
+  if [ ! -f "$recorder" ]; then
+    printf 'missing:%s' "$recorder"
+    return 0
+  fi
+
+  if bash "$recorder" \
+    --source spark-openclaw-autoreview \
+    --event "$event_name" \
+    --lane spark-openclaw-autoreview \
+    --detail "$detail" >"$out_file" 2>"$err_file"; then
+    printf '%s' "$out_file"
+    return 0
+  fi
+
+  echo "spark-openclaw-autoreview: failed to mark SwarmDash publish-needed for $event_name; see $err_file" >&2
+  printf 'failed:%s' "$err_file"
+  return 0
+}
+
+run_id="$LANE_RUN_ID"
+local_dir="$REPO_ROOT/runs/spark-openclaw-autoreview-runs/$run_id"
+mkdir -p "$local_dir"
+
+if [ "$WATCHER_STATUS" = "1" ]; then
+  watcher_status_script='
+set -u
+queue_state="$1"
+run_id="$2"
+dry="$3"
+root="${queue_state:-$HOME/.local/state/openclaw-review}"
+watcher="$HOME/Developer/spark-dgx/lanes/openclaw-review/autoreview-watch.sh"
+
+[ -x "$watcher" ] || { echo "spark-openclaw-watcher-status: watcher missing: $watcher" >&2; exit 20; }
+[ -d "$root" ] || { echo "spark-openclaw-watcher-status: queue root not found: $root" >&2; exit 21; }
+command -v python3 >/dev/null 2>&1 || { echo "spark-openclaw-watcher-status: missing python3" >&2; exit 22; }
+command -v ps >/dev/null 2>&1 || { echo "spark-openclaw-watcher-status: missing ps" >&2; exit 23; }
+
+if [ "$dry" = "1" ]; then
+  printf "queue_root=%s\n" "$root"
+  printf "watcher=%s\n" "$watcher"
+  exit 0
+fi
+
+out_dir="$HOME/Developer/_machine-runs/spark-openclaw-watcher-status-runs/$run_id"
+mkdir -p "$out_dir"
+ROOT="$root" OUT_DIR="$out_dir" RUN_ID="$run_id" WATCHER="$watcher" python3 - <<'"'"'PY'"'"'
+import json
+import os
+import shlex
+import subprocess
+from pathlib import Path
+
+root = Path(os.environ["ROOT"])
+out_dir = Path(os.environ["OUT_DIR"])
+run_id = os.environ["RUN_ID"]
+watcher = Path(os.environ["WATCHER"])
+default_root = Path.home() / ".local" / "state" / "openclaw-review"
+def normalize_root(value):
+    try:
+        return Path(value).expanduser().resolve(strict=False)
+    except OSError:
+        return Path(value).expanduser()
+root_norm = normalize_root(str(root))
+default_root_norm = normalize_root(str(default_root))
+out_dir.mkdir(parents=True, exist_ok=True)
+
+states = [
+    ("requests", "queued"),
+    ("running", "running"),
+    ("needs-human", "needs-human"),
+    ("done", "completed"),
+    ("failed", "failed"),
+]
+queue_counts = {}
+queue_total = 0
+for dirname, status in states:
+    folder = root / dirname
+    count = len(list(folder.glob("*.json"))) if folder.exists() else 0
+    queue_counts[status] = count
+    queue_total += count
+
+ps_result = subprocess.run(
+    ["ps", "-eo", "pid=,ppid=,etime=,state=,args="],
+    text=True,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    check=False,
+)
+processes = []
+if ps_result.returncode == 0:
+    for line in ps_result.stdout.splitlines():
+        parts = line.strip().split(None, 4)
+        if len(parts) < 5:
+            continue
+        pid, ppid, etime, state, args = parts
+        try:
+            arg_tokens = shlex.split(args)
+        except ValueError:
+            arg_tokens = args.split()
+        if not arg_tokens:
+            continue
+        def token_basename(token):
+            return Path(token).name
+        first_arg = token_basename(arg_tokens[0])
+        launcher_names = {"bash", "sh", "zsh", "env", "nohup", "setsid", "timeout"}
+        executing_watcher = first_arg == "autoreview-watch.sh" or (
+            first_arg in launcher_names
+            and any(token_basename(token) == "autoreview-watch.sh" for token in arg_tokens[1:])
+        )
+        if not executing_watcher:
+            continue
+        if any("spark-openclaw-watcher-status" in token for token in arg_tokens):
+            continue
+        env_readable = False
+        env_root = None
+        try:
+            raw_env = Path("/proc") / pid / "environ"
+            env_parts = raw_env.read_bytes().split(b"\0")
+            env_readable = True
+        except OSError:
+            env_parts = []
+        for env_part in env_parts:
+            if env_part.startswith(b"OPENCLAW_REVIEW_STATE="):
+                env_root = env_part.split(b"=", 1)[1].decode("utf-8", "replace")
+                if env_root == "":
+                    env_root = None
+                break
+        env_root_matches = normalize_root(env_root) == root_norm if env_root is not None else False
+        arg_root_values = []
+        for index, token in enumerate(arg_tokens):
+            if token.startswith("OPENCLAW_REVIEW_STATE="):
+                arg_root_values.append(token.split("=", 1)[1])
+            elif token.startswith("--queue-state=") or token.startswith("--state="):
+                arg_root_values.append(token.split("=", 1)[1])
+            elif token in {"--queue-state", "--state"} and index + 1 < len(arg_tokens):
+                arg_root_values.append(arg_tokens[index + 1])
+        explicit_root_match = any(
+            normalize_root(value) == root_norm
+            for value in arg_root_values
+        )
+        argv_queue_state_seen = bool(arg_root_values)
+        default_root_match = (
+            root_norm == default_root_norm
+            and env_readable
+            and env_root is None
+            and not argv_queue_state_seen
+        )
+        queue_root_matches = env_root_matches or explicit_root_match or default_root_match
+        if env_root_matches:
+            queue_root_source = "env"
+        elif explicit_root_match:
+            queue_root_source = "args"
+        elif default_root_match:
+            queue_root_source = "default"
+        else:
+            queue_root_source = "none"
+        mode = "once" if "--once" in args.split() else "long-lived"
+        process_runnable = not state.upper().startswith(("T", "Z"))
+        active_candidate = queue_root_matches and mode == "long-lived" and process_runnable
+        processes.append({
+            "pid": pid,
+            "ppid": ppid,
+            "etime": etime,
+            "state": state,
+            "command": "autoreview-watch.sh",
+            "mode": mode,
+            "queue_root_matches": queue_root_matches,
+            "queue_root_source": queue_root_source,
+            "env_readable": env_readable,
+            "env_queue_state_seen": env_root is not None,
+            "argv_queue_state_seen": argv_queue_state_seen,
+            "process_runnable": process_runnable,
+            "active_candidate": active_candidate,
+        })
+
+watcher_active = any(process["active_candidate"] for process in processes)
+summary = {
+    "schema": "spark_openclaw_watcher_status.v1",
+    "lane": "spark-openclaw-autoreview",
+    "host": "spark-2",
+    "run_id": run_id,
+    "queue_root": str(root),
+    "watcher": str(watcher),
+    "watcher_exists": watcher.exists(),
+    "watcher_executable": os.access(watcher, os.X_OK),
+    "watcher_active": watcher_active,
+    "process_count": len(processes),
+    "processes": processes,
+    "queue_counts": queue_counts,
+    "queue_total": queue_total,
+    "ps_exit_code": ps_result.returncode,
+}
+(out_dir / "WATCHER_STATUS.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+(out_dir / "STATE.md").write_text(
+    "\n".join([
+        "# Spark OpenClaw Watcher Status State",
+        "",
+        "status: completed",
+        f"run_id: {run_id}",
+        f"queue_root: {root}",
+        f"watcher_active: {str(watcher_active).lower()}",
+        f"process_count: {len(processes)}",
+        f"queue_total: {queue_total}",
+        "",
+    ])
+)
+
+proof_lines = [
+    "# Spark OpenClaw Watcher Status Proof",
+    "",
+    "- lane: spark-openclaw-autoreview",
+    "- host: spark-2",
+    f"- run_id: {run_id}",
+    f"- queue_root: {root}",
+    f"- watcher: {watcher}",
+    "- result: completed",
+    "- watcher_status_json: WATCHER_STATUS.json",
+    "- state: STATE.md",
+    f"- watcher_active: {str(watcher_active).lower()}",
+    f"- process_count: {len(processes)}",
+    f"- queue_total: {queue_total}",
+]
+for status, count in queue_counts.items():
+    proof_lines.append(f"- queue_{status}: {count}")
+proof_lines.extend([
+    "- secrets_inspected: no",
+    "- edits: no",
+    "- deploys: no",
+    "- sends: no",
+    "- watcher_restarted: no",
+    "- model_launched: no",
+    "",
+    "This is a read-only Spark-2 watcher and queue-root status proof.",
+    "It does not submit a review, drain the queue, restart services, launch a model, or read raw model output.",
+    "Process details are sanitized to pid/ppid/elapsed/state/mode/match booleans only; raw command lines and environment values are not copied.",
+    "",
+])
+(out_dir / "PROOF.md").write_text("\n".join(proof_lines))
+PY
+'
+  watcher_status_errexit=0
+  case "$-" in *e*) watcher_status_errexit=1; set +e ;; esac
+  status_out="$(ssh -o BatchMode=yes -o ConnectTimeout=10 -- "$TARGET" "bash -s -- $(printf '%q' "$QUEUE_STATE") $(printf '%q' "$run_id") $(printf '%q' "$DRY")" <<<"$watcher_status_script" 2>&1)"
+  status_rc=$?
+  [ "$watcher_status_errexit" = "0" ] || set -e
+  printf '%s\n' "$status_out" >&2
+
+  if [ "$DRY" = "1" ]; then
+    if [ "$status_rc" -eq 0 ]; then
+      LANE_PROOF_STATUS="launch_only"
+      lane_emit dry "" "" "$PR_URL" "spark-openclaw-autoreview watcher status validated on $TARGET" ""
+      exit 0
+    fi
+    LANE_PROOF_STATUS="failed"
+    lane_emit failed "" "" "$PR_URL" "spark-openclaw-autoreview watcher status dry probe failed rc=$status_rc" "see stderr"
+    exit 3
+  fi
+
+  rsync -az -- "$TARGET:~/Developer/_machine-runs/spark-openclaw-watcher-status-runs/$run_id/" "$local_dir/" >/dev/null 2>&1 || true
+  proof_rel="runs/spark-openclaw-autoreview-runs/$run_id/PROOF.md"
+  status_file="$local_dir/WATCHER_STATUS.json"
+  if [ "$status_rc" -ne 0 ] || [ ! -f "$status_file" ] || [ ! -f "$local_dir/PROOF.md" ]; then
+    LANE_PROOF_STATUS="failed"
+    lane_emit failed "$proof_rel" "" "$PR_URL" "spark-openclaw-autoreview watcher status failed rc=$status_rc" "missing watcher status proof"
+    exit 3
+  fi
+  watcher_active="$(python3 -c 'import json,sys; print(str(bool(json.load(open(sys.argv[1])).get("watcher_active"))).lower())' "$status_file" 2>/dev/null || printf 'false')"
+  LANE_PROOF_STATUS="closed"
+  LANE_TERMINAL_PROOF="$proof_rel"
+  lane_emit completed "$proof_rel" "" "$PR_URL" "spark-openclaw-autoreview watcher status fetched on $TARGET; active=$watcher_active" ""
+  exit 0
+fi
+
+if [ -n "$REQUEST_ID" ]; then
+  request_status_script='
+set -u
+request_id="$1"
+queue_state="$2"
+run_id="$3"
+dry="$4"
+expected_operator_id="${5:-}"
+root="${queue_state:-$HOME/.local/state/openclaw-review}"
+
+if [ "$dry" = "1" ]; then
+  [ -d "$root" ] || { echo "spark-openclaw-request-status: queue root not found: $root" >&2; exit 21; }
+  command -v python3 >/dev/null 2>&1 || { echo "spark-openclaw-request-status: missing python3" >&2; exit 22; }
+  printf "queue_root=%s\n" "$root"
+  exit 0
+fi
+
+out_dir="$HOME/Developer/_machine-runs/spark-openclaw-request-status-runs/$run_id"
+mkdir -p "$out_dir"
+ROOT="$root" REQUEST_ID="$request_id" RUN_ID="$run_id" OUT_DIR="$out_dir" EXPECTED_OPERATOR_ID="$expected_operator_id" python3 - <<'"'"'PY'"'"'
+import json
+import os
+import re
+import shutil
+import sys
+from pathlib import Path
+
+root = Path(os.environ["ROOT"])
+request_id = os.environ["REQUEST_ID"]
+run_id = os.environ["RUN_ID"]
+out_dir = Path(os.environ["OUT_DIR"])
+expected_operator_id = os.environ.get("EXPECTED_OPERATOR_ID") or ""
+out_dir.mkdir(parents=True, exist_ok=True)
+
+def read_review_output(path):
+    if not path.exists():
+        return ""
+    try:
+        return path.read_text(errors="replace")
+    except OSError:
+        return ""
+
+def summarize_review(result, review_output):
+    raw_result = result.get("review_result") or ""
+    exit_code = result.get("exit_code")
+    exit_code_text = str(exit_code) if exit_code is not None else ""
+
+    def raw_finding_count():
+        lowered = raw_result.lower()
+        for pattern in (
+            r"\b(\d+)\s+(?:accepted\s+)?(?:actionable\s+)?findings?\b",
+            r"\bfindings?\s*[:=]\s*(\d+)\b",
+        ):
+            match = re.search(pattern, lowered)
+            if match:
+                return int(match.group(1))
+        return None
+
+    def output_finding_count():
+        clean_pattern = r"no (?:accepted/actionable |actionable |accepted )?findings reported\.?"
+        for line in review_output.splitlines():
+            normalized = re.sub(r"^[-*]\s+", "", line.strip().lower())
+            if not normalized:
+                continue
+            match = re.match(r"autoreview findings:\s*(\d+)\b", normalized)
+            if match:
+                return int(match.group(1))
+            if re.fullmatch(clean_pattern, normalized):
+                return 0
+        return None
+
+    finding_count = output_finding_count()
+    source = "review_output" if finding_count is not None else "unknown"
+    if finding_count is None:
+        finding_count = raw_finding_count()
+        source = "review_result" if finding_count is not None else "unknown"
+
+    if exit_code_text and exit_code_text not in {"0", "1"}:
+        return {
+            "review_clean": None,
+            "review_finding_count": None,
+            "review_summary": f"unknown; run failed (exit {exit_code_text})",
+            "review_summary_source": "exit_code",
+        }
+
+    if exit_code_text in {"0", "1"}:
+        exit_clean = exit_code_text == "0"
+        if finding_count is not None and (finding_count == 0) != exit_clean:
+            return {
+                "review_clean": None,
+                "review_finding_count": finding_count,
+                "review_summary": f"conflict; exit_code={exit_code_text}, text={finding_count} findings",
+                "review_summary_source": f"{source}+exit_code",
+            }
+        if exit_clean:
+            count = finding_count if finding_count is not None else 0
+            return {
+                "review_clean": True,
+                "review_finding_count": count,
+                "review_summary": f"clean; {count} findings",
+                "review_summary_source": source if finding_count is not None else "exit_code",
+            }
+        count_text = finding_count if finding_count is not None else "unknown"
+        return {
+            "review_clean": False,
+            "review_finding_count": finding_count,
+            "review_summary": f"actionable; {count_text} findings",
+            "review_summary_source": source if finding_count is not None else "exit_code",
+        }
+
+    if finding_count is not None:
+        clean = finding_count == 0
+        if clean:
+            review_summary = f"clean; {finding_count} findings"
+        else:
+            review_summary = f"actionable; {finding_count} findings"
+    else:
+        clean = None
+        review_summary = "unknown"
+    return {
+        "review_clean": clean,
+        "review_finding_count": finding_count,
+        "review_summary": review_summary,
+        "review_summary_source": source,
+    }
+
+states = {
+    "requests": "queued",
+    "running": "running",
+    "done": "completed",
+    "needs-human": "needs-human",
+    "failed": "failed",
+}
+
+found_state = None
+request_path = None
+for dirname, status in states.items():
+    candidate = root / dirname / f"{request_id}.json"
+    if candidate.exists():
+        found_state = status
+        request_path = candidate
+        break
+
+summary = {
+    "id": request_id,
+    "found": bool(request_path),
+    "status": "not-found",
+    "queue_state": "",
+    "queue_root": str(root),
+    "request_path": "",
+    "result_path": "",
+    "review_output_path": "",
+    "proof_path": "",
+    "commit_sha": "",
+    "submitted_head": "",
+    "pr_url": "",
+    "review_result": "",
+    "review_clean": None,
+    "review_finding_count": None,
+    "review_summary": "",
+    "review_summary_source": "",
+    "operator_id": "",
+    "expected_operator_id": expected_operator_id,
+    "exit_code": None,
+    "wall_s": None,
+}
+
+if request_path is None:
+    (out_dir / "REQUEST_STATUS.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+    (out_dir / "PROOF.md").write_text(
+        "\n".join([
+            "# Spark OpenClaw Request Status Proof",
+            "",
+            "- lane: spark-openclaw-autoreview",
+            "- host: spark-2",
+            f"- run_id: {run_id}",
+            f"- request_id: {request_id}",
+            "- operator_id: {}".format(summary["operator_id"] or "missing"),
+            "- expected_operator_id: {}".format(expected_operator_id or "not_provided"),
+            f"- queue_root: {root}",
+            "- result: not-found",
+            "- request_json: missing",
+            "- result_json: missing",
+            "- review_output: missing",
+            "- secrets_inspected: no",
+            "- edits: no",
+            "- deploys: no",
+            "- sends: no",
+            "",
+        ])
+    )
+    sys.exit(4)
+
+try:
+    request = json.loads(request_path.read_text())
+except json.JSONDecodeError:
+    request = {"id": request_id}
+
+(out_dir / "request.json").write_text(json.dumps(request, indent=2, sort_keys=True) + "\n")
+
+result_path = root / "runs" / request_id / "result.json"
+review_output_path = root / "runs" / request_id / "review_output.txt"
+result = {}
+if result_path.exists():
+    try:
+        result = json.loads(result_path.read_text())
+    except json.JSONDecodeError:
+        result = {}
+    shutil.copyfile(result_path, out_dir / "result.json")
+if review_output_path.exists():
+    shutil.copyfile(review_output_path, out_dir / "review_output.txt")
+review_summary = summarize_review(result, read_review_output(review_output_path))
+
+summary.update({
+    "found": True,
+    "status": found_state or "",
+    "queue_state": request_path.parent.name,
+    "request_path": str(request_path),
+    "result_path": str(result_path) if result_path.exists() else "",
+    "review_output_path": str(review_output_path) if review_output_path.exists() else "",
+    "proof_path": str(root / "runs" / request_id) if (root / "runs" / request_id).exists() else "",
+    "commit_sha": request.get("commit_sha") or request.get("submitted_head") or "",
+    "submitted_head": request.get("submitted_head") or "",
+    "pr_url": request.get("pr_url") or "",
+    "operator_id": request.get("operator_id") or "legacy_missing",
+    "review_result": result.get("review_result") or "",
+    "review_clean": review_summary["review_clean"],
+    "review_finding_count": review_summary["review_finding_count"],
+    "review_summary": review_summary["review_summary"],
+    "review_summary_source": review_summary["review_summary_source"],
+    "exit_code": result.get("exit_code"),
+    "wall_s": result.get("wall_s"),
+})
+(out_dir / "REQUEST_STATUS.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+
+def value_or_missing(value):
+    return value if value not in (None, "") else "missing"
+
+request_json_name = "request.json" if request_path.exists() else "missing"
+result_json_name = "result.json" if result_path.exists() else "missing"
+review_output_name = "review_output.txt" if review_output_path.exists() else "missing"
+
+(out_dir / "PROOF.md").write_text(
+    "\n".join([
+        "# Spark OpenClaw Request Status Proof",
+        "",
+        "- lane: spark-openclaw-autoreview",
+        "- host: spark-2",
+        f"- run_id: {run_id}",
+        f"- request_id: {request_id}",
+        "- operator_id: {}".format(value_or_missing(summary["operator_id"])),
+        "- expected_operator_id: {}".format(value_or_missing(summary["expected_operator_id"])),
+        f"- queue_root: {root}",
+        f"- queue_state: {request_path.parent.name}",
+        "- result: {}".format(summary["status"]),
+        "- commit_sha: {}".format(value_or_missing(summary["commit_sha"])),
+        "- pr_url: {}".format(value_or_missing(summary["pr_url"])),
+        "- review_result: {}".format(value_or_missing(summary["review_result"])),
+        "- review_summary: {}".format(value_or_missing(summary["review_summary"])),
+        "- review_clean: {}".format(value_or_missing(summary["review_clean"])),
+        "- review_finding_count: {}".format(value_or_missing(summary["review_finding_count"])),
+        "- review_summary_source: {}".format(value_or_missing(summary["review_summary_source"])),
+        "- exit_code: {}".format(value_or_missing(summary["exit_code"])),
+        f"- request_json: {request_json_name}",
+        f"- result_json: {result_json_name}",
+        f"- review_output: {review_output_name}",
+        "- summary_json: REQUEST_STATUS.json",
+        "- secrets_inspected: no",
+        "- edits: no",
+        "- deploys: no",
+        "- sends: no",
+        "",
+        "This is a read-only fetch of an existing Spark-owned OpenClaw queue request.",
+        "It does not submit a new review, drain the queue, restart services, or edit the reviewed worktree.",
+        "",
+    ])
+)
+PY
+'
+  request_status_errexit=0
+  case "$-" in *e*) request_status_errexit=1; set +e ;; esac
+  status_out="$(ssh -o BatchMode=yes -o ConnectTimeout=10 -- "$TARGET" "bash -s -- $(printf '%q' "$REQUEST_ID") $(printf '%q' "$QUEUE_STATE") $(printf '%q' "$run_id") $(printf '%q' "$DRY") $(printf '%q' "$OPERATOR_ID")" <<<"$request_status_script" 2>&1)"
+  status_rc=$?
+  [ "$request_status_errexit" = "0" ] || set -e
+  printf '%s\n' "$status_out" >&2
+
+  if [ "$DRY" = "1" ]; then
+    if [ "$status_rc" -eq 0 ]; then
+      LANE_PROOF_STATUS="launch_only"
+      lane_emit dry "" "" "$PR_URL" "spark-openclaw-autoreview request status fetch validated on $TARGET; request_id=$REQUEST_ID" ""
+      exit 0
+    fi
+    LANE_PROOF_STATUS="failed"
+    lane_emit failed "" "" "$PR_URL" "spark-openclaw-autoreview request status dry probe failed rc=$status_rc" "see stderr"
+    exit 3
+  fi
+
+  rsync -az -- "$TARGET:~/Developer/_machine-runs/spark-openclaw-request-status-runs/$run_id/" "$local_dir/" >/dev/null 2>&1 || true
+  proof_rel="runs/spark-openclaw-autoreview-runs/$run_id/PROOF.md"
+  status_file="$local_dir/REQUEST_STATUS.json"
+  if [ ! -f "$status_file" ]; then
+    LANE_PROOF_STATUS="failed"
+    lane_emit failed "$proof_rel" "" "$PR_URL" "spark-openclaw-autoreview request status fetch failed rc=$status_rc" "missing REQUEST_STATUS.json"
+    exit 3
+  fi
+  if [ ! -f "$local_dir/PROOF.md" ]; then
+    LANE_PROOF_STATUS="failed"
+    lane_emit failed "$proof_rel" "" "$PR_URL" "spark-openclaw-autoreview request status fetch failed rc=$status_rc" "missing PROOF.md"
+    exit 3
+  fi
+
+  request_status="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status") or "")' "$status_file" 2>/dev/null || true)"
+  request_commit="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("commit_sha") or "")' "$status_file" 2>/dev/null || true)"
+  request_pr="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("pr_url") or "")' "$status_file" 2>/dev/null || true)"
+  [ -n "$PR_URL" ] || PR_URL="$request_pr"
+
+  case "$request_status" in
+    completed)
+      LANE_PROOF_STATUS="closed"
+      LANE_TERMINAL_PROOF="$proof_rel"
+      lane_emit completed "$proof_rel" "$request_commit" "$PR_URL" "spark-openclaw-autoreview request $REQUEST_ID completed on $TARGET" ""
+      exit 0
+      ;;
+    needs-human)
+      LANE_PROOF_STATUS="closed"
+      LANE_TERMINAL_PROOF="$proof_rel"
+      lane_emit needs-human "$proof_rel" "$request_commit" "$PR_URL" "spark-openclaw-autoreview request $REQUEST_ID needs human adjudication on $TARGET" "classify findings before routing fixes"
+      exit 3
+      ;;
+    failed)
+      LANE_PROOF_STATUS="failed"
+      LANE_TERMINAL_PROOF="$proof_rel"
+      lane_emit failed "$proof_rel" "$request_commit" "$PR_URL" "spark-openclaw-autoreview request $REQUEST_ID failed on $TARGET" "see $proof_rel"
+      exit 3
+      ;;
+    queued|running)
+      LANE_PROOF_STATUS="packet_ready"
+      lane_emit "$request_status" "$proof_rel" "$request_commit" "$PR_URL" "spark-openclaw-autoreview request $REQUEST_ID is $request_status on $TARGET" "request not terminal yet"
+      exit 0
+      ;;
+    not-found)
+      LANE_PROOF_STATUS="failed"
+      lane_emit failed "$proof_rel" "$request_commit" "$PR_URL" "spark-openclaw-autoreview request $REQUEST_ID not found on $TARGET" "status=not-found"
+      exit 3
+      ;;
+    *)
+      LANE_PROOF_STATUS="failed"
+      lane_emit failed "$proof_rel" "$request_commit" "$PR_URL" "spark-openclaw-autoreview request $REQUEST_ID status unknown on $TARGET" "status=$request_status"
+      exit 3
+      ;;
+  esac
+fi
+
+if [ "$QUEUE_STATUS" = "1" ]; then
+  queue_status_script='
+set -u
+queue_state="$1"
+run_id="$2"
+dry="$3"
+operator_id="${4:-}"
+root="${queue_state:-$HOME/.local/state/openclaw-review}"
+
+[ -d "$root" ] || { echo "spark-openclaw-queue-status: queue root not found: $root" >&2; exit 21; }
+command -v python3 >/dev/null 2>&1 || { echo "spark-openclaw-queue-status: missing python3" >&2; exit 22; }
+
+if [ "$dry" = "1" ]; then
+  printf "queue_root=%s\n" "$root"
+  printf "operator_id=%s\n" "$operator_id"
+  exit 0
+fi
+
+out_dir="$HOME/Developer/_machine-runs/spark-openclaw-queue-status-runs/$run_id"
+mkdir -p "$out_dir"
+ROOT="$root" OUT_DIR="$out_dir" RUN_ID="$run_id" OPERATOR_ID="$operator_id" python3 - <<'"'"'PY'"'"'
+import json
+import os
+import re
+from pathlib import Path
+
+root = Path(os.environ["ROOT"])
+out_dir = Path(os.environ["OUT_DIR"])
+run_id = os.environ["RUN_ID"]
+operator_filter = os.environ.get("OPERATOR_ID") or ""
+operator_label = operator_filter or "all"
+out_dir.mkdir(parents=True, exist_ok=True)
+
+def read_review_output(path):
+    if not path.exists():
+        return ""
+    try:
+        return path.read_text(errors="replace")
+    except OSError:
+        return ""
+
+def summarize_review(result, review_output):
+    raw_result = result.get("review_result") or ""
+    exit_code = result.get("exit_code")
+    exit_code_text = str(exit_code) if exit_code is not None else ""
+
+    def raw_finding_count():
+        lowered = raw_result.lower()
+        for pattern in (
+            r"\b(\d+)\s+(?:accepted\s+)?(?:actionable\s+)?findings?\b",
+            r"\bfindings?\s*[:=]\s*(\d+)\b",
+        ):
+            match = re.search(pattern, lowered)
+            if match:
+                return int(match.group(1))
+        return None
+
+    def output_finding_count():
+        clean_pattern = r"no (?:accepted/actionable |actionable |accepted )?findings reported\.?"
+        for line in review_output.splitlines():
+            normalized = re.sub(r"^[-*]\s+", "", line.strip().lower())
+            if not normalized:
+                continue
+            match = re.match(r"autoreview findings:\s*(\d+)\b", normalized)
+            if match:
+                return int(match.group(1))
+            if re.fullmatch(clean_pattern, normalized):
+                return 0
+        return None
+
+    finding_count = output_finding_count()
+    source = "review_output" if finding_count is not None else "unknown"
+    if finding_count is None:
+        finding_count = raw_finding_count()
+        source = "review_result" if finding_count is not None else "unknown"
+
+    if exit_code_text and exit_code_text not in {"0", "1"}:
+        return {
+            "review_clean": None,
+            "review_finding_count": None,
+            "review_summary": f"unknown; run failed (exit {exit_code_text})",
+            "review_summary_source": "exit_code",
+        }
+
+    if exit_code_text in {"0", "1"}:
+        exit_clean = exit_code_text == "0"
+        if finding_count is not None and (finding_count == 0) != exit_clean:
+            return {
+                "review_clean": None,
+                "review_finding_count": finding_count,
+                "review_summary": f"conflict; exit_code={exit_code_text}, text={finding_count} findings",
+                "review_summary_source": f"{source}+exit_code",
+            }
+        if exit_clean:
+            count = finding_count if finding_count is not None else 0
+            return {
+                "review_clean": True,
+                "review_finding_count": count,
+                "review_summary": f"clean; {count} findings",
+                "review_summary_source": source if finding_count is not None else "exit_code",
+            }
+        count_text = finding_count if finding_count is not None else "unknown"
+        return {
+            "review_clean": False,
+            "review_finding_count": finding_count,
+            "review_summary": f"actionable; {count_text} findings",
+            "review_summary_source": source if finding_count is not None else "exit_code",
+        }
+
+    if finding_count is not None:
+        clean = finding_count == 0
+        if clean:
+            review_summary = f"clean; {finding_count} findings"
+        else:
+            review_summary = f"actionable; {finding_count} findings"
+    else:
+        clean = None
+        review_summary = "unknown"
+    return {
+        "review_clean": clean,
+        "review_finding_count": finding_count,
+        "review_summary": review_summary,
+        "review_summary_source": source,
+    }
+
+state_dirs = [
+    ("requests", "queued"),
+    ("running", "running"),
+    ("needs-human", "needs-human"),
+    ("done", "completed"),
+    ("failed", "failed"),
+]
+status_order = ["queued", "running", "needs-human", "completed", "failed"]
+items = []
+unfiltered_count = 0
+
+for dirname, status in state_dirs:
+    folder = root / dirname
+    for path in sorted(folder.glob("*.json")) if folder.exists() else []:
+        try:
+            raw = path.read_text()
+        except OSError:
+            continue
+        unfiltered_count += 1
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            data = {"id": path.stem}
+        item_operator = data.get("operator_id") or "legacy_missing"
+        if operator_filter and item_operator != operator_filter:
+            continue
+        item_id = data.get("id") or path.stem
+        item = {
+            "id": item_id,
+            "status": status,
+            "queue_state": dirname,
+            "path": str(path),
+            "operator_id": item_operator,
+            "repo": data.get("repo") or "",
+            "mode": data.get("mode") or "",
+            "engine": data.get("engine") or "",
+            "model": data.get("model") or "",
+            "reviewers": data.get("reviewers") or "",
+            "source": data.get("source") or "",
+            "pr_url": data.get("pr_url") or "",
+            "commit_sha": data.get("commit_sha") or data.get("submitted_head") or "",
+            "submitted_head": data.get("submitted_head") or "",
+            "submitted_at_utc": data.get("submitted_at_utc") or "",
+        }
+        result_path = root / "runs" / item_id / "result.json"
+        review_output_path = root / "runs" / item_id / "review_output.txt"
+        proof_path = root / "runs" / item_id
+        result = {}
+        if result_path.exists():
+            try:
+                result = json.loads(result_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                result = {}
+            item["review_result"] = result.get("review_result") or ""
+            item["exit_code"] = result.get("exit_code")
+            item["wall_s"] = result.get("wall_s")
+            item["result_path"] = str(result_path)
+        review_output = read_review_output(review_output_path)
+        if review_output_path.exists():
+            item["review_output_path"] = str(review_output_path)
+        if proof_path.exists():
+            item["proof_path"] = str(proof_path)
+        item.update(summarize_review(result, review_output))
+        items.append(item)
+
+counts = {status: sum(1 for item in items if item["status"] == status) for status in status_order}
+by_operator = {}
+for item in items:
+    by_operator[item["operator_id"]] = by_operator.get(item["operator_id"], 0) + 1
+
+summary = {
+    "schema": "spark_openclaw_queue_status.v1",
+    "lane": "spark-openclaw-autoreview",
+    "host": "spark-2",
+    "run_id": run_id,
+    "queue_root": str(root),
+    "operator_id": operator_filter,
+    "filtered": bool(operator_filter),
+    "count": len(items),
+    "unfiltered_count": unfiltered_count,
+    "counts": counts,
+    "operators": by_operator,
+    "items": items,
+}
+(out_dir / "QUEUE_STATUS.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+(out_dir / "STATE.md").write_text(
+    "\n".join([
+        "# Spark OpenClaw Queue Status State",
+        "",
+        "status: completed",
+        f"run_id: {run_id}",
+        f"queue_root: {root}",
+        f"operator_id: {operator_label}",
+        f"count: {len(items)}",
+        f"unfiltered_count: {unfiltered_count}",
+        "",
+    ])
+)
+
+proof_lines = [
+    "# Spark OpenClaw Queue Status Proof",
+    "",
+    "- lane: spark-openclaw-autoreview",
+    "- host: spark-2",
+    f"- run_id: {run_id}",
+    f"- queue_root: {root}",
+    "- operator_id: {}".format(operator_filter or "all"),
+    "- result: completed",
+    "- queue_status_json: QUEUE_STATUS.json",
+    "- state: STATE.md",
+    "- filtered_count: {}".format(len(items)),
+    "- unfiltered_count: {}".format(unfiltered_count),
+]
+for status in status_order:
+    proof_lines.append("- {}: {}".format(status, counts.get(status, 0)))
+proof_lines.extend([
+    "- secrets_inspected: no",
+    "- edits: no",
+    "- deploys: no",
+    "- sends: no",
+    "- watcher_restarted: no",
+    "- model_launched: no",
+    "",
+    "This is a read-only summary of Spark-2 OpenClaw queue request metadata.",
+    "It does not submit a review, drain the queue, restart services, launch a model, or edit reviewed worktrees.",
+    "",
+])
+(out_dir / "PROOF.md").write_text("\n".join(proof_lines))
+PY
+'
+  queue_status_errexit=0
+  case "$-" in *e*) queue_status_errexit=1; set +e ;; esac
+  status_out="$(ssh -o BatchMode=yes -o ConnectTimeout=10 -- "$TARGET" "bash -s -- $(printf '%q' "$QUEUE_STATE") $(printf '%q' "$run_id") $(printf '%q' "$DRY") $(printf '%q' "$OPERATOR_ID")" <<<"$queue_status_script" 2>&1)"
+  status_rc=$?
+  [ "$queue_status_errexit" = "0" ] || set -e
+  printf '%s\n' "$status_out" >&2
+
+  if [ "$DRY" = "1" ]; then
+    if [ "$status_rc" -eq 0 ]; then
+      LANE_PROOF_STATUS="launch_only"
+      lane_emit dry "" "" "$PR_URL" "spark-openclaw-autoreview queue status validated on $TARGET; operator_id=${OPERATOR_ID:-all}" ""
+      exit 0
+    fi
+    LANE_PROOF_STATUS="failed"
+    lane_emit failed "" "" "$PR_URL" "spark-openclaw-autoreview queue status dry probe failed rc=$status_rc" "see stderr"
+    exit 3
+  fi
+
+  rsync -az -- "$TARGET:~/Developer/_machine-runs/spark-openclaw-queue-status-runs/$run_id/" "$local_dir/" >/dev/null 2>&1 || true
+  proof_rel="runs/spark-openclaw-autoreview-runs/$run_id/PROOF.md"
+  status_file="$local_dir/QUEUE_STATUS.json"
+  if [ "$status_rc" -ne 0 ] || [ ! -f "$status_file" ] || [ ! -f "$local_dir/PROOF.md" ]; then
+    LANE_PROOF_STATUS="failed"
+    lane_emit failed "$proof_rel" "" "$PR_URL" "spark-openclaw-autoreview queue status failed rc=$status_rc" "missing queue status proof"
+    exit 3
+  fi
+  status_count="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("count") or 0)' "$status_file" 2>/dev/null || printf '0')"
+  LANE_PROOF_STATUS="closed"
+  LANE_TERMINAL_PROOF="$proof_rel"
+  lane_emit completed "$proof_rel" "" "$PR_URL" "spark-openclaw-autoreview queue status fetched on $TARGET; operator_id=${OPERATOR_ID:-all}; count=$status_count" ""
+  exit 0
+fi
+
+if [ "$ACTIVATION_PREFLIGHT" = "1" ]; then
+  activation_preflight_script='
+set -u
+run_id="$1"
+queue_state="$2"
+dry="$3"
+repo="$HOME/Developer/spark-dgx"
+lane="$repo/lanes/openclaw-review"
+install_script="$lane/systemd/install.sh"
+
+if [ "$dry" = "1" ]; then
+  command -v python3 >/dev/null 2>&1 || { echo "spark-openclaw-activation-preflight: missing python3" >&2; exit 22; }
+  [ -x "$install_script" ] || { echo "spark-openclaw-activation-preflight: missing installer $install_script" >&2; exit 23; }
+  "$install_script" --dry-run >/dev/null 2>&1 || { echo "spark-openclaw-activation-preflight: install dry-run failed" >&2; exit 24; }
+  command -v systemctl >/dev/null 2>&1 || { echo "spark-openclaw-activation-preflight: missing systemctl" >&2; exit 25; }
+  printf "activation_preflight=ready_human_gated\n"
+  printf "installer=%s\n" "$install_script"
+  exit 0
+fi
+
+out_dir="$HOME/Developer/_machine-runs/spark-openclaw-activation-preflight-runs/$run_id"
+mkdir -p "$out_dir"
+QUEUE_STATE="$queue_state" RUN_ID="$run_id" OUT_DIR="$out_dir" python3 - <<'"'"'PY'"'"'
+import json
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+home = Path.home()
+run_id = os.environ["RUN_ID"]
+out_dir = Path(os.environ["OUT_DIR"])
+queue_state = os.environ.get("QUEUE_STATE") or ""
+repo = home / "Developer" / "spark-dgx"
+lane = repo / "lanes" / "openclaw-review"
+queue_root = Path(queue_state) if queue_state else home / ".local" / "state" / "openclaw-review"
+service_name = "openclaw-review-watch.service"
+
+paths = {
+    "repo": repo,
+    "lane": lane,
+    "runner": lane / "autoreview-run.sh",
+    "requester": lane / "autoreview-request.sh",
+    "watcher": lane / "autoreview-watch.sh",
+    "heartbeat": lane / "heartbeat-post.sh",
+    "installer": lane / "systemd" / "install.sh",
+    "source_unit": lane / "systemd" / service_name,
+    "installed_unit": home / ".config" / "systemd" / "user" / service_name,
+    "installed_watcher": home / ".local" / "bin" / "autoreview-watch.sh",
+    "installed_runner": home / ".local" / "bin" / "autoreview-run.sh",
+}
+
+def executable(path: Path) -> bool:
+    return path.exists() and os.access(path, os.X_OK)
+
+required_exec = ["runner", "requester", "watcher", "heartbeat", "installer"]
+required_files = ["source_unit"]
+missing_required = [
+    name for name in required_exec if not executable(paths[name])
+] + [
+    name for name in required_files if not paths[name].exists()
+]
+
+def run_readonly(cmd: list[str], timeout: int = 10) -> dict:
+    def text_or_empty(value) -> str:
+        if isinstance(value, bytes):
+            return value.decode(errors="replace")
+        return value or ""
+
+    try:
+        result = subprocess.run(
+            cmd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+        )
+    except FileNotFoundError:
+        return {"available": False, "rc": None, "stdout": "", "stderr": "command not found"}
+    except subprocess.TimeoutExpired as exc:
+        stderr = text_or_empty(exc.stderr)
+        if stderr:
+            stderr += "\n"
+        stderr += "timeout"
+        return {
+            "available": True,
+            "rc": 124,
+            "stdout": text_or_empty(exc.stdout),
+            "stderr": stderr,
+        }
+    return {
+        "available": True,
+        "rc": result.returncode,
+        "stdout": result.stdout.strip(),
+        "stderr": result.stderr.strip(),
+    }
+
+install_stdout = out_dir / "install-dry-run.txt"
+install_stderr = out_dir / "install-dry-run.stderr"
+if executable(paths["installer"]):
+    install = run_readonly([str(paths["installer"]), "--dry-run"], timeout=20)
+else:
+    install = {"available": False, "rc": None, "stdout": "", "stderr": "installer missing or not executable"}
+install_stdout.write_text((install.get("stdout") or "") + "\n")
+install_stderr.write_text((install.get("stderr") or "") + "\n")
+
+systemctl_available = shutil.which("systemctl") is not None
+service_active = run_readonly(["systemctl", "--user", "is-active", service_name]) if systemctl_available else {"available": False, "rc": None, "stdout": "unknown", "stderr": "systemctl missing"}
+service_enabled = run_readonly(["systemctl", "--user", "is-enabled", service_name]) if systemctl_available else {"available": False, "rc": None, "stdout": "unknown", "stderr": "systemctl missing"}
+show_user = run_readonly(["loginctl", "show-user", os.environ.get("USER", ""), "-p", "Linger"]) if shutil.which("loginctl") else {"available": False, "rc": None, "stdout": "unknown", "stderr": "loginctl missing"}
+
+queue_dirs = ["requests", "running", "needs-human", "done", "failed", "runs"]
+queue_counts = {}
+for dirname in queue_dirs:
+    folder = queue_root / dirname
+    if folder.exists():
+        queue_counts[dirname] = len(list(folder.glob("*.json"))) if dirname != "runs" else len([p for p in folder.iterdir() if p.is_dir()])
+    else:
+        queue_counts[dirname] = None
+
+source_ready = not missing_required
+install_dry_run_ok = install.get("rc") == 0
+service_manager_ready = systemctl_available
+activation_ready = source_ready and install_dry_run_ok and service_manager_ready
+service_state = {
+    "systemctl_available": systemctl_available,
+    "active": service_active.get("stdout") or "unknown",
+    "active_rc": service_active.get("rc"),
+    "enabled": service_enabled.get("stdout") or "unknown",
+    "enabled_rc": service_enabled.get("rc"),
+    "installed_unit_present": paths["installed_unit"].exists(),
+    "installed_watcher_present": paths["installed_watcher"].exists(),
+    "installed_runner_present": paths["installed_runner"].exists(),
+    "linger": show_user.get("stdout") or "unknown",
+    "linger_rc": show_user.get("rc"),
+}
+status_label = "ready-human-gated" if activation_ready else "blocked"
+missing_required_label = "none" if not missing_required else ", ".join(missing_required)
+service_active_label = service_state["active"]
+service_enabled_label = service_state["enabled"]
+installed_unit_present = str(service_state["installed_unit_present"]).lower()
+queue_root_exists = str(queue_root.exists()).lower()
+
+summary = {
+    "schema": "spark_openclaw_activation_preflight.v1",
+    "lane": "spark-openclaw-autoreview",
+    "host": "spark-2",
+    "run_id": run_id,
+    "source_repo": str(repo),
+    "queue_root": str(queue_root),
+    "paths": {name: str(path) for name, path in paths.items()},
+    "missing_required": missing_required,
+    "source_ready": source_ready,
+    "install_dry_run_ok": install_dry_run_ok,
+    "install_dry_run_stdout": "install-dry-run.txt",
+    "install_dry_run_stderr": "install-dry-run.stderr",
+    "service_manager_ready": service_manager_ready,
+    "service_state": service_state,
+    "queue_root_exists": queue_root.exists(),
+    "queue_counts": queue_counts,
+    "activation_ready": activation_ready,
+    "human_gate_remaining": "service install/refresh requires explicit Bobby approval",
+    "service_mutation_performed": False,
+    "service_reload_performed": False,
+    "service_restart_performed": False,
+    "service_enable_performed": False,
+    "env_file_inspected": False,
+    "secrets_inspected": False,
+    "model_launched": False,
+    "review_submitted": False,
+    "watcher_drained": False,
+    "allowed_next_action_after_gate": "lanes/openclaw-review/systemd/install.sh --yes on Spark-2, then submit one queued request and fetch terminal status",
+}
+(out_dir / "ACTIVATION_PREFLIGHT.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+(out_dir / "STATE.md").write_text(
+    "\n".join([
+        "# Spark OpenClaw Activation Preflight State",
+        "",
+        f"status: {status_label}",
+        f"run_id: {run_id}",
+        f"source_ready: {str(source_ready).lower()}",
+        f"install_dry_run_ok: {str(install_dry_run_ok).lower()}",
+        f"service_manager_ready: {str(service_manager_ready).lower()}",
+        f"service_active: {service_active_label}",
+        f"service_enabled: {service_enabled_label}",
+        "human_gate_remaining: service install/refresh requires explicit Bobby approval",
+        "",
+    ])
+)
+
+proof = [
+    "# Spark OpenClaw Activation Preflight Proof",
+    "",
+    "- lane: spark-openclaw-autoreview",
+    "- host: spark-2",
+    f"- run_id: {run_id}",
+    f"- queue_root: {queue_root}",
+    f"- result: {status_label}",
+    f"- source_ready: {str(source_ready).lower()}",
+    f"- missing_required: {missing_required_label}",
+    f"- install_dry_run_ok: {str(install_dry_run_ok).lower()}",
+    "- install_dry_run_stdout: install-dry-run.txt",
+    "- install_dry_run_stderr: install-dry-run.stderr",
+    f"- systemctl_available: {str(systemctl_available).lower()}",
+    f"- service_active: {service_active_label}",
+    f"- service_enabled: {service_enabled_label}",
+    f"- installed_unit_present: {installed_unit_present}",
+    f"- queue_root_exists: {queue_root_exists}",
+    "- activation_preflight_json: ACTIVATION_PREFLIGHT.json",
+    "- state: STATE.md",
+    "- service_mutation_performed: no",
+    "- service_reload_performed: no",
+    "- service_restart_performed: no",
+    "- service_enable_performed: no",
+    "- env_file_inspected: no",
+    "- secrets_inspected: no",
+    "- model_launched: no",
+    "- review_submitted: no",
+    "- watcher_drained: no",
+    "- human_gate_remaining: service install/refresh requires explicit Bobby approval",
+    "",
+    "This preflight is read-only except for writing this proof packet.",
+    "It previews the Spark-side systemd installer with --dry-run and records whether the source/service prerequisites are ready for a later human-approved activation.",
+    "",
+]
+(out_dir / "PROOF.md").write_text("\n".join(proof))
+raise SystemExit(0 if activation_ready else 3)
+PY
+'
+  activation_errexit=0
+  case "$-" in *e*) activation_errexit=1; set +e ;; esac
+  status_out="$(ssh -o BatchMode=yes -o ConnectTimeout=10 -- "$TARGET" "bash -s -- $(printf '%q' "$run_id") $(printf '%q' "$QUEUE_STATE") $(printf '%q' "$DRY")" <<<"$activation_preflight_script" 2>&1)"
+  status_rc=$?
+  [ "$activation_errexit" = "0" ] || set -e
+  printf '%s\n' "$status_out" >&2
+
+  if [ "$DRY" = "1" ]; then
+    if [ "$status_rc" -eq 0 ]; then
+      LANE_PROOF_STATUS="launch_only"
+      lane_emit dry "" "" "$PR_URL" "spark-openclaw-autoreview activation preflight dry validated on $TARGET" "service activation remains human-gated"
+      exit 0
+    fi
+    LANE_PROOF_STATUS="failed"
+    lane_emit failed "" "" "$PR_URL" "spark-openclaw-autoreview activation preflight dry failed rc=$status_rc" "see stderr"
+    exit 3
+  fi
+
+  rsync -az -- "$TARGET:~/Developer/_machine-runs/spark-openclaw-activation-preflight-runs/$run_id/" "$local_dir/" >/dev/null 2>&1 || true
+  proof_rel="runs/spark-openclaw-autoreview-runs/$run_id/PROOF.md"
+  preflight_file="$local_dir/ACTIVATION_PREFLIGHT.json"
+  if [ ! -f "$preflight_file" ] || [ ! -f "$local_dir/PROOF.md" ]; then
+    LANE_PROOF_STATUS="failed"
+    lane_emit failed "$proof_rel" "" "$PR_URL" "spark-openclaw-autoreview activation preflight failed rc=$status_rc" "missing activation preflight proof"
+    exit 3
+  fi
+  activation_ready="$(python3 -c 'import json,sys; print("yes" if json.load(open(sys.argv[1])).get("activation_ready") else "no")' "$preflight_file" 2>/dev/null || printf 'no')"
+  LANE_TERMINAL_PROOF="$proof_rel"
+  if [ "$activation_ready" = "yes" ]; then
+    LANE_PROOF_STATUS="closed"
+    lane_emit completed "$proof_rel" "" "$PR_URL" "spark-openclaw-autoreview activation preflight ready on $TARGET" "service activation remains human-gated"
+    exit 0
+  fi
+  LANE_PROOF_STATUS="closed"
+  lane_emit needs-human "$proof_rel" "" "$PR_URL" "spark-openclaw-autoreview activation preflight blocked on $TARGET" "inspect ACTIVATION_PREFLIGHT.json before requesting service activation"
+  exit 3
+fi
+
+REMOTE_AGENT_SKILLS_DIR="${SPARK_OPENCLAW_AGENT_SKILLS_DIR:-}"
+remote_agent_skills_prefix=""
+if [ -n "$REMOTE_AGENT_SKILLS_DIR" ]; then
+  if [ "$QUEUE" = "1" ]; then
+    echo "run.sh: SPARK_OPENCLAW_AGENT_SKILLS_DIR is not supported with --queue; update the Spark watcher contract or use --watch-once/direct proof" >&2
+    exit 2
+  fi
+  remote_agent_skills_prefix="AGENT_SKILLS_DIR=$(printf '%q' "$REMOTE_AGENT_SKILLS_DIR") "
+fi
+
+probe_script='
+set -u
+worktree="$1"
+engine="$2"
+reviewers="$3"
+watch_once="$4"
+queue_state="${5:-}"
+runner="$HOME/Developer/spark-dgx/lanes/openclaw-review/autoreview-run.sh"
+requester="$HOME/Developer/spark-dgx/lanes/openclaw-review/autoreview-request.sh"
+watcher="$HOME/Developer/spark-dgx/lanes/openclaw-review/autoreview-watch.sh"
+skills="${AGENT_SKILLS_DIR:-}"
+if [ -n "$skills" ]; then
+  [ -x "$skills/skills/autoreview/scripts/autoreview" ] || exit 15
+else
+  for candidate in "$HOME/Developer/repos/openclaw/agent-skills" "$HOME/Developer/agent-skills"; do
+    if [ -x "$candidate/skills/autoreview/scripts/autoreview" ]; then
+      skills="$candidate"
+      break
+    fi
+  done
+fi
+command -v bash >/dev/null || exit 12
+[ -x "$runner" ] || exit 13
+[ -x "$requester" ] || exit 19
+[ "$watch_once" != "1" ] || [ -x "$watcher" ] || exit 20
+if [ "$watch_once" != "1" ]; then
+  command -v git >/dev/null || exit 11
+  git -C "$worktree" rev-parse --show-toplevel >/dev/null 2>&1 || exit 14
+else
+  [ -d "$queue_state" ] || { echo "spark-openclaw-watch-once: queue root not found: $queue_state" >&2; exit 21; }
+fi
+[ -n "$skills" ] || exit 15
+[ -x "$skills/skills/autoreview/scripts/autoreview" ] || exit 16
+requested="$engine"
+[ -n "$reviewers" ] && requested="$(printf "%s" "$reviewers" | tr "," " ")"
+needs_cli_bootstrap=0
+for tool in $requested; do
+  command -v "$tool" >/dev/null 2>&1 || needs_cli_bootstrap=1
+done
+if [ "$needs_cli_bootstrap" = "1" ] && [ -s "$HOME/.nvm/nvm.sh" ]; then
+  export NVM_DIR="$HOME/.nvm"
+  . "$NVM_DIR/nvm.sh" >/dev/null 2>&1 || true
+  nvm use --silent default >/dev/null 2>&1 || nvm use --silent node >/dev/null 2>&1 || true
+fi
+for tool in $requested; do
+  case "$tool" in
+    codex|claude) ;;
+    *) exit 18 ;;
+  esac
+  command -v "$tool" >/dev/null 2>&1 || exit 17
+done
+printf "runner=%s\n" "$runner"
+printf "requester=%s\n" "$requester"
+printf "watcher=%s\n" "$watcher"
+printf "agent_skills_dir=%s\n" "$skills"
+printf "requested_reviewers=%s\n" "$requested"
+if [ "$watch_once" != "1" ]; then
+  printf "worktree=%s\n" "$(git -C "$worktree" rev-parse --show-toplevel)"
+  printf "head=%s\n" "$(git -C "$worktree" rev-parse --short HEAD)"
+  printf "head_full=%s\n" "$(git -C "$worktree" rev-parse HEAD)"
+else
+  printf "worktree=%s\n" ""
+  printf "head=%s\n" ""
+  printf "head_full=%s\n" ""
+fi
+'
+
+probe_out="$(ssh -o BatchMode=yes -o ConnectTimeout=10 -- "$TARGET" "${remote_agent_skills_prefix}bash -s -- $(printf '%q' "$REMOTE_WORKTREE") $(printf '%q' "$ENGINE") $(printf '%q' "$REVIEWERS") $(printf '%q' "$WATCH_ONCE") $(printf '%q' "$QUEUE_STATE")" <<<"$probe_script" 2>&1)"
+probe_rc=$?
+printf '%s\n' "$probe_out" >&2
+
+if [ "$probe_rc" -ne 0 ]; then
+  probe_blocker="ssh/runner/helper/worktree/tool probe failed"
+  case "$probe_out" in
+    *"Host key verification failed."*)
+      probe_blocker="spark_ssh_host_key_blocked: run from CP-1 or provision the operator terminal's spark-2 SSH alias/trust"
+      ;;
+    *"Permission denied"*)
+      probe_blocker="spark_ssh_auth_blocked: run from CP-1 or provision Spark-2 SSH auth for this operator terminal"
+      ;;
+    *"spark-openclaw-watch-once: queue root not found:"*)
+      probe_blocker="spark_openclaw_queue_root_missing: check --queue-state path on Spark-2"
+      ;;
+  esac
+  LANE_PROOF_STATUS="failed"
+  lane_emit failed "" "" "$PR_URL" "spark-openclaw-autoreview dry probe failed rc=$probe_rc" "$probe_blocker"
+  exit 3
+fi
+
+RESOLVED_RUNNER="$(printf '%s\n' "$probe_out" | awk -F= '/^runner=/{print $2; exit}')"
+RESOLVED_REQUESTER="$(printf '%s\n' "$probe_out" | awk -F= '/^requester=/{print $2; exit}')"
+RESOLVED_WATCHER="$(printf '%s\n' "$probe_out" | awk -F= '/^watcher=/{print $2; exit}')"
+RESOLVED_SKILLS="$(printf '%s\n' "$probe_out" | awk -F= '/^agent_skills_dir=/{print $2; exit}')"
+RESOLVED_HEAD_FULL="$(printf '%s\n' "$probe_out" | awk -F= '/^head_full=/{print $2; exit}')"
+
+if [ "$DRY" = "1" ]; then
+  LANE_PROOF_STATUS="launch_only"
+  if [ "$QUEUE" = "1" ]; then
+    lane_emit dry "" "$RESOLVED_HEAD_FULL" "$PR_URL" "spark-openclaw-autoreview queue producer validated on $TARGET; worktree=$REMOTE_WORKTREE" ""
+  elif [ "$WATCH_ONCE" = "1" ]; then
+    lane_emit dry "" "$RESOLVED_HEAD_FULL" "$PR_URL" "spark-openclaw-autoreview watcher validated on $TARGET; queue_state=$QUEUE_STATE" ""
+  else
+    lane_emit dry "" "$RESOLVED_HEAD_FULL" "$PR_URL" "spark-openclaw-autoreview validated on $TARGET; worktree=$REMOTE_WORKTREE" ""
+  fi
+  exit 0
+fi
+
+if [ "$WATCH_ONCE" = "1" ]; then
+  [ -n "$QUEUE_STATE" ] || { echo "run.sh: --watch-once requires --queue-state <spark-state-root>" >&2; exit 2; }
+  watch_script='
+set -u
+watcher="$1"
+queue_state="$2"
+run_id="$3"
+skills="$4"
+out_dir="$HOME/Developer/_machine-runs/spark-openclaw-watcher-once-runs/$run_id"
+mkdir -p "$out_dir"
+before="$out_dir/before.json"
+after="$out_dir/after.json"
+fairness="$out_dir/FAIRNESS.json"
+stdout="$out_dir/watcher.stdout"
+stderr="$out_dir/watcher.stderr"
+
+[ -d "$queue_state" ] || { echo "spark-openclaw-watch-once: queue root not found: $queue_state" >&2; exit 21; }
+
+snapshot() {
+  root="$1" python3 - <<'"'"'PY'"'"'
+import json
+import os
+import re
+from pathlib import Path
+
+root = Path(os.environ["root"])
+states = {
+    "requests": "queued",
+    "running": "running",
+    "done": "completed",
+    "needs-human": "needs_human",
+    "failed": "failed",
+}
+items = []
+
+def read_review_output(path):
+    if not path.exists():
+        return ""
+    try:
+        return path.read_text(errors="replace")
+    except OSError:
+        return ""
+
+def summarize_review(result, review_output):
+    raw_result = result.get("review_result") or ""
+    exit_code = result.get("exit_code")
+    exit_code_text = str(exit_code) if exit_code is not None else ""
+
+    def raw_finding_count():
+        lowered = raw_result.lower()
+        for pattern in (
+            r"\b(\d+)\s+(?:accepted\s+)?(?:actionable\s+)?findings?\b",
+            r"\bfindings?\s*[:=]\s*(\d+)\b",
+        ):
+            match = re.search(pattern, lowered)
+            if match:
+                return int(match.group(1))
+        return None
+
+    def output_finding_count():
+        clean_pattern = r"no (?:accepted/actionable |actionable |accepted )?findings reported\.?"
+        for line in review_output.splitlines():
+            normalized = re.sub(r"^[-*]\s+", "", line.strip().lower())
+            if not normalized:
+                continue
+            match = re.match(r"autoreview findings:\s*(\d+)\b", normalized)
+            if match:
+                return int(match.group(1))
+            if re.fullmatch(clean_pattern, normalized):
+                return 0
+        return None
+
+    finding_count = output_finding_count()
+    source = "review_output" if finding_count is not None else "unknown"
+    if finding_count is None:
+        finding_count = raw_finding_count()
+        source = "review_result" if finding_count is not None else "unknown"
+
+    if exit_code_text and exit_code_text not in {"0", "1"}:
+        return {
+            "review_clean": None,
+            "review_finding_count": None,
+            "review_summary": f"unknown; run failed (exit {exit_code_text})",
+            "review_summary_source": "exit_code",
+        }
+
+    if exit_code_text in {"0", "1"}:
+        exit_clean = exit_code_text == "0"
+        if finding_count is not None and (finding_count == 0) != exit_clean:
+            return {
+                "review_clean": None,
+                "review_finding_count": finding_count,
+                "review_summary": f"conflict; exit_code={exit_code_text}, text={finding_count} findings",
+                "review_summary_source": f"{source}+exit_code",
+            }
+        if exit_clean:
+            count = finding_count if finding_count is not None else 0
+            return {
+                "review_clean": True,
+                "review_finding_count": count,
+                "review_summary": f"clean; {count} findings",
+                "review_summary_source": source if finding_count is not None else "exit_code",
+            }
+        count_text = finding_count if finding_count is not None else "unknown"
+        return {
+            "review_clean": False,
+            "review_finding_count": finding_count,
+            "review_summary": f"actionable; {count_text} findings",
+            "review_summary_source": source if finding_count is not None else "exit_code",
+        }
+
+    if finding_count is not None:
+        clean = finding_count == 0
+        if clean:
+            review_summary = f"clean; {finding_count} findings"
+        else:
+            review_summary = f"actionable; {finding_count} findings"
+    else:
+        clean = None
+        review_summary = "unknown"
+    return {
+        "review_clean": clean,
+        "review_finding_count": finding_count,
+        "review_summary": review_summary,
+        "review_summary_source": source,
+    }
+
+for dirname, status in states.items():
+    folder = root / dirname
+    for path in sorted(folder.glob("*.json")) if folder.exists() else []:
+        try:
+            raw = path.read_text()
+        except OSError:
+            continue
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            data = {"id": path.stem}
+        item = {
+            "id": data.get("id") or path.stem,
+            "status": status,
+            "queue_state": dirname,
+            "path": str(path),
+            "repo": data.get("repo") or "",
+            "engine": data.get("engine") or "",
+            "reviewers": data.get("reviewers") or "",
+            "source": data.get("source") or "",
+            "pr_url": data.get("pr_url") or "",
+            "operator_id": data.get("operator_id") or "legacy_missing",
+            "commit_sha": data.get("commit_sha") or data.get("submitted_head") or "",
+            "submitted_head": data.get("submitted_head") or "",
+            "submitted_at_utc": data.get("submitted_at_utc") or "",
+        }
+        result_path = root / "runs" / item["id"] / "result.json"
+        review_output_path = root / "runs" / item["id"] / "review_output.txt"
+        result = {}
+        if result_path.exists():
+            try:
+                result = json.loads(result_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                result = {}
+            item["review_result"] = result.get("review_result") or ""
+            item["exit_code"] = result.get("exit_code")
+            item["wall_s"] = result.get("wall_s")
+            item["proof_path"] = str(root / "runs" / item["id"])
+        if review_output_path.exists():
+            item["review_output_path"] = str(review_output_path)
+        item.update(summarize_review(result, read_review_output(review_output_path)))
+        items.append(item)
+print(json.dumps({
+    "root": str(root),
+    "counts": {state: sum(1 for item in items if item["status"] == state) for state in sorted(set(states.values()))},
+    "items": items,
+}, indent=2, sort_keys=True))
+PY
+}
+
+snapshot "$queue_state" > "$before"
+OPENCLAW_REVIEW_STATE="$queue_state" AGENT_SKILLS_DIR="$skills" "$watcher" --once > "$stdout" 2> "$stderr"
+rc=$?
+snapshot "$queue_state" > "$after"
+terminal_status="$(python3 - "$before" "$after" "$stderr" "$fairness" <<'PY'
+import json
+import re
+import sys
+
+before = json.load(open(sys.argv[1]))
+after = json.load(open(sys.argv[2]))
+stderr_path = sys.argv[3]
+fairness_path = sys.argv[4]
+counts = after.get("counts") or {}
+before_items = before.get("items") or []
+after_items = after.get("items") or []
+before_status_by_id = {item.get("id"): item.get("status") for item in before_items}
+before_by_id = {item.get("id"): item for item in before_items}
+after_by_id = {item.get("id"): item for item in after_items}
+before_queued_ids = [item.get("id") for item in before_items if item.get("status") == "queued" and item.get("id")]
+terminal_statuses = {"failed", "needs_human", "completed"}
+completed_or_transitioned_terminal = []
+terminal_by_id = {}
+for item in after.get("items") or []:
+    item_id = item.get("id")
+    status = item.get("status")
+    before_status = before_status_by_id.get(item_id)
+    if status not in terminal_statuses:
+        continue
+    if item_id not in before_status_by_id or before_status in {"queued", "running"}:
+        completed_or_transitioned_terminal.append(item)
+    if item_id in before_queued_ids:
+        terminal_by_id[item_id] = status
+terminal_statuses_after_watch = {item.get("status") for item in completed_or_transitioned_terminal}
+
+claim_events = []
+running_order = []
+terminal_order = []
+serialized_claim_log = True
+open_running = None
+try:
+    lines = open(stderr_path, errors="replace").read().splitlines()
+except OSError:
+    lines = []
+for line in lines:
+    running_match = re.search(r"\b(req-[A-Za-z0-9T._:-]+): running autoreview\b", line)
+    terminal_match = re.search(r"\b(req-[A-Za-z0-9T._:-]+): (done|needs-human|failed) rc=", line)
+    missing_match = re.search(r"\b(req-[A-Za-z0-9T._:-]+): repo not found:", line)
+    if running_match:
+        item_id = running_match.group(1)
+        if open_running is not None:
+            serialized_claim_log = False
+        open_running = item_id
+        running_order.append(item_id)
+        claim_events.append({"event": "running", "id": item_id, "line": line})
+    elif terminal_match:
+        item_id = terminal_match.group(1)
+        status = terminal_match.group(2).replace("-", "_")
+        if open_running not in (None, item_id):
+            serialized_claim_log = False
+        open_running = None
+        terminal_order.append(item_id)
+        claim_events.append({"event": status, "id": item_id, "line": line})
+    elif missing_match:
+        item_id = missing_match.group(1)
+        if open_running not in (None, item_id):
+            serialized_claim_log = False
+        open_running = None
+        terminal_order.append(item_id)
+        claim_events.append({"event": "failed", "id": item_id, "line": line})
+if open_running is not None:
+    serialized_claim_log = False
+
+lost_requests = [item_id for item_id in before_queued_ids if item_id not in after_by_id]
+non_terminal_requests = [
+    item_id for item_id in before_queued_ids
+    if after_by_id.get(item_id, {}).get("status") not in terminal_statuses
+]
+operator_by_id = {
+    item_id: (before_by_id.get(item_id, {}).get("operator_id") or "legacy_missing")
+    for item_id in before_queued_ids
+}
+operators_preserved = all(
+    (after_by_id.get(item_id, {}).get("operator_id") or "legacy_missing") == operator_by_id[item_id]
+    for item_id in before_queued_ids
+    if item_id in after_by_id
+)
+duplicate_claims = len(running_order) != len(set(running_order))
+queued_requests_observed = bool(before_queued_ids)
+running_order_set = set(running_order)
+terminal_order_set = set(terminal_order)
+claim_log_covers_queued_requests = all(item_id in running_order_set for item_id in before_queued_ids)
+terminal_log_covers_queued_requests = all(item_id in terminal_order_set for item_id in before_queued_ids)
+claim_log_supported = (
+    not before_queued_ids
+    or (
+        bool(running_order)
+        and claim_log_covers_queued_requests
+        and terminal_log_covers_queued_requests
+    )
+)
+if not claim_log_supported:
+    serialized_claim_log = False
+separator = chr(44) + chr(32)
+fairness_ok = (
+    queued_requests_observed
+    and operators_preserved
+    and not lost_requests
+    and not non_terminal_requests
+    and not duplicate_claims
+    and claim_log_supported
+    and serialized_claim_log
+)
+
+fairness = {
+    "schema": "spark_openclaw_fair_queue_watch_once.v1",
+    "before_queued_count": len(before_queued_ids),
+    "before_queued_ids": before_queued_ids,
+    "after_terminal_count": len(terminal_by_id),
+    "terminal_by_id": terminal_by_id,
+    "operator_by_id": operator_by_id,
+    "operators_preserved": operators_preserved,
+    "lost_requests": lost_requests,
+    "non_terminal_requests": non_terminal_requests,
+    "duplicate_claims": duplicate_claims,
+    "queued_requests_observed": queued_requests_observed,
+    "claim_log_covers_queued_requests": claim_log_covers_queued_requests,
+    "terminal_log_covers_queued_requests": terminal_log_covers_queued_requests,
+    "fairness_ok": fairness_ok,
+    "claim_log_supported": claim_log_supported,
+    "serialized_claim_log": serialized_claim_log,
+    "running_order": running_order,
+    "terminal_order": terminal_order,
+    "claim_events": claim_events,
+}
+with open(fairness_path, "w", encoding="utf-8") as handle:
+    json.dump(fairness, handle, indent=2, sort_keys=True)
+with open(fairness_path.replace(".json", ".md"), "w", encoding="utf-8") as handle:
+    handle.write("\n".join([
+        "# Spark OpenClaw Fair Queue Summary",
+        "",
+        f"- before_queued_count: {len(before_queued_ids)}",
+        f"- after_terminal_count: {len(terminal_by_id)}",
+        f"- operators_preserved: {str(operators_preserved).lower()}",
+        f"- lost_requests: {len(lost_requests)}",
+        f"- non_terminal_requests: {len(non_terminal_requests)}",
+        f"- duplicate_claims: {str(duplicate_claims).lower()}",
+        f"- queued_requests_observed: {str(queued_requests_observed).lower()}",
+        f"- claim_log_covers_queued_requests: {str(claim_log_covers_queued_requests).lower()}",
+        f"- terminal_log_covers_queued_requests: {str(terminal_log_covers_queued_requests).lower()}",
+        f"- fairness_ok: {str(fairness_ok).lower()}",
+        f"- claim_log_supported: {str(claim_log_supported).lower()}",
+        f"- serialized_claim_log: {str(serialized_claim_log).lower()}",
+        "- running_order: {}".format(separator.join(running_order) if running_order else "none"),
+        "- terminal_order: {}".format(separator.join(terminal_order) if terminal_order else "none"),
+        "",
+    ]))
+
+if not fairness_ok:
+    print("fairness-failed")
+elif "failed" in terminal_statuses_after_watch:
+    print("failed")
+elif "needs_human" in terminal_statuses_after_watch:
+    print("needs-human")
+elif int(counts.get("queued") or 0) or int(counts.get("running") or 0):
+    print("not-drained")
+else:
+    print("completed")
+PY
+)"
+if [ "$rc" -eq 0 ] && [ "$terminal_status" != "completed" ]; then
+  rc=1
+fi
+fairness_verdict="$(python3 - "$fairness" <<'PY'
+import json
+import sys
+
+try:
+    data = json.load(open(sys.argv[1]))
+except (OSError, json.JSONDecodeError):
+    print("Fairness verdict unavailable; inspect FAIRNESS.md and FAIRNESS.json before promotion.")
+    raise SystemExit(0)
+
+checks = [
+    ("queued_requests_observed", data.get("queued_requests_observed") is True),
+    ("operators_preserved", data.get("operators_preserved") is True),
+    ("lost_requests", not bool(data.get("lost_requests"))),
+    ("non_terminal_requests", not bool(data.get("non_terminal_requests"))),
+    ("duplicate_claims", data.get("duplicate_claims") is False),
+    ("claim_log_covers_queued_requests", data.get("claim_log_covers_queued_requests") is True),
+    ("terminal_log_covers_queued_requests", data.get("terminal_log_covers_queued_requests") is True),
+    ("claim_log_supported", data.get("claim_log_supported") is True),
+    ("serialized_claim_log", data.get("serialized_claim_log") is True),
+]
+failed = [name for name, ok in checks if not ok]
+if data.get("fairness_ok") is True:
+    print("FAIRNESS.json reports queued requests observed, preserved operators, no lost or non-terminal queued requests, no duplicate claims, per-request claim logs, per-request terminal logs, and serialized watcher claims.")
+else:
+    print("FAIRNESS.json reports fairness concerns: " + ", ".join(failed) + ". Inspect FAIRNESS.md and FAIRNESS.json before promotion.")
+PY
+)"
+cat > "$out_dir/PROOF.md" <<PROOF
+# Spark OpenClaw Watcher Once Proof
+
+- lane: spark-openclaw-autoreview
+- host: spark-2
+- run_id: $run_id
+- queue_state: $queue_state
+- watcher: $watcher
+- agent_skills_dir: $skills
+- result: $terminal_status
+- exit_code: $rc
+- before: before.json
+- after: after.json
+- fairness_json: FAIRNESS.json
+- fairness_summary: FAIRNESS.md
+- stdout: watcher.stdout
+- stderr: watcher.stderr
+- secrets_inspected: no
+- edits: no
+- deploys: no
+- customer_sends: no
+- heartbeat_posts: spark_watcher_default
+
+The Spark watcher made one bounded pass over the isolated queue state.
+$fairness_verdict
+Review model output, if any, remains in the Spark-owned runtime proof root.
+The watcher may emit its normal internal openclaw-review heartbeat/webhook
+events; it does not send customer or non-test traffic.
+PROOF
+exit "$rc"
+'
+  watch_out="$(ssh -- "$TARGET" "bash -s -- $(printf '%q' "$RESOLVED_WATCHER") $(printf '%q' "$QUEUE_STATE") $(printf '%q' "$run_id") $(printf '%q' "$RESOLVED_SKILLS")" <<<"$watch_script" 2>&1)"
+  watch_rc=$?
+  printf '%s\n' "$watch_out" >&2
+  rsync -az -- "$TARGET:~/Developer/_machine-runs/spark-openclaw-watcher-once-runs/$run_id/" "$local_dir/" >/dev/null 2>&1 || true
+  proof_rel="runs/spark-openclaw-autoreview-runs/$run_id/PROOF.md"
+  LANE_TERMINAL_PROOF="$proof_rel"
+  if [ "$watch_rc" -eq 0 ] && [ -f "$proof_rel" ]; then
+    LANE_PROOF_STATUS="closed"
+    lane_emit completed "$proof_rel" "$RESOLVED_HEAD_FULL" "$PR_URL" "spark-openclaw-autoreview watcher drained queue_state=$QUEUE_STATE on $TARGET" ""
+    exit 0
+  fi
+  if [ "$watch_rc" -eq 1 ] && [ -f "$proof_rel" ] && grep -q '^- result: needs-human$' "$proof_rel"; then
+    LANE_PROOF_STATUS="closed"
+    lane_emit needs-human "$proof_rel" "$RESOLVED_HEAD_FULL" "$PR_URL" "spark-openclaw-autoreview watcher drained to needs-human queue_state=$QUEUE_STATE on $TARGET" "classify findings before routing fixes"
+    exit 3
+  fi
+  LANE_PROOF_STATUS="failed"
+  lane_emit failed "$proof_rel" "$RESOLVED_HEAD_FULL" "$PR_URL" "spark-openclaw-autoreview watcher failed rc=$watch_rc on $TARGET" "see $proof_rel"
+  exit 3
+fi
+
+if [ "$QUEUE" = "1" ]; then
+  queue_script='
+set -u
+requester="$1"
+worktree="$2"
+mode="$3"
+engine="$4"
+reviewers="$5"
+model="$6"
+thinking="$7"
+base="$8"
+queue_state="$9"
+pr_url="${10}"
+commit_sha="${11}"
+operator_id="${12}"
+requested_id="${13}"
+
+repo="$(cd "$worktree" 2>/dev/null && pwd)" || { echo "spark-openclaw-queue: not a dir: $worktree" >&2; exit 2; }
+submitted_head="$(git -C "$repo" rev-parse HEAD 2>/dev/null || true)"
+root="${queue_state:-$HOME/.local/state/openclaw-review}"
+req_dir="$root/requests"
+mkdir -p "$req_dir"
+id="${requested_id:-req-$(date -u +%Y%m%dT%H%M%SZ)-$$$RANDOM}"
+tmp="$req_dir/.$id.$$.$RANDOM.json.tmp"
+dest="$req_dir/$id.json"
+
+# The Spark requester is still validated by the probe, but x-api writes the
+# request atomically here so the queue artifact carries PR/commit identity
+# before the Spark watcher can claim it.
+[ -x "$requester" ] || { echo "spark-openclaw-queue: requester missing: $requester" >&2; exit 19; }
+ID="$id" REPO="$repo" MODE="$mode" ENGINE="$engine" MODEL="$model" \
+THINKING="$thinking" REVIEWERS="$reviewers" BASE="$base" \
+SOURCE="x-api-spark-openclaw-autoreview" PR_URL="$pr_url" \
+COMMIT_SHA="$commit_sha" SUBMITTED_HEAD="$submitted_head" OPERATOR_ID="$operator_id" TS="$(date +%s)" \
+SUBMITTED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)" python3 - "$tmp" "$dest" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+req = {
+    "id": os.environ["ID"],
+    "repo": os.environ["REPO"],
+    "mode": os.environ["MODE"],
+    "engine": os.environ.get("ENGINE") or None,
+    "model": os.environ.get("MODEL") or None,
+    "thinking": os.environ.get("THINKING") or None,
+    "reviewers": os.environ.get("REVIEWERS") or None,
+    "base": os.environ.get("BASE") or None,
+    "source": os.environ.get("SOURCE") or "cli",
+    "operator_id": os.environ.get("OPERATOR_ID") or None,
+    "pr_url": os.environ.get("PR_URL") or None,
+    "commit_sha": os.environ.get("COMMIT_SHA") or None,
+    "submitted_head": os.environ.get("SUBMITTED_HEAD") or None,
+    "submitted_at_utc": os.environ.get("SUBMITTED_AT_UTC") or None,
+    "ts": int(os.environ["TS"]),
+}
+req = {key: value for key, value in req.items() if value is not None}
+tmp = Path(sys.argv[1])
+dest = Path(sys.argv[2])
+stable = (
+    "id", "repo", "mode", "engine", "model", "thinking", "reviewers", "base",
+    "source", "operator_id", "pr_url", "commit_sha", "submitted_head",
+)
+try:
+    with tmp.open("x", encoding="utf-8") as handle:
+        json.dump(req, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
+    try:
+        os.link(tmp, dest)
+        disposition = "queued"
+    except FileExistsError:
+        try:
+            existing = json.loads(dest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"spark-openclaw-queue: existing deterministic request is invalid: {exc.__class__.__name__}")
+        if any(existing.get(key) != req.get(key) for key in stable):
+            raise SystemExit("spark-openclaw-queue: deterministic request id is already bound to different review identity")
+        disposition = "deduped"
+finally:
+    try:
+        tmp.unlink()
+    except FileNotFoundError:
+        pass
+print(f"autoreview-request: {disposition} {dest}", file=sys.stderr)
+print(req["id"])
+PY
+'
+  queue_out="$(ssh -- "$TARGET" "bash -s -- $(printf '%q' "$RESOLVED_REQUESTER") $(printf '%q' "$REMOTE_WORKTREE") $(printf '%q' "$MODE") $(printf '%q' "$ENGINE") $(printf '%q' "$REVIEWERS") $(printf '%q' "$MODEL") $(printf '%q' "$THINKING") $(printf '%q' "$BASE") $(printf '%q' "$QUEUE_STATE") $(printf '%q' "$PR_URL") $(printf '%q' "$RESOLVED_HEAD_FULL") $(printf '%q' "$OPERATOR_ID") $(printf '%q' "$QUEUE_REQUEST_ID")" <<<"$queue_script" 2>&1)"
+  queue_rc=$?
+  printf '%s\n' "$queue_out" >&2
+  if [ "$queue_rc" -ne 0 ]; then
+    LANE_PROOF_STATUS="failed"
+    lane_emit failed "" "$RESOLVED_HEAD_FULL" "$PR_URL" "spark-openclaw-autoreview queue submit failed rc=$queue_rc" "see stderr"
+    exit 3
+  fi
+  if [ -n "$QUEUE_REQUEST_ID" ]; then
+    queue_id="$QUEUE_REQUEST_ID"
+  else
+    queue_id="$(printf '%s\n' "$queue_out" | awk '/^req-/{id=$0} END{print id}' | tr -d '\r')"
+  fi
+  queue_request="$(printf '%s\n' "$queue_out" | sed -n -E 's/^autoreview-request: (queued|deduped) //p' | tail -n 1 | tr -d '\r')"
+  [ -n "$queue_id" ] || queue_id="$queue_request"
+  dashboard_publish_needed="$(mark_swarmdash_publish_needed \
+    "review_queue.queued" \
+    "queue_id=$queue_id operator_id=$OPERATOR_ID commit_sha=$RESOLVED_HEAD_FULL pr_url=${PR_URL:-missing}")"
+  queue_proof="$local_dir/QUEUE_PROOF.md"
+  cat > "$queue_proof" <<PROOF
+# Spark OpenClaw Queue Submit Proof
+
+- lane: spark-openclaw-autoreview
+- host: $TARGET
+- run_id: $run_id
+- queue_id: $queue_id
+- operator_id: $OPERATOR_ID
+- queue_request: $queue_request
+- queue_state: $QUEUE_STATE
+- worktree: $REMOTE_WORKTREE
+- commit_sha: $RESOLVED_HEAD_FULL
+- pr_url: $PR_URL
+- dashboard_publish_needed: $dashboard_publish_needed
+- mode: $MODE
+- engine: $ENGINE
+- reviewers: $REVIEWERS
+- base: $BASE
+- result: queued
+- secrets_inspected: no
+- edits: no
+- deploys: no
+- sends: no
+
+This queued a Spark-owned OpenClaw review request and returned immediately.
+The Spark watcher owns claim, execution, heartbeat, result, and terminal proof.
+PROOF
+  proof_rel="runs/spark-openclaw-autoreview-runs/$run_id/QUEUE_PROOF.md"
+  LANE_PROOF_STATUS="packet_ready"
+  lane_emit queued "$proof_rel" "$RESOLVED_HEAD_FULL" "$PR_URL" "spark-openclaw-autoreview queued request $queue_id on $TARGET" ""
+  exit 0
+fi
+
+remote_script='
+set -u
+run_id="$1"
+runner="$2"
+skills="$3"
+worktree="$4"
+mode="$5"
+engine="$6"
+reviewers="$7"
+model="$8"
+thinking="$9"
+base="${10:-}"
+pr_url="${11:-}"
+operator_id="${12:-}"
+
+run_dir="$HOME/Developer/_machine-runs/spark-openclaw-autoreview-runs/$run_id"
+mkdir -p "$run_dir"
+printf "%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$run_dir/heartbeat"
+printf "{\"ts\":\"%s\",\"event\":\"started\",\"run_id\":\"%s\",\"mode\":\"%s\",\"engine\":\"%s\",\"reviewers\":\"%s\",\"operator_id\":\"%s\"}\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$run_id" "$mode" "$engine" "$reviewers" "$operator_id" > "$run_dir/events.jsonl"
+
+head="$(git -C "$worktree" rev-parse --short HEAD 2>/dev/null || true)"
+head_full="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
+root="$(git -C "$worktree" rev-parse --show-toplevel 2>/dev/null || printf "%s" "$worktree")"
+
+HEAD_FULL="$head_full" HEAD_SHORT="$head" PR_URL="$pr_url" WORKTREE="$root" BASE_REF="$base" OPERATOR_ID="$operator_id" python3 - <<'PY' > "$run_dir/review-metadata.json" 2>/dev/null || true
+import json
+import os
+
+print(json.dumps({
+    "commit_sha": os.environ.get("HEAD_FULL") or None,
+    "commit_short": os.environ.get("HEAD_SHORT") or None,
+    "pr_url": os.environ.get("PR_URL") or None,
+    "worktree": os.environ.get("WORKTREE") or None,
+    "base": os.environ.get("BASE_REF") or None,
+    "operator_id": os.environ.get("OPERATOR_ID") or None,
+}, indent=2))
+PY
+
+cat > "$run_dir/STATE.md" <<STATE
+# Spark OpenClaw Autoreview State
+
+status: running
+run_id: $run_id
+worktree: $root
+head: $head
+commit_sha: $head_full
+pr_url: $pr_url
+operator_id: $operator_id
+runner: $runner
+agent_skills_dir: $skills
+mode: $mode
+engine: $engine
+reviewers: $reviewers
+base: $base
+STATE
+
+args=(--mode "$mode")
+if [ -n "$reviewers" ]; then
+  args+=(--reviewers "$reviewers")
+elif [ -n "$engine" ]; then
+  args+=(--engine "$engine")
+fi
+[ -n "$model" ] && args+=(--model "$model")
+[ -n "$thinking" ] && args+=(--thinking "$thinking")
+[ -n "$base" ] && args+=(--base "$base")
+
+requested="$engine"
+[ -n "$reviewers" ] && requested="$(printf "%s" "$reviewers" | tr "," " ")"
+needs_cli_bootstrap=0
+for tool in $requested; do
+  command -v "$tool" >/dev/null 2>&1 || needs_cli_bootstrap=1
+done
+if [ "$needs_cli_bootstrap" = "1" ] && [ -s "$HOME/.nvm/nvm.sh" ]; then
+  export NVM_DIR="$HOME/.nvm"
+  . "$NVM_DIR/nvm.sh" >/dev/null 2>&1 || true
+  nvm use --silent default >/dev/null 2>&1 || nvm use --silent node >/dev/null 2>&1 || true
+fi
+
+AGENT_SKILLS_DIR="$skills" "$runner" "$worktree" "${args[@]}" > "$run_dir/autoreview.stdout" 2> "$run_dir/autoreview.stderr"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+  result=completed
+elif [ "$rc" -eq 1 ]; then
+  result=needs-human
+else
+  result=failed
+fi
+
+cat > "$run_dir/PROOF.md" <<PROOF
+# Spark OpenClaw Autoreview Proof
+
+- lane: spark-openclaw-autoreview
+- host: spark-2
+- run_id: $run_id
+- runner: $runner
+- agent_skills_dir: $skills
+- worktree: $root
+- head: $head
+- commit_sha: $head_full
+- pr_url: $pr_url
+- operator_id: $operator_id
+- mode: $mode
+- engine: $engine
+- reviewers: $reviewers
+- model: $model
+- thinking: $thinking
+- base: $base
+- result: $result
+- exit_code: $rc
+- stdout: autoreview.stdout
+- stderr: autoreview.stderr
+- metadata: review-metadata.json
+- secrets_inspected: no
+- destructive_cleanup: no
+- edits: no
+- deploys: no
+- sends: no
+PROOF
+
+cat > "$run_dir/STATE.md" <<STATE
+# Spark OpenClaw Autoreview State
+
+status: $result
+run_id: $run_id
+worktree: $root
+head: $head
+commit_sha: $head_full
+pr_url: $pr_url
+operator_id: $operator_id
+runner: $runner
+agent_skills_dir: $skills
+mode: $mode
+engine: $engine
+reviewers: $reviewers
+base: $base
+exit_code: $rc
+STATE
+
+printf "{\"ts\":\"%s\",\"event\":\"finished\",\"run_id\":\"%s\",\"result\":\"%s\",\"exit_code\":%s,\"operator_id\":\"%s\"}\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$run_id" "$result" "$rc" "$operator_id" >> "$run_dir/events.jsonl"
+exit "$rc"
+'
+
+ssh -- "$TARGET" "bash -s -- $(printf '%q' "$run_id") $(printf '%q' "$RESOLVED_RUNNER") $(printf '%q' "$RESOLVED_SKILLS") $(printf '%q' "$REMOTE_WORKTREE") $(printf '%q' "$MODE") $(printf '%q' "$ENGINE") $(printf '%q' "$REVIEWERS") $(printf '%q' "$MODEL") $(printf '%q' "$THINKING") $(printf '%q' "$BASE") $(printf '%q' "$PR_URL") $(printf '%q' "$OPERATOR_ID")" <<<"$remote_script"
+rc=$?
+
+rsync -az -- "$TARGET:~/Developer/_machine-runs/spark-openclaw-autoreview-runs/$run_id/" "$local_dir/" >/dev/null 2>&1 || true
+proof_rel="runs/spark-openclaw-autoreview-runs/$run_id/PROOF.md"
+LANE_TERMINAL_PROOF="$proof_rel"
+
+if [ "$rc" -eq 0 ] && [ -f "$proof_rel" ]; then
+  LANE_PROOF_STATUS="closed"
+  lane_emit completed "$proof_rel" "$RESOLVED_HEAD_FULL" "$PR_URL" "spark-openclaw-autoreview completed on $TARGET" ""
+  exit 0
+fi
+
+if [ "$rc" -eq 1 ] && [ -f "$proof_rel" ]; then
+  LANE_PROOF_STATUS="closed"
+  lane_emit needs-human "$proof_rel" "$RESOLVED_HEAD_FULL" "$PR_URL" "spark-openclaw-autoreview found actionable review findings on $TARGET" "classify findings before routing fixes"
+  exit 3
+fi
+
+LANE_PROOF_STATUS="failed"
+lane_emit failed "$proof_rel" "$RESOLVED_HEAD_FULL" "$PR_URL" "spark-openclaw-autoreview failed rc=$rc on $TARGET" "see $proof_rel or remote machine run"
+exit 3

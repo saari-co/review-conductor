@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+runs/
+state/
+.env
+.env.*
+*.pem
+*.key
+*.token
+*.sqlite*
+
+# Secrets/runtime material is prohibited even when force-added (make check).
+*.p12
+*.pfx
+*.db
+*.db-*
+*.log
+*.jsonl
+credentials/
+secrets/
+runtime/
+checkouts/
+inbox/
+outbox/
+logs/
