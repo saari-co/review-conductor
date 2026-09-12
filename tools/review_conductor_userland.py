@@ -1870,19 +1870,53 @@ def deliver_notifications(
             authority = (
                 None if int(row["pr_number"]) == 0 else runtime.tuple_authority(row)
             )
-            runtime.assert_authority(
-                authority_client,
-                f"notification:{row['event_key']}:{row['channel']}",
-                authority,
+            claimed = connection.execute(
+                """
+                UPDATE notification_deliveries
+                SET status = 'uncertain', attempts = attempts + 1,
+                  last_error = 'delivery in progress; reconcile if interrupted',
+                  updated_at = ?
+                WHERE event_key = ? AND channel = ? AND status = 'pending'
+                """,
+                (core.utc_now(), row["event_key"], row["channel"]),
             )
+            if claimed.rowcount != 1:
+                connection.rollback()
+                continue
+            # Commit the uncertain claim before any transport. A crash or SQLite
+            # failure after a successful send can therefore never make this row
+            # look retryable; an operator must reconcile the provider outcome.
+            connection.commit()
+            try:
+                runtime.assert_authority(
+                    authority_client,
+                    f"notification:{row['event_key']}:{row['channel']}",
+                    authority,
+                )
+            except core.AuthorityDenied as exc:
+                restored = connection.execute(
+                    """
+                    UPDATE notification_deliveries
+                    SET status = 'pending', attempts = attempts - 1,
+                      last_error = ?, updated_at = ?
+                    WHERE event_key = ? AND channel = ? AND status = 'uncertain'
+                    """,
+                    (str(exc)[:300], core.utc_now(), row["event_key"], row["channel"]),
+                )
+                connection.commit()
+                if restored.rowcount != 1:
+                    raise UserlandError(
+                        "notification authority denial changed during recovery"
+                    ) from exc
+                raise
             try:
                 notifier.send(row["channel"], payload["message"])
             except NotificationUnavailable as exc:
                 connection.execute(
                     """
                     UPDATE notification_deliveries
-                    SET attempts = attempts + 1, last_error = ?, updated_at = ?
-                    WHERE event_key = ? AND channel = ? AND status = 'pending'
+                    SET status = 'pending', last_error = ?, updated_at = ?
+                    WHERE event_key = ? AND channel = ? AND status = 'uncertain'
                     """,
                     (str(exc)[:300], core.utc_now(), row["event_key"], row["channel"]),
                 )
@@ -1893,9 +1927,8 @@ def deliver_notifications(
                 connection.execute(
                     """
                     UPDATE notification_deliveries
-                    SET status = 'uncertain', attempts = attempts + 1,
-                      last_error = ?, updated_at = ?
-                    WHERE event_key = ? AND channel = ? AND status = 'pending'
+                    SET last_error = ?, updated_at = ?
+                    WHERE event_key = ? AND channel = ? AND status = 'uncertain'
                     """,
                     (str(exc)[:300], core.utc_now(), row["event_key"], row["channel"]),
                 )
@@ -1905,9 +1938,8 @@ def deliver_notifications(
             connection.execute(
                 """
                 UPDATE notification_deliveries
-                SET status = 'sent', attempts = attempts + 1,
-                  last_error = NULL, updated_at = ?
-                WHERE event_key = ? AND channel = ? AND status = 'pending'
+                SET status = 'sent', last_error = NULL, updated_at = ?
+                WHERE event_key = ? AND channel = ? AND status = 'uncertain'
                 """,
                 (core.utc_now(), row["event_key"], row["channel"]),
             )

@@ -57,11 +57,20 @@ It remains disabled and is reviewed independently from the admission core.
     environment. The threaded service never clears or restores process-global
     `os.environ`, so concurrent webhook work and environment updates remain
     intact while a long-running adapter command executes.
+16. The standalone process holds `umask 077` for the complete threaded service
+    lifecycle. Nested file-creation guards can restore only that same restrictive
+    value while ingress and worker threads are active.
+17. A notification row is committed as `uncertain` before its transport begins.
+    Process death after provider delivery therefore cannot expose the row as
+    retryable; explicit provider reconciliation is required.
+18. The legacy userland launcher is not represented as a standalone-service
+    launcher. Registry-aware inherited-descriptor supervisor wiring remains an
+    activation prerequisite.
 
 ## Executable proof
 
-- Focused live service/adapter suite: 66 tests passed.
-- Executable mutation suite: all 69 precise mutants killed.
+- Focused live service/adapter suite: 68 tests passed.
+- Executable mutation suite: all 71 precise mutants killed.
 - The added cases directly exercise concurrent token minting, promotion after
   a stale binding, reloaded core identity, read-only/disappearing SQLite state,
   checkout fencing, both OpenClaw command fences, per-notification fencing,
@@ -70,8 +79,11 @@ It remains disabled and is reviewed independently from the admission core.
   transport normalization, authority-bound standalone maintenance and exact
   tuple rejection after head supersession, including stale review-result
   notification suppression, concurrent process-environment preservation and
-  exact propagation of the allowlisted environment to the subprocess boundary.
-- Complete `make check`: passed before this evidence-only commit.
+  exact propagation of the allowlisted environment to the subprocess boundary,
+  restrictive umask retention across the threaded lifecycle, and a simulated
+  process death after the durable notification claim but before a transport
+  result can be recorded.
+- Complete `make check`: passed on this repair tree.
 - Extraction provenance: 14 files verified and Python compilation passed.
 - `git diff --check`: passed.
 
@@ -85,5 +97,7 @@ activation, deployment, or review clearance.
   repository, branch protection, check binding, merge, or adjudication change.
 - The SMCBD candidate profile remains disabled.
 - The proposed HTTPS endpoint remains unprovisioned and unverified.
+- Registry-aware inherited-descriptor launcher or supervisor wiring remains
+  unimplemented and unqualified.
 - Fixture and hosted CI PASS are not genuine App-owned OpenClaw or ClawSweeper
   review PASS.

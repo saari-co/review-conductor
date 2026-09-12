@@ -108,10 +108,14 @@ Non-secret credential selectors are already isolated in the inactive profile:
 | GitHub App private key | `op://Review Conductor SMCBD Suite GitHub App Runtime/Review Conductor SMCBD Suite GitHub App/private-key.pem` |
 | Cloudflare connector | `op://Smoky Review Conductor SMCBD Suite Cloudflare Tunnel/SMCBD Suite Cloudflare Tunnel/connector-token` |
 
-The launcher resolves each capability through its separate recovery/service-
-account boundary and transfers values to the child only through inherited file
-descriptors. Secret values must never be entered in chat, command arguments,
-environment values, Git, logs, proof, PR comments or Actions artifacts.
+The existing legacy launcher does not yet invoke the registry-aware standalone
+entrypoint. A separately reviewed launcher or supervisor path must pass the
+webhook secret and App key to `tools/service_entrypoint.py` through inherited
+file descriptors while supplying the non-secret profile and registry paths as
+arguments. This wiring is an activation prerequisite, not functionality claimed
+by this source slice. Secret values must never be entered in chat, command
+arguments, environment values, Git, logs, proof, PR comments or Actions
+artifacts.
 
 ### Approved credential transfer procedure
 
@@ -128,9 +132,11 @@ environment values, Git, logs, proof, PR comments or Actions artifacts.
 4. Provision the Cloudflare connector token directly into its dedicated runtime
    item through Cloudflare/1Password UI. Do not reuse the Blocks connector.
 5. Create the three least-privileged 1Password service accounts and place only
-   their recovery tokens in the profile's protected bootstrap locations. The
-   launcher consumes those tokens to resolve the runtime selectors; operators
-   verify access with `op whoami` without reading secret values into logs.
+   their recovery tokens in protected bootstrap locations outside source, state
+   and proof roots. Operators verify access with `op whoami` without reading
+   secret values into logs. Do not use the legacy userland launcher for the
+   standalone profile; activation waits for the separately reviewed
+   registry-aware descriptor/supervisor wiring.
 
 ## HTTPS ingress and source qualification
 
@@ -213,6 +219,8 @@ Activation remains blocked until all are true:
   exactly;
 - dedicated 1Password service accounts, private key, webhook secret and tunnel
   connector are provisioned;
+- registry-aware launcher or supervisor descriptor wiring is reviewed and
+  qualified against `tools/service_entrypoint.py`;
 - the isolated HTTPS edge and local service health are verified;
 - a human explicitly authorizes deployment and SMCBD shadow-mode activation.
 

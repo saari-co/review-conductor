@@ -215,6 +215,15 @@ class ServiceStopped(service.ServiceError):
 
 
 def serve(profile_path: Path, registry_path: Path) -> None:
+    """Hold a restrictive process umask for the complete threaded lifecycle."""
+    previous_umask = os.umask(0o077)
+    try:
+        _serve_with_restrictive_umask(profile_path, registry_path)
+    finally:
+        os.umask(previous_umask)
+
+
+def _serve_with_restrictive_umask(profile_path: Path, registry_path: Path) -> None:
     config = userland.load_config(profile_path)
     profiles.require_enabled(config)
     provide_registry = registry_provider(registry_path, config)

@@ -1782,6 +1782,85 @@ class AdmissionIngressTests(unittest.TestCase):
             self.assertEqual(len(fences), 2)
             self.assertEqual(len(sent), 1)
 
+    def test_notification_is_uncertain_before_transport_and_survives_crash(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = legacy.config_fixture(Path(temporary))
+            userland.queue_operator_alert(config, "crash-safe", "fixture message")
+            observed = []
+
+            class CrashingNotifier:
+                def send(_self, channel, _message):
+                    connection = core.open_database(Path(config["paths"]["state_root"]))
+                    try:
+                        row = connection.execute(
+                            """
+                            SELECT status, attempts FROM notification_deliveries
+                            WHERE channel = ?
+                            """,
+                            (channel,),
+                        ).fetchone()
+                        observed.append((channel, row["status"], row["attempts"]))
+                    finally:
+                        connection.close()
+                    raise KeyboardInterrupt("simulated process death")
+
+            with patch.object(userland, "queue_notifications", lambda _config: 0):
+                with self.assertRaises(KeyboardInterrupt):
+                    userland.deliver_notifications(
+                        config, CrashingNotifier(), dry_run=False
+                    )
+
+            self.assertEqual(observed, [("openclaw_context", "uncertain", 1)])
+            connection = core.open_database(Path(config["paths"]["state_root"]))
+            try:
+                rows = connection.execute(
+                    """
+                    SELECT channel, status, attempts FROM notification_deliveries
+                    ORDER BY channel
+                    """
+                ).fetchall()
+                self.assertEqual(
+                    [(row["channel"], row["status"], row["attempts"]) for row in rows],
+                    [
+                        ("discord", "pending", 0),
+                        ("openclaw_context", "uncertain", 1),
+                        ("signal", "pending", 0),
+                    ],
+                )
+            finally:
+                connection.close()
+
+            sent = []
+
+            class RecordingNotifier:
+                def send(_self, channel, message):
+                    sent.append((channel, message))
+
+            with patch.object(userland, "queue_notifications", lambda _config: 0):
+                userland.deliver_notifications(
+                    config, RecordingNotifier(), dry_run=False
+                )
+            self.assertEqual([channel for channel, _message in sent], ["discord", "signal"])
+
+            connection = core.open_database(Path(config["paths"]["state_root"]))
+            try:
+                rows = connection.execute(
+                    """
+                    SELECT channel, status, attempts FROM notification_deliveries
+                    ORDER BY channel
+                    """
+                ).fetchall()
+                self.assertEqual(
+                    [(row["channel"], row["status"], row["attempts"]) for row in rows],
+                    [
+                        ("discord", "sent", 1),
+                        ("openclaw_context", "uncertain", 1),
+                        ("signal", "sent", 1),
+                    ],
+                )
+            finally:
+                connection.close()
+
     def test_gate_database_is_read_only_and_disappearance_fails_closed(self):
         self.fx.ingest("initial", self.fx.payload())
         database = self.fx.state / "review-conductor.sqlite3"
@@ -2262,6 +2341,31 @@ class EntrypointTests(unittest.TestCase):
         profile["enrollment"] = {"enabled": True, "blockers": []}
         profile["tunnel"].update(tunnel_id="00000000-0000-4000-8000-000000000001")
         self.profile.write_text(json.dumps(profile) + "\n")
+
+    def test_service_holds_restrictive_umask_for_threaded_lifecycle(self):
+        current_mask = {"value": 0o022}
+        transitions = []
+
+        def fake_umask(value):
+            previous = current_mask["value"]
+            current_mask["value"] = value
+            transitions.append((previous, value))
+            return previous
+
+        def exercise_lifecycle(profile_path, registry_path):
+            self.assertEqual(current_mask["value"], 0o077)
+            self.assertEqual(profile_path, self.profile)
+            self.assertEqual(registry_path, self.root / "registry.json")
+
+        with patch.object(entrypoint.os, "umask", side_effect=fake_umask), patch.object(
+            entrypoint,
+            "_serve_with_restrictive_umask",
+            side_effect=exercise_lifecycle,
+        ):
+            entrypoint.serve(self.profile, self.root / "registry.json")
+
+        self.assertEqual(current_mask["value"], 0o022)
+        self.assertEqual(transitions, [(0o022, 0o077), (0o077, 0o022)])
 
     def test_shipped_candidate_profile_is_refused_before_registry_or_credentials(self):
         missing_registry = self.root / "never-created.json"
@@ -2865,15 +2969,15 @@ MUTANTS = [
     (
         "deliver notifications without the authority fence",
         "tools/review_conductor_userland.py",
-        '            runtime.assert_authority(\n                authority_client,\n                f"notification:{row[\'event_key\']}:{row[\'channel\']}",\n                authority,\n            )\n',
-        "",
+        '                runtime.assert_authority(\n                    authority_client,\n                    f"notification:{row[\'event_key\']}:{row[\'channel\']}",\n                    authority,\n                )\n',
+        "                pass\n",
         "AdmissionIngressTests.test_each_notification_send_has_a_fresh_authority_fence",
     ),
     (
         "authorize a superseded notification under the repository-level gate",
         "tools/review_conductor_userland.py",
-        '            runtime.assert_authority(\n                authority_client,\n                f"notification:{row[\'event_key\']}:{row[\'channel\']}",\n                authority,\n            )\n',
-        '            runtime.assert_authority(\n                authority_client,\n                f"notification:{row[\'event_key\']}:{row[\'channel\']}",\n            )\n',
+        '                runtime.assert_authority(\n                    authority_client,\n                    f"notification:{row[\'event_key\']}:{row[\'channel\']}",\n                    authority,\n                )\n',
+        '                runtime.assert_authority(\n                    authority_client,\n                    f"notification:{row[\'event_key\']}:{row[\'channel\']}",\n                )\n',
         "AdmissionIngressTests.test_superseded_review_notification_cannot_use_the_new_heads_binding",
     ),
     (
@@ -3036,6 +3140,20 @@ MUTANTS = [
         "        except BaseException as exc:  # sqlite3.Error, OSError, or anything unexpected\n            failure.append(exc)\n            stop.set()\n",
         "        except BaseException:\n            return\n            stop.set()\n",
         "EntrypointTests.test_worker_operational_failure_stops_the_whole_service",
+    ),
+    (
+        "start the threaded service under the inherited broad umask",
+        "tools/service_entrypoint.py",
+        "    previous_umask = os.umask(0o077)\n",
+        "    previous_umask = os.umask(0o022)\n",
+        "EntrypointTests.test_service_holds_restrictive_umask_for_threaded_lifecycle",
+    ),
+    (
+        "send a notification while its durable row still appears pending",
+        "tools/review_conductor_userland.py",
+        "                SET status = 'uncertain', attempts = attempts + 1,\n                  last_error = 'delivery in progress; reconcile if interrupted',\n",
+        "                SET status = 'pending', attempts = attempts + 1,\n                  last_error = 'delivery in progress; reconcile if interrupted',\n",
+        "AdmissionIngressTests.test_notification_is_uncertain_before_transport_and_survives_crash",
     ),
 ]
 
