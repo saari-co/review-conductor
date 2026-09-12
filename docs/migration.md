@@ -5,9 +5,11 @@
 - Allowlisted source extraction from x-api commit
   `48036abf1649a6fbd1738d68b23fc235893e0b68` on
   `openclaw/review-conductor-generalization-managed`.
-- Five Python engine/adapter modules and four profiles initially copied byte-for-byte.
-  The launcher now has a standalone anonymous-descriptor transport/cleanup repair;
-  the other engine modules and profile bytes remain unchanged.
+- Five Python engine/adapter modules and four profiles were initially copied
+  byte-for-byte. The launcher now has a standalone anonymous-descriptor
+  transport/cleanup repair. The runtime, userland loader and inactive SMCBD
+  profile are now explicitly adapted for trusted policy transport and the
+  verified App/installation candidate; the Blocks profiles remain unchanged.
 - Four regression suites relocated, with root/fixture path adjustments; one
   synthetic key marker is assembled from bytes with the same runtime value for
   source hygiene. The versioned extraction/provenance ledger records these adaptations.
@@ -25,16 +27,16 @@ configuration. The build excludes all historical profiles and legacy launchers.
 
 ## Not completed / prerequisites for migration
 
-1. Trusted enrollment, approved base-policy loading and policy-hash binding to
-   tuple/epoch exist as an offline library (`tools/trusted_admission.py`,
-   [contract](trusted-admission.md)). Still open: service-owned transport for
-   approved-commit reads, registry storage, and migrating profile configuration
-   onto it without changing legacy behavior.
+1. Trusted enrollment, approved base-policy loading and policy-hash binding now
+   have an authenticated source integration (`tools/service_runtime.py`) and an
+   inactive entrypoint. Still open: provision the external registry, add the
+   target manifest to an approved base commit, and activate an isolated service.
 2. Replace x-api `bin/smoky`/host-relative integration with qualified external
    adapters. The copied compatibility modules still describe the existing pilot;
    tests inject transports. They are not a portable activated service yet.
-3. Implement/version the authenticated service/client surface and event outbox.
-   No Gateway plugin, Smoky dependency, webhook registration or scheduler is added.
+3. Implement/version the general authenticated client surface and event outbox.
+   GitHub webhook ingress exists; no Gateway plugin, Smoky dependency, webhook
+   registration or scheduler is added.
 4. Obtain exact-head external reviews of this new repo. It is not self-enrolled;
    CI success is not OpenClaw/ClawSweeper clearance.
 5. Separately authorize each target's manifest commit, installation and isolated

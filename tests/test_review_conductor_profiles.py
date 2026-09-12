@@ -240,11 +240,16 @@ class ProfilesTest(unittest.TestCase):
         self.assertEqual(calls[0][2]['inputs']['review_epoch'],'3')
         self.assertEqual(calls[0][2]['inputs']['expected_head_sha'],HEAD)
 
-    def test_missing_reviewer_prevents_activation_and_blocks_profile_files_unchanged(self):
+    def test_missing_reviewer_prevents_activation_and_candidate_ids_are_pinned(self):
         config=self.config()
         path=Path(config['core_config']);value=json.loads(path.read_text());value['review_policy']['reviewers']['openclaw']=None;write(path,value)
         with self.assertRaises(core.ContractError):core.load_config(path)
         self.assertEqual(profiles.capabilities(config)[0],'review-conductor.openclaw-smcbd-suite.webhook-verify')
+        candidate=json.loads((ROOT/'contracts/review-conductor/openclaw-smcbd-suite-userland.json').read_text())
+        self.assertEqual(candidate['github_app']['app_id'],4916376)
+        self.assertEqual(candidate['github_app']['installation_id'],161027021)
+        self.assertEqual(candidate['github_app']['permissions']['contents'],'read')
+        self.assertFalse(candidate['enrollment']['enabled'])
 
 
 if __name__=='__main__':unittest.main(verbosity=2)

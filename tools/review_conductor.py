@@ -14,7 +14,7 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 UTC = getattr(dt, "UTC", dt.timezone.utc)
@@ -1227,6 +1227,7 @@ def ingest_github_delivery(
     signature: str,
     body: bytes,
     secret: str,
+    admission_hook: Callable[[sqlite3.Connection, dict[str, Any], str, dict[str, Any], dict[str, Any]], dict[str, Any] | None] | None = None,
 ) -> dict[str, Any]:
     if not SAFE_ID_RE.fullmatch(delivery_id):
         raise ContractError("delivery id is unsafe")
@@ -1260,6 +1261,12 @@ def ingest_github_delivery(
         else:
             event = parse_workflow_run_event(config, payload)
             outcome = process_workflow_run(connection, config, event_id, event, payload)
+        if admission_hook is not None:
+            binding = admission_hook(connection, config, event_type, payload, outcome)
+            if binding is not None:
+                outcome["admission_binding_id"] = require_text(
+                    binding.get("binding_id"), "admission binding id", 64
+                )
         outcome.update({"schema": "smoky.review-conductor.receipt.v1", "delivery_id": delivery_id, "event_type": event_type})
         connection.execute(
             "INSERT INTO deliveries(delivery_id, source, event_type, payload_sha256, received_at, outcome_json) VALUES (?, 'github', ?, ?, ?, ?)",

@@ -13,13 +13,15 @@ import trusted_admission as ta
 
 BLOCKS = "dinkuskit/blocks"
 SMCBD = "saari-co/openclaw-smcbd-suite"
-# Synthetic commits/installations only; no live App installation exists.
+# Synthetic commits/App installations only; never live credentials.
 BLOCKS_COMMIT = "a" * 40
 SMCBD_COMMIT = "b" * 40
 BASE = "c" * 40
 HEAD = "d" * 40
 BLOCKS_INSTALL = 1001
 SMCBD_INSTALL = 2002
+BLOCKS_APP = 3003
+SMCBD_APP = 4004
 
 
 def sha(raw):
@@ -41,10 +43,12 @@ class Fixture:
     def registry_doc(self):
         return {"schema": ta.REGISTRY_SCHEMA, "enrollments": [
             {"repository": BLOCKS, "repository_id": 1306882611,
-             "installation": {"id": BLOCKS_INSTALL, "account": "dinkuskit"},
+             "github_app": {"id": BLOCKS_APP, "installation_id": BLOCKS_INSTALL,
+                            "installation_account": "dinkuskit"},
              "approved_policy": {"commit": BLOCKS_COMMIT, "sha256": sha(self.blocks)}},
             {"repository": SMCBD, "repository_id": 1366416798,
-             "installation": {"id": SMCBD_INSTALL, "account": "saari-co"},
+             "github_app": {"id": SMCBD_APP, "installation_id": SMCBD_INSTALL,
+                            "installation_account": "saari-co"},
              "approved_policy": {"commit": SMCBD_COMMIT, "sha256": sha(self.smcbd)}}]}
 
     def registry(self, doc=None):
@@ -52,7 +56,8 @@ class Fixture:
 
 
 def request(**overrides):
-    value = {"repository": BLOCKS, "repository_id": 1306882611, "installation_id": BLOCKS_INSTALL,
+    value = {"repository": BLOCKS, "repository_id": 1306882611, "app_id": BLOCKS_APP,
+             "installation_id": BLOCKS_INSTALL,
              "pr_number": 7, "base_sha": BASE, "head_sha": HEAD, "review_epoch": 0,
              "policy_commit": BLOCKS_COMMIT}
     value.update(overrides)
@@ -80,14 +85,16 @@ class RegistryTests(unittest.TestCase):
         item = copy.deepcopy(doc["enrollments"][0]); item["repository_id"] = 1366416798; bad.append(item)
         item = copy.deepcopy(doc["enrollments"][0]); item["repository_id"] = "1306882611"; bad.append(item)
         item = copy.deepcopy(doc["enrollments"][0]); item["repository_id"] = True; bad.append(item)
-        item = copy.deepcopy(doc["enrollments"][0]); item["installation"]["account"] = "saari-co"; bad.append(item)
-        item = copy.deepcopy(doc["enrollments"][0]); item["installation"]["id"] = 0; bad.append(item)
-        item = copy.deepcopy(doc["enrollments"][0]); item["installation"]["id"] = None; bad.append(item)
+        item = copy.deepcopy(doc["enrollments"][0]); item["github_app"]["installation_account"] = "saari-co"; bad.append(item)
+        item = copy.deepcopy(doc["enrollments"][0]); item["github_app"]["id"] = 0; bad.append(item)
+        item = copy.deepcopy(doc["enrollments"][0]); item["github_app"]["id"] = True; bad.append(item)
+        item = copy.deepcopy(doc["enrollments"][0]); item["github_app"]["installation_id"] = 0; bad.append(item)
+        item = copy.deepcopy(doc["enrollments"][0]); item["github_app"]["installation_id"] = None; bad.append(item)
         item = copy.deepcopy(doc["enrollments"][0]); item["approved_policy"]["commit"] = "A" * 40; bad.append(item)
         item = copy.deepcopy(doc["enrollments"][0]); item["approved_policy"]["commit"] = "main"; bad.append(item)
         item = copy.deepcopy(doc["enrollments"][0]); item["approved_policy"]["sha256"] = "f" * 63; bad.append(item)
         item = copy.deepcopy(doc["enrollments"][0]); item["credentials"] = "vault://x"; bad.append(item)
-        item = copy.deepcopy(doc["enrollments"][0]); item["installation"]["token"] = "x"; bad.append(item)
+        item = copy.deepcopy(doc["enrollments"][0]); item["github_app"]["token"] = "x"; bad.append(item)
         item = copy.deepcopy(doc["enrollments"][0]); del item["approved_policy"]; bad.append(item)
         for item in bad:
             with self.subTest(item=item), self.assertRaises(ta.AdmissionError):
@@ -96,7 +103,7 @@ class RegistryTests(unittest.TestCase):
     def test_duplicate_identities_and_malformed_documents_fail_closed(self):
         doc = self.fx.registry_doc()
         dup_repo = {**doc, "enrollments": [doc["enrollments"][0], doc["enrollments"][0]]}
-        shared_install = copy.deepcopy(doc); shared_install["enrollments"][1]["installation"]["id"] = BLOCKS_INSTALL
+        shared_install = copy.deepcopy(doc); shared_install["enrollments"][1]["github_app"]["installation_id"] = BLOCKS_INSTALL
         for candidate in [dup_repo, shared_install, {**doc, "schema": "review-conductor.enrollment.v2"},
                           {**doc, "enrollments": {}}, {**doc, "extra": 1}, {"schema": ta.REGISTRY_SCHEMA}]:
             with self.subTest(candidate=candidate), self.assertRaises(ta.AdmissionError):
@@ -108,12 +115,14 @@ class RegistryTests(unittest.TestCase):
 
     def test_lookup_requires_every_identity_component(self):
         registry = self.fx.registry()
-        self.assertEqual(registry.lookup(BLOCKS, 1306882611, BLOCKS_INSTALL).repository, BLOCKS)
-        for args in [(SMCBD, 1306882611, BLOCKS_INSTALL), (BLOCKS, 1366416798, BLOCKS_INSTALL),
-                     (BLOCKS, 1306882611, SMCBD_INSTALL), (BLOCKS, "1306882611", BLOCKS_INSTALL),
-                     (BLOCKS, 1306882611, str(BLOCKS_INSTALL)), (BLOCKS, 1306882611, None),
-                     ("dinkuskit/Blocks", 1306882611, BLOCKS_INSTALL), (None, 1306882611, BLOCKS_INSTALL),
-                     ("saari-co/x-api", 1, 1)]:
+        self.assertEqual(registry.lookup(BLOCKS, 1306882611, BLOCKS_APP, BLOCKS_INSTALL).repository, BLOCKS)
+        for args in [(SMCBD, 1306882611, BLOCKS_APP, BLOCKS_INSTALL), (BLOCKS, 1366416798, BLOCKS_APP, BLOCKS_INSTALL),
+                     (BLOCKS, 1306882611, SMCBD_APP, BLOCKS_INSTALL), (BLOCKS, 1306882611, BLOCKS_APP, SMCBD_INSTALL),
+                     (BLOCKS, "1306882611", BLOCKS_APP, BLOCKS_INSTALL),
+                     (BLOCKS, 1306882611, str(BLOCKS_APP), BLOCKS_INSTALL),
+                     (BLOCKS, 1306882611, BLOCKS_APP, str(BLOCKS_INSTALL)),
+                     ("dinkuskit/Blocks", 1306882611, BLOCKS_APP, BLOCKS_INSTALL),
+                     (None, 1306882611, BLOCKS_APP, BLOCKS_INSTALL), ("saari-co/x-api", 1, 1, 1)]:
             with self.subTest(args=args), self.assertRaises(ta.AdmissionError):
                 registry.lookup(*args)
 
@@ -122,7 +131,7 @@ class PolicyLoadingTests(unittest.TestCase):
     def setUp(self):
         self.fx = Fixture()
         self.registry = self.fx.registry()
-        self.blocks = self.registry.lookup(BLOCKS, 1306882611, BLOCKS_INSTALL)
+        self.blocks = self.registry.lookup(BLOCKS, 1306882611, BLOCKS_APP, BLOCKS_INSTALL)
 
     def test_loads_only_the_approved_commit_and_hash(self):
         policy = ta.load_approved_policy(self.blocks, BLOCKS_COMMIT, self.fx.read)
@@ -201,6 +210,7 @@ class BindingTests(unittest.TestCase):
         admission = ta.admit(self.registry, request(), self.fx.read)
         self.assertEqual(dataclasses.astuple(admission.review), (BLOCKS, 1306882611, 7, BASE, HEAD, 0))
         self.assertEqual(admission.installation_id, BLOCKS_INSTALL)
+        self.assertEqual(admission.app_id, BLOCKS_APP)
         self.assertEqual(admission.policy.commit, BLOCKS_COMMIT)
         again = ta.admit(self.registry, request(), Fixture().read)
         self.assertEqual(admission.binding_id, again.binding_id)
@@ -215,23 +225,26 @@ class BindingTests(unittest.TestCase):
 
     def test_cross_org_and_cross_repo_isolation(self):
         smcbd = ta.admit(self.registry, request(repository=SMCBD, repository_id=1366416798,
-                                                installation_id=SMCBD_INSTALL, policy_commit=SMCBD_COMMIT), self.fx.read)
+                                                app_id=SMCBD_APP, installation_id=SMCBD_INSTALL,
+                                                policy_commit=SMCBD_COMMIT), self.fx.read)
         self.assertEqual(smcbd.policy.repository, SMCBD)
-        for item in [request(installation_id=SMCBD_INSTALL),
+        for item in [request(app_id=SMCBD_APP), request(installation_id=SMCBD_INSTALL),
                      request(repository=SMCBD, installation_id=SMCBD_INSTALL),
                      request(repository=SMCBD, repository_id=1366416798),
                      request(repository_id=1366416798),
                      request(policy_commit=SMCBD_COMMIT),
-                     request(repository=SMCBD, repository_id=1366416798, installation_id=SMCBD_INSTALL),
+                     request(repository=SMCBD, repository_id=1366416798, app_id=SMCBD_APP,
+                             installation_id=SMCBD_INSTALL),
                      request(repository="dinkuskit/blocks-fork"),
-                     request(repository="saari-co/review-conductor", repository_id=1, installation_id=1)]:
+                     request(repository="saari-co/review-conductor", repository_id=1, app_id=1, installation_id=1)]:
             with self.subTest(item=item), self.assertRaises(ta.AdmissionError):
                 ta.admit(self.registry, item, self.fx.read)
         self.assertFalse(ta.policy_is_current(smcbd, self.fx.registry({"schema": ta.REGISTRY_SCHEMA, "enrollments": [
             self.fx.registry_doc()["enrollments"][0]]})))
 
     def test_unknown_installation_and_mismatched_ids_fail_closed(self):
-        for item in [request(installation_id=3003), request(installation_id=-BLOCKS_INSTALL),
+        for item in [request(app_id=SMCBD_APP), request(app_id=0), request(app_id=True),
+                     request(installation_id=3003), request(installation_id=-BLOCKS_INSTALL),
                      request(installation_id=str(BLOCKS_INSTALL)), request(installation_id=True),
                      request(repository_id=str(1306882611)), request(repository_id=1306882612),
                      request(repository_id=1306882611.0), request(pr_number=0), request(pr_number="7"),
@@ -240,6 +253,7 @@ class BindingTests(unittest.TestCase):
             with self.subTest(item=item), self.assertRaises(ta.AdmissionError):
                 ta.admit(self.registry, item, self.fx.read)
         for item in [{**request(), "reviewers": ["x"]}, {**request(), "policy": {"quiet_seconds": 0}},
+                     {k: v for k, v in request().items() if k != "app_id"},
                      {k: v for k, v in request().items() if k != "installation_id"}, [], None]:
             with self.subTest(item=item), self.assertRaises(ta.AdmissionError):
                 ta.admit(self.registry, item, self.fx.read)
@@ -280,21 +294,26 @@ class BindingTests(unittest.TestCase):
 
     def test_equivalent_direct_construction_preserves_binding_identity(self):
         admitted = ta.admit(self.registry, request(), self.fx.read)
-        reconstructed = ta.Admission(dataclasses.replace(admitted.review), admitted.installation_id,
-                                     dataclasses.replace(admitted.policy))
+        reconstructed = ta.Admission(dataclasses.replace(admitted.review), admitted.app_id,
+                                     admitted.installation_id, dataclasses.replace(admitted.policy))
         self.assertIsNot(admitted, reconstructed)
         self.assertEqual(admitted.binding_id, reconstructed.binding_id)
 
     def test_directly_constructed_incoherent_objects_fail_closed(self):
         good = ta.admit(self.registry, request(), self.fx.read)
         smcbd_policy = ta.admit(self.registry, request(repository=SMCBD, repository_id=1366416798,
-                                                       installation_id=SMCBD_INSTALL, policy_commit=SMCBD_COMMIT),
+                                                       app_id=SMCBD_APP, installation_id=SMCBD_INSTALL,
+                                                       policy_commit=SMCBD_COMMIT),
                                 self.fx.read).policy
         # Constructor invariants: mismatched repository/ID between tuple and policy, bad installation.
-        for args in [(good.review, BLOCKS_INSTALL, smcbd_policy),
-                     (good.review, 0, good.policy), (good.review, "1001", good.policy),
-                     (good.review, True, good.policy), (good.review, None, good.policy),
-                     ("dinkuskit/blocks", BLOCKS_INSTALL, good.policy), (good.review, BLOCKS_INSTALL, {"commit": BLOCKS_COMMIT})]:
+        for args in [(good.review, BLOCKS_APP, BLOCKS_INSTALL, smcbd_policy),
+                     (good.review, 0, BLOCKS_INSTALL, good.policy),
+                     (good.review, BLOCKS_APP, 0, good.policy),
+                     (good.review, "3003", BLOCKS_INSTALL, good.policy),
+                     (good.review, BLOCKS_APP, "1001", good.policy),
+                     (good.review, True, BLOCKS_INSTALL, good.policy),
+                     ("dinkuskit/blocks", BLOCKS_APP, BLOCKS_INSTALL, good.policy),
+                     (good.review, BLOCKS_APP, BLOCKS_INSTALL, {"commit": BLOCKS_COMMIT})]:
             with self.subTest(args=args), self.assertRaises(ta.AdmissionError):
                 ta.Admission(*args)
         for kwargs in [{"repository": SMCBD}, {"repository": []},
@@ -307,7 +326,7 @@ class BindingTests(unittest.TestCase):
             with self.subTest(kwargs=kwargs), self.assertRaises(ta.AdmissionError):
                 dataclasses.replace(good.policy, **kwargs)
         for kwargs in [{"repository": SMCBD}, {"repository": []},
-                       {"repository_id": 1366416798}, {"installation_id": 0},
+                       {"repository_id": 1366416798}, {"app_id": 0}, {"installation_id": 0},
                        {"installation_account": "saari-co"}, {"approved_policy_commit": "main"}]:
             with self.subTest(kwargs=kwargs), self.assertRaises(ta.AdmissionError):
                 dataclasses.replace(self.registry.enrollments[0], **kwargs)
@@ -317,31 +336,33 @@ class BindingTests(unittest.TestCase):
             ta.Registry(("dinkuskit/blocks",))
         # Crafted objects that bypass __post_init__ must yield neither currency nor a binding.
         crafted = []
-        item = ta.Admission(good.review, BLOCKS_INSTALL, good.policy)
+        item = ta.Admission(good.review, BLOCKS_APP, BLOCKS_INSTALL, good.policy)
         object.__setattr__(item, "policy", smcbd_policy); crafted.append(item)
-        item = ta.Admission(good.review, BLOCKS_INSTALL, good.policy)
+        item = ta.Admission(good.review, BLOCKS_APP, BLOCKS_INSTALL, good.policy)
+        object.__setattr__(item, "app_id", "3003"); crafted.append(item)
+        item = ta.Admission(good.review, BLOCKS_APP, BLOCKS_INSTALL, good.policy)
         object.__setattr__(item, "installation_id", "1001"); crafted.append(item)
         review = dataclasses.replace(good.review)
         object.__setattr__(review, "repository", SMCBD)
-        item = ta.Admission(good.review, BLOCKS_INSTALL, good.policy)
+        item = ta.Admission(good.review, BLOCKS_APP, BLOCKS_INSTALL, good.policy)
         object.__setattr__(item, "review", review); crafted.append(item)
         review = dataclasses.replace(good.review)
         object.__setattr__(review, "head_sha", review.base_sha)
-        item = ta.Admission(good.review, BLOCKS_INSTALL, good.policy)
+        item = ta.Admission(good.review, BLOCKS_APP, BLOCKS_INSTALL, good.policy)
         object.__setattr__(item, "review", review); crafted.append(item)
         policy = dataclasses.replace(good.policy)
         object.__setattr__(policy, "repository_id", 1366416798)
-        item = ta.Admission(good.review, BLOCKS_INSTALL, good.policy)
+        item = ta.Admission(good.review, BLOCKS_APP, BLOCKS_INSTALL, good.policy)
         object.__setattr__(item, "policy", policy); crafted.append(item)
         policy = dataclasses.replace(good.policy)
         object.__setattr__(policy, "quiet_seconds", 601)
-        item = ta.Admission(good.review, BLOCKS_INSTALL, good.policy)
+        item = ta.Admission(good.review, BLOCKS_APP, BLOCKS_INSTALL, good.policy)
         object.__setattr__(item, "policy", policy); crafted.append(item)
         policy = dataclasses.replace(good.policy)
         object.__setattr__(policy, "default_branch", "forged")
-        item = ta.Admission(good.review, BLOCKS_INSTALL, good.policy)
+        item = ta.Admission(good.review, BLOCKS_APP, BLOCKS_INSTALL, good.policy)
         object.__setattr__(item, "policy", policy); crafted.append(item)
-        item = ta.Admission(good.review, BLOCKS_INSTALL, good.policy)
+        item = ta.Admission(good.review, BLOCKS_APP, BLOCKS_INSTALL, good.policy)
         object.__setattr__(item, "review", None); crafted.append(item)
         for item in crafted:
             with self.subTest(item=item):
@@ -352,7 +373,7 @@ class BindingTests(unittest.TestCase):
                     item.revalidate()
         # A well-formed object bound to the other account's installation is only detectable
         # against the registry: never current, and it cannot be re-admitted.
-        borrowed = ta.Admission(good.review, BLOCKS_INSTALL, good.policy)
+        borrowed = ta.Admission(good.review, BLOCKS_APP, BLOCKS_INSTALL, good.policy)
         object.__setattr__(borrowed, "installation_id", SMCBD_INSTALL)
         self.assertFalse(ta.policy_is_current(borrowed, self.registry))
         with self.assertRaises(ta.AdmissionError):

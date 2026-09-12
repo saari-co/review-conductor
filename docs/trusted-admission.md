@@ -19,7 +19,11 @@ to this repository; tests build synthetic registries in memory.
     {
       "repository": "dinkuskit/blocks",
       "repository_id": 1306882611,
-      "installation": {"id": 0, "account": "dinkuskit"},
+      "github_app": {
+        "id": 0,
+        "installation_id": 0,
+        "installation_account": "dinkuskit"
+      },
       "approved_policy": {"commit": "<40 lowercase hex>", "sha256": "<64 lowercase hex>"}
     }
   ]
@@ -36,17 +40,18 @@ Rules enforced by `load_registry`:
   (`1306882611`, `1366416798`, from the historical profiles). Any other value
   for those names is rejected, so a registry cannot rebind a name to another
   repository.
-- `installation.id` is a positive integer and `installation.account` must be the
+- `github_app.id` and `github_app.installation_id` are positive integers and
+  `github_app.installation_account` must be the
   repository owner segment. A Saari installation cannot serve a Dinkus repository
-  or vice versa. No installation ID is recorded in this repository; the illustrative
-  `0` above is invalid and would be rejected.
+  or vice versa. The inactive SMCBD profile records the non-secret App and
+  installation IDs; the illustrative `0` above is invalid and would be rejected.
 - `approved_policy` is the approved default-branch commit plus the SHA-256 of the
   exact manifest bytes at that commit. Both are required.
 - Repository names, numeric IDs and installation IDs must be unique across the
   registry.
 
-`Registry.lookup(repository, repository_id, installation_id)` succeeds only when
-all three agree with one enrollment; strings, booleans or a neighbouring
+`Registry.lookup(repository, repository_id, app_id, installation_id)` succeeds
+only when all four agree with one enrollment; strings, booleans or a neighbouring
 enrollment's values fail.
 
 ## Approved base-policy loading
@@ -76,13 +81,13 @@ different one.
 ## Tuple/epoch binding
 
 `admit(registry, request, read_policy)` takes an untrusted request with exactly
-`repository, repository_id, installation_id, pr_number, base_sha, head_sha,
+`repository, repository_id, app_id, installation_id, pr_number, base_sha, head_sha,
 review_epoch, policy_commit`. It resolves the enrollment, constructs a validated
 frozen `ReviewTuple` (owner/name, positive IDs, 40-hex lowercase SHAs, base ≠
 head, epoch ≥ 0), refuses `policy_commit == head_sha` unless that is already the
 approved commit, and loads the approved policy. The frozen `Admission` exposes
 `binding_id`: the SHA-256 of canonical JSON over repository, repository_id,
-pr_number, base_sha, head_sha, review_epoch, installation_id and `policy_id`.
+pr_number, base_sha, head_sha, review_epoch, App ID, installation ID and `policy_id`.
 Any base/head/epoch/PR change, and any policy promotion, yields a new binding.
 
 `policy_is_current(admission, registry)` is true only while the registry still
@@ -106,7 +111,12 @@ against the registry, where it is never current and cannot be re-admitted.
 
 ## What this does not do
 
-No GitHub App, installation, webhook, credential, transport, database, event
-outbox, check publication, adjudication or merge behaviour. Nothing is activated
-by this module's presence; the packaged scaffold still exposes only
-`validate-manifest`. The legacy engine and profiles are unchanged.
+The inert library itself performs no I/O. `tools/service_runtime.py` composes it
+with authenticated webhook ingress, GitHub approved-policy transport and atomic
+SQLite binding persistence. One exact tuple keeps exactly one binding: a later
+delivery that would bind the same tuple to a different policy is refused and
+rolled back, so a promoted policy applies only to a newly admitted head/epoch.
+That source is inactive until an external 0600 service registry with at least
+one enrollment, credentials, an enabled profile and an HTTPS edge exist. No event
+outbox, deployment, live check publication, adjudication or merge behaviour is
+activated; the packaged scaffold still exposes only `validate-manifest`.

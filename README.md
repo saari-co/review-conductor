@@ -35,14 +35,15 @@ merge, or credential commands.
 | --- | --- |
 | `tools/review_conductor*.py` | Extracted engine and compatibility adapters |
 | `tools/conductor_cli.py`, `tools/target_manifest.py` | Independent offline CLI and target contract |
-| `tools/trusted_admission.py` | Service-owned enrollment registry, approved base-policy loader and tuple/epoch policy binding (library only; not packaged, no transport) |
+| `tools/trusted_admission.py` | Inert service-owned enrollment and policy-binding library |
+| `tools/service_runtime.py`, `tools/service_entrypoint.py` | Inactive authenticated ingress, policy transport/binding and guarded worker entrypoint; not packaged or deployed |
 | `contracts/target-manifest.schema.json` | Versioned repository manifest schema |
-| `contracts/review-conductor/` | Unchanged historical profile fixtures, not deployment configuration |
+| `contracts/review-conductor/` | Unchanged historical Blocks profile fixtures plus the inactive SMCBD candidate profile; not deployment configuration |
 | `tests/` | Blocks compatibility, isolated SMCBD, manifest and packaged-build coverage |
 | `docs/` | Architecture, integration, migration and source provenance |
 
 [Architecture](docs/architecture.md) · [Integration contract](docs/integration-contract.md)
-· [Trusted admission](docs/trusted-admission.md) · [Migration status](docs/migration.md)
+· [Trusted admission](docs/trusted-admission.md) · [SMCBD pilot handoff](docs/smcbd-pilot-handoff.md) · [Migration status](docs/migration.md)
 · [Proof](proof/scaffold-20260911/PROOF.md)
 
 No open-source license is assigned by this scaffold; licensing remains an owner

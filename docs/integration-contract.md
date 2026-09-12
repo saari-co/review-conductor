@@ -16,7 +16,7 @@ credential selectors, reviewer identity overrides, or install/state roots.
 `validate-manifest` performs syntax/policy checks offline. A valid manifest is
 **not enrollment, identity verification, review PASS, or activation approval**.
 
-## Trusted admission (library implemented; transport not implemented)
+## Trusted admission (library and source transport implemented; not deployed)
 
 1. Resolve repository numeric ID and installation from the service-owned registry.
 2. Read policy from the registry's approved base commit and content hash, not
@@ -29,11 +29,14 @@ credential selectors, reviewer identity overrides, or install/state roots.
    then comprehensive OpenClaw, then comprehensive ClawSweeper. A missing or
    skipped rail is not PASS; no result authorizes merge.
 
-`tools/trusted_admission.py` implements steps 1-4 offline: see
-[trusted-admission.md](trusted-admission.md). Transport, the authenticated
-service surface and the live registry are still absent; the legacy engine does
-not yet ingest these manifests. Do not claim the manifest validator or the
-admission library enforces live admission.
+`tools/trusted_admission.py` implements the inert contract. The source-only
+`tools/service_runtime.py` authenticates before parsing, rejects unknown App /
+installation / numeric repository tuples, retrieves only the approved manifest
+path at the pinned commit, and persists the policy binding in the same SQLite
+transaction as the engine delivery. Worker/check projection is blocked if a
+current head lacks a current binding. See [trusted admission](trusted-admission.md).
+No live registry, credential, HTTPS edge or deployment exists, so this is
+qualified source behavior, not live admission.
 
 ## Service-owned enrollment
 
@@ -42,7 +45,10 @@ App installation, webhook/adapter credential references, ingress and per-target
 checkout/state/proof paths outside target Git. Each installation, webhook secret,
 reviewer credential boundary and mutable store must be isolated. A target cannot
 request another target's installation, read its evidence, or supply its reviewers.
-No credentials or live deployment files are included in the scaffold.
+No credentials or live deployment files are included. The inactive SMCBD
+candidate pins App `4916376`, installation `161027021`, repository
+`saari-co/openclaw-smcbd-suite` and repository ID `1366416798` while retaining
+explicit activation blockers.
 
 ## Gateway/client contract (planned; no server or plugin installed)
 

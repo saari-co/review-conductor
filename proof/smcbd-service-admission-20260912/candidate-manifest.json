@@ -1,0 +1,33 @@
+{
+  "base_main": "320534450bbfe924bf855b762a0f9358f0b40336",
+  "candidate_source": "8e90d46b9287f37382dba1eb5569b0f824a28084",
+  "candidate_source_branch": "openclaw/review-conductor-trusted-admission-fable (local only)",
+  "captured_utc": "2026-09-12T12:17:49Z",
+  "repair_lineage": [
+    "candidate 8e90d46 ported onto merged PR #2 main; tests/test_trusted_admission.py merged with the PR #2 manifest_bytes/reader-failure hardening plus App-ID binding",
+    "service_entrypoint: AdmissionError from the profile enrollment lookup is normalized to ServiceError so main exits 2 instead of raising; empty registries are refused; stderr via sys",
+    "test_service_runtime: registry spy proves no enrollment lookup before HMAC; config/registry App mismatch cases; post-promotion conflicting rebinding; full loopback HTTP matrix; entrypoint inactivity; executable disposable-copy mutants with subprocess watchdog",
+    "docs: README profile-fixture row and trusted-admission single-binding semantics"
+  ],
+  "files": {
+    "Makefile": "b640756b3a3e3c877a0fa8201e1aaf2d1a3a506cdd4c7b7a412fe0d2e2baa0e9",
+    "README.md": "7faa2f7b5975304fac12ea49760bc6c47b554b9b0a5a2f796c8e8277cef348cc",
+    "SECURITY.md": "6e5d1d6bee585bf221ed801e404965a6dcc77463ec1779ad0cbb9f7bac63f288",
+    "contracts/review-conductor/openclaw-smcbd-suite-userland.json": "6911c652241ba1acc3ddadcf6e3c0885fba161c946df7f92b48011f134227d24",
+    "docs/bootstrap.md": "d7fab758e263f1b7ba1c8a1431fa435bfa17685cd533fc603720130d860cca87",
+    "docs/integration-contract.md": "7eeee922a2df68a243b6985ffb23adbcaa5d2c1b08f817fd91311792676a40fb",
+    "docs/migration.md": "d5f54ee65b1db288ad346dcff0c789e31570e899a4e05dc4ca0582ef51031e89",
+    "docs/provenance.json": "575ccfd6d2719f7f5d46bd927be158833fe506eea89cb9de8ab85eeac5f2e0e8",
+    "docs/smcbd-pilot-handoff.md": "541b770fd4c8875fb385e2ee70a21650bdc80232cbe4f7bea054c46644a5b450",
+    "docs/trusted-admission.md": "00ccd7822370148123514a20456544e72f719816c93a6cf47e5b6837c6850fb1",
+    "tests/test_review_conductor_profiles.py": "bafad178ef7e5e4c0adb5c58f5a6141d0607fa1fa5131053cfaccab3877a6c88",
+    "tests/test_service_runtime.py": "afc7c3bd90ecb7a6b22d101c89bc235c5f65ed83cfb91bc68c0d411506968236",
+    "tests/test_trusted_admission.py": "386b11d0c1ad637b94564e434063ff9e793841fb2bbd86b2e74e40da4b525ac2",
+    "tools/review_conductor.py": "2b5ae0336b1f754866680eaeb775df5643cb73983fdb250600304b47a43c7097",
+    "tools/review_conductor_runtime.py": "e163dce2311803b4421de28adfd7880d5a23bfcb558eb8f531b773b6e11782b7",
+    "tools/review_conductor_userland.py": "fee2a853922b38ffe79df6d572109f01794aba7005b6dd2ee3e5ea117e1b6a9d",
+    "tools/service_entrypoint.py": "7329ebefca7798d6c0470beb4b6017b123644484eb338fbafb82ec203a9446d6",
+    "tools/service_runtime.py": "f2e74d7ba776f763aaa20fdc8dba382ec62c0f9a566b170b9b1f1547909eb790",
+    "tools/trusted_admission.py": "169d8b6fe20900639d12a3edd6daf3a0d9ce703f7ac1d2589bbeb9ff8db1c2c6"
+  }
+}

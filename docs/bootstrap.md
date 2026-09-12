@@ -37,13 +37,13 @@ service deployment, authoritative checks or migration. Keep those grants separat
 ## Ordered work after scaffold acceptance
 
 1. Trusted enrollment and approved base-policy loader/hash binding: implemented
-   as an offline, unpackaged library that fails closed on missing identities,
-   mismatch, or PR-head policy self-promotion ([contract](trusted-admission.md)).
-   Wiring it to service transport and a live registry remains separate work.
+   as an inert library plus authenticated source integration. A live external
+   registry, target approved-policy commit and credentials remain unprovisioned.
 2. Implement authenticated service/client API and typed event outbox. Keep
    notification sends singly owned; no direct Gateway/Smoky state access.
-3. Qualify webhook/check publishing, OpenClaw comprehensive exact-tuple review,
-   and ClawSweeper exact-tuple dispatch/artifacts with stale/cross-target tests.
+3. Webhook/check/policy adapters now have isolated source qualification. Still
+   required: live shadow qualification of OpenClaw comprehensive exact-tuple
+   review and ClawSweeper dispatch/artifacts with genuine App-owned checks.
 4. With separate authorization, deploy isolated shadow mode: per-target
    credentials/state and non-authoritative canary check names. Validate rollback,
    exact source, genuine evidence and health. Never dual authoritative writers.

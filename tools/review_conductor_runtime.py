@@ -48,6 +48,10 @@ APP_PERMISSIONS = {
     "metadata": "read",
     "pull_requests": "write",
 }
+STANDALONE_APP_PERMISSIONS = {
+    **APP_PERMISSIONS,
+    "contents": "read",
+}
 DENIED_PERMISSIONS = {
     "administration",
     "contents",
@@ -59,6 +63,7 @@ DENIED_PERMISSIONS = {
     "secrets",
     "workflows",
 }
+STANDALONE_DENIED_PERMISSIONS = DENIED_PERMISSIONS - {"contents"}
 APP_EVENTS = ["pull_request", "workflow_run"]
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 API_VERSION = "2022-11-28"
@@ -240,6 +245,7 @@ class GitHubAppClient:
         transport: Transport = urllib_transport,
         artifact_transport: ArtifactTransport | None = None,
         clock: Callable[[], float] = time.time,
+        signer: Callable[[int, str, int], str] | None = None,
     ) -> None:
         core.require_enabled({"review_policy": config.get("review_policy", {})})
         app = config["github_app"]
@@ -261,6 +267,7 @@ class GitHubAppClient:
             or (lambda url, headers, timeout: transport("GET", url, headers, None, timeout))
         )
         self._clock = clock
+        self._signer = signer or sign_app_jwt
         self._token: str | None = None
         self._token_expires = 0.0
 
@@ -274,6 +281,11 @@ class GitHubAppClient:
             ("POST", rf"/app/installations/{self._app['installation_id']}/access_tokens", "installation-token"),
             ("POST", rf"/repos/{repository}/check-runs", "check-create"),
             ("PATCH", rf"/repos/{repository}/check-runs/[1-9][0-9]*", "check-update"),
+            (
+                "GET",
+                rf"/repos/{repository}/contents/\.review-conductor\.json\?ref=[0-9a-f]{{40}}",
+                "approved-policy-read",
+            ),
             ("POST", rf"/repos/{repository}/issues/[1-9][0-9]*/labels", "label-add"),
             ("DELETE", rf"/repos/{repository}/issues/[1-9][0-9]*/labels/.+", "label-remove"),
             (
@@ -354,7 +366,7 @@ class GitHubAppClient:
     def _installation_token(self) -> str:
         if self._token is not None and self._clock() < self._token_expires - 60:
             return self._token
-        app_jwt = sign_app_jwt(
+        app_jwt = self._signer(
             self._app["app_id"], self._private_key, int(self._clock())
         )
         response = self._call(
@@ -363,7 +375,9 @@ class GitHubAppClient:
             {
                 "repositories": [self.repository.split("/", 1)[1]],
                 "permissions": {
-                    name: level for name, level in APP_PERMISSIONS.items() if name != "metadata"
+                    name: level
+                    for name, level in self._app["permissions"].items()
+                    if name != "metadata"
                 },
             },
             expected={201},
@@ -380,6 +394,32 @@ class GitHubAppClient:
         self._token = token
         self._token_expires = expiry
         return token
+
+    def read_policy(self, repository: str, commit: str) -> bytes:
+        if repository != self.repository:
+            raise GitHubApiError("approved policy repository is outside the installation")
+        core.require_sha(commit, "approved policy commit")
+        _operation, raw = self._call_raw(
+            "GET",
+            f"/repos/{self.repository}/contents/.review-conductor.json?ref={commit}",
+            None,
+            expected={200},
+        )
+        try:
+            response = core.require_object(json.loads(raw), "approved policy response")
+            if response.get("encoding") != "base64" or not isinstance(response.get("content"), str):
+                raise GitHubApiError("approved policy response is not base64 file content")
+            encoded = response["content"]
+            if re.fullmatch(r"[A-Za-z0-9+/=\r\n]+", encoded) is None:
+                raise GitHubApiError("approved policy response is not canonical base64")
+            content = base64.b64decode(
+                encoded.replace("\r", "").replace("\n", ""), validate=True
+            )
+        except (ValueError, UnicodeError, json.JSONDecodeError, core.ContractError) as exc:
+            raise GitHubApiError("approved policy response is malformed") from exc
+        if not content or len(content) > 16384:
+            raise GitHubApiError("approved policy content has an invalid bounded size")
+        return content
 
     def create_check(self, name: str, head_sha: str, external_id: str, state: str) -> int:
         if name not in CHECK_NAMES:
@@ -1705,7 +1745,8 @@ def write_wake(path: Path, reason: str) -> None:
 
 
 def handle_webhook_request(
-    config: dict[str, Any], *, method: str, path: str, headers: dict[str, str], body: bytes, secret: str
+    config: dict[str, Any], *, method: str, path: str, headers: dict[str, str], body: bytes,
+    secret: str, ingestor: Callable[..., dict[str, Any]] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     ingress = config["ingress"]
     if method != "POST":
@@ -1721,7 +1762,7 @@ def handle_webhook_request(
     delivery_id = headers.get("x-github-delivery", "")
     signature = headers.get("x-hub-signature-256", "")
     try:
-        receipt = core.ingest_github_delivery(
+        receipt = (ingestor or core.ingest_github_delivery)(
             config_path=Path(config["core_config"]),
             state_root=Path(config["paths"]["state_root"]),
             event_type=event_type,
@@ -1746,7 +1787,10 @@ def handle_webhook_request(
         return HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "reason": "state_unavailable"}
 
 
-def build_http_handler(config: dict[str, Any], secret: str) -> type[BaseHTTPRequestHandler]:
+def build_http_handler(
+    config: dict[str, Any], secret: str,
+    *, ingestor: Callable[..., dict[str, Any]] | None = None,
+) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         server_version = "SmokyReviewConductor/1"
         sys_version = ""
@@ -1781,7 +1825,8 @@ def build_http_handler(config: dict[str, Any], secret: str) -> type[BaseHTTPRequ
                 return
             headers = {key.lower(): value for key, value in self.headers.items()}
             status, payload = handle_webhook_request(
-                config, method="POST", path=self.path, headers=headers, body=body, secret=secret
+                config, method="POST", path=self.path, headers=headers, body=body,
+                secret=secret, ingestor=ingestor,
             )
             self._write(status, payload)
 
