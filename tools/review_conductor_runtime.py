@@ -92,7 +92,8 @@ class RetryableIngestError(Exception):
     """A dependency failed transiently before any state was written.
 
     Deliberately not a ContractError: the delivery was neither malformed nor
-    foreign, so the HTTP edge answers 503 and GitHub redelivers it.
+    foreign, so the HTTP edge answers 503 and leaves the delivery redeliverable
+    from GitHub's delivery log or API (GitHub does not retry automatically).
     """
 
 
@@ -269,13 +270,20 @@ class GitHubAppClient:
         # later, so a caller mutating its own config after construction must not
         # be able to change the permissions the adapter validated here.
         app = copy.deepcopy(config["github_app"])
-        # The adapter derives its token request from this map, so it must be one of
-        # the two closed allowlists regardless of how the client was constructed.
-        if app.get("permissions") not in (APP_PERMISSIONS, STANDALONE_APP_PERMISSIONS):
-            raise GitHubApiError("GitHub App permissions are outside the closed allowlists")
+        # The adapter derives its token request from this map, so it must be exactly
+        # the closed allowlist the profile kind authorizes: only generalized
+        # (standalone) profiles may request Contents read for approved-policy
+        # retrieval; a legacy profile is held to the legacy allowlist.
+        expected_permissions = STANDALONE_APP_PERMISSIONS if config.get("review_policy") else APP_PERMISSIONS
+        if app.get("permissions") != expected_permissions:
+            raise GitHubApiError("GitHub App permissions are outside the profile's closed allowlist")
         if config.get("review_policy") and not config.get("clawsweeper"):
             raise RuntimeError("generalized profile requires its own ClawSweeper adapter")
-        self._clawsweeper = config.get("clawsweeper", {"workflow_id": "clawsweeper-native-canary.yml", "ref": "main"})
+        # Same for the ClawSweeper map: _allow() and dispatch derive the authorized
+        # workflow endpoint from it.
+        self._clawsweeper = copy.deepcopy(
+            config.get("clawsweeper", {"workflow_id": "clawsweeper-native-canary.yml", "ref": "main"})
+        )
         self._strict_adapter = bool(config.get("review_policy"))
         if app["app_id"] is None or app["installation_id"] is None:
             raise RuntimeError("GitHub App IDs are not configured")
@@ -294,6 +302,17 @@ class GitHubAppClient:
         self._signer = signer or sign_app_jwt
         self._token: str | None = None
         self._token_expires = 0.0
+        self._authority_guard: Callable[[str, str], None] | None = None
+
+    def set_authority_guard(self, guard: Callable[[str, str], None] | None) -> None:
+        """Install a check that runs before every mutating GitHub call.
+
+        The service uses it to re-validate current admission (registry, reviewer
+        actors, profile digest) immediately before each side effect of a tick, so
+        a revocation or profile edit after the tick's opening gate cannot leave
+        the remainder of that tick dispatching or publishing.
+        """
+        self._authority_guard = guard
 
     @property
     def repository(self) -> str:
@@ -369,6 +388,8 @@ class GitHubAppClient:
         app_jwt: str | None = None,
     ) -> tuple[str, bytes]:
         operation = self._allow(method, path)
+        if self._authority_guard is not None and method != "GET":
+            self._authority_guard(method, path)
         token = app_jwt if operation == "installation-token" else self._installation_token()
         headers = {
             "Accept": "application/vnd.github+json",

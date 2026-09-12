@@ -2,7 +2,7 @@
   "base_main": "320534450bbfe924bf855b762a0f9358f0b40336",
   "candidate_source": "8e90d46b9287f37382dba1eb5569b0f824a28084",
   "candidate_source_branch": "openclaw/review-conductor-trusted-admission-fable (local only)",
-  "captured_utc": "2026-09-12T14:05:31Z",
+  "captured_utc": "2026-09-12T14:24:12Z",
   "repair_lineage": [
     "candidate 8e90d46 ported onto merged PR #2 main; tests/test_trusted_admission.py merged with the PR #2 manifest_bytes/reader-failure hardening plus App-ID binding",
     "service_entrypoint: AdmissionError from the profile enrollment lookup is normalized to ServiceError so main exits 2 instead of raising; empty registries are refused; stderr via sys",
@@ -13,7 +13,8 @@
     "Copilot review at 8009e5e3e806098e132f4e81e7802d926f103fbb (2 new findings): registry path walked with held directory descriptors (O_DIRECTORY|O_NOFOLLOW, dir_fd) and forbidden roots checked by device/inode; enrollment schema gains authoritative reviewers block and the profile's review_policy.reviewers must agree on every provide/tick/delivery",
     "Copilot review at 83668102fdc1df8337eaa32af14571cf87e1164c (2 new findings): each binding persists the enrollment's reviewer actors and a digest of the policy-governed engine-profile fields; binding currency requires both to still hold on every tick, so reviewer rotation or a profile edit after admission blocks projection until re-admission",
     "Suppressed Copilot findings from the reviews at 8009e5e and 8366810 (6 items still open at cfe7908): approved-policy transport staged before BEGIN IMMEDIATE with a bounded hash-verified cache and an I/O-free hook reader; transient transport/429/5xx failures become RetryableIngestError mapped to HTTP 503 dependency_unavailable with nothing written; registry ancestors canonicalized only and the original leaf opened O_NOFOLLOW under the held parent; resolve() symlink-loop RuntimeError normalized to a fail-closed ServiceError (main exits 2); binascii.Error explicitly normalized in read_policy; direct cross-App binding_id regression and mutant",
-    "Copilot review at 0033873c80f99ca4107a58562cf6bca921e654ce (3 inline + 2 suppressed): policy staging is on demand (hook signals PolicyNotStaged inside the transaction, rollback, fetch outside any lock, one re-run) so closed/duplicate/stale deliveries never touch the policy dependency; staged cache guarded by a lock with post-fetch re-check; canonical parent identity pinned by device/inode against a real directory renamed into place; GitHubAppClient snapshots the caller's App map; profile digest extended with ClawSweeper workflow id/name/path/ref/publish and adapter contract/artifact prefix; docs corrected: GitHub does not retry webhook deliveries automatically"
+    "Copilot review at 0033873c80f99ca4107a58562cf6bca921e654ce (3 inline + 2 suppressed): policy staging is on demand (hook signals PolicyNotStaged inside the transaction, rollback, fetch outside any lock, one re-run) so closed/duplicate/stale deliveries never touch the policy dependency; staged cache guarded by a lock with post-fetch re-check; canonical parent identity pinned by device/inode against a real directory renamed into place; GitHubAppClient snapshots the caller's App map; profile digest extended with ClawSweeper workflow id/name/path/ref/publish and adapter contract/artifact prefix; docs corrected: GitHub does not retry webhook deliveries automatically",
+    "Copilot review at 7c16089346ad756a998d0f057e9a71e915d59b8b (2 inline wording nits + 5 suppressed): ClawSweeper map snapshotted; permission allowlist selected by profile kind; registry leaf opened O_NONBLOCK (FIFO cannot stall startup); hook re-validates the engine-reloaded profile against enrollment before staging/persisting; GitHubAppClient authority guard re-runs require_current_bindings before every mutating call during a tick; remaining 'GitHub redelivers' wording corrected"
   ],
   "files": {
     "Makefile": "b640756b3a3e3c877a0fa8201e1aaf2d1a3a506cdd4c7b7a412fe0d2e2baa0e9",
@@ -23,17 +24,17 @@
     "docs/bootstrap.md": "d7fab758e263f1b7ba1c8a1431fa435bfa17685cd533fc603720130d860cca87",
     "docs/integration-contract.md": "9a245f0cef202507eeceabee82b794f72041ed89a4225957744195c31d72c027",
     "docs/migration.md": "f0656d19c0d76e9ce8823745733790c744e505a3eb7f799ab2e20edbe1775fc2",
-    "docs/provenance.json": "3c43c09420c1dcf57877be02dbbb72e562136bcbeabd2d956ac25d0198752a06",
-    "docs/smcbd-pilot-handoff.md": "7966c7a96e677b81d8c53cca64a3486194488052406520ec4c87c2a5b092e956",
-    "docs/trusted-admission.md": "c88b3424a4e4955a823fdd0bb273dd949f03431a4b7079edf1d014f0f226e1ef",
+    "docs/provenance.json": "04d1e429e1087847fcb9b5d7951628085a5d3f81c451fd49d30dedc27c639e7b",
+    "docs/smcbd-pilot-handoff.md": "26bbd616c7c279164655b45e3b9a78815591f4f23ba2e25cf3da04ade284ffbd",
+    "docs/trusted-admission.md": "6b255dcc0271cad5b804730dc2171bf07f2495dfb076356535fccd8d99f455aa",
     "tests/test_review_conductor_profiles.py": "bafad178ef7e5e4c0adb5c58f5a6141d0607fa1fa5131053cfaccab3877a6c88",
-    "tests/test_service_runtime.py": "2beb3449f8935669f701c82e4ba895b555928dac37b3aed806c6347cdb5ec4d6",
+    "tests/test_service_runtime.py": "1b3418e964dc176eedbba9f4631360075f7248a3d0a5e9b2cd29eeb79e247cbf",
     "tests/test_trusted_admission.py": "c197cf28dd920497fb034c863402619b6843134ca21a7935d77dbf3beeb2316a",
     "tools/review_conductor.py": "2b5ae0336b1f754866680eaeb775df5643cb73983fdb250600304b47a43c7097",
-    "tools/review_conductor_runtime.py": "0be5a61f5f636a43dc7f3ec6f0b0fe9f52e99d9196390e01ef05f9e2559c7922",
+    "tools/review_conductor_runtime.py": "dfb8bfa9a4c2c5918d72ca3e6d5d9acd82e2c833883e79e23d1e43d4ca209e8d",
     "tools/review_conductor_userland.py": "fee2a853922b38ffe79df6d572109f01794aba7005b6dd2ee3e5ea117e1b6a9d",
-    "tools/service_entrypoint.py": "fdbac554401a84777c7d88d22a7a231d8ccd382faa9a09f9184c4210c88198f6",
-    "tools/service_runtime.py": "173225d183768ceb17111e8fd43a893edbed92107bea011f29a0d99e023dcaeb",
+    "tools/service_entrypoint.py": "e8032e2f48bfe4eebb608f777e24dd90f765cb3b56c25f4ae3dba563a7d13509",
+    "tools/service_runtime.py": "f169efd6faee5f7403a77dabac884e2858e83ce74117d4759a1505ab7b3cf17d",
     "tools/trusted_admission.py": "bfc0ae24bc7e1db054eaf852076601d96537f11ee6b0fb83263023a18678f2e5"
   }
 }

@@ -148,7 +148,10 @@ transient transport failure (connection error, timeout, HTTP 429/5xx) is a
 retryable service failure: the webhook answers 503 `dependency_unavailable` and
 nothing is written, so the delivery can be redelivered from GitHub's delivery
 log or API (GitHub does not retry automatically). Malformed, foreign or
-otherwise rejected deliveries still answer 400.
+otherwise rejected deliveries still answer 400. Before staging or persisting,
+the hook re-validates the core profile the engine reloaded for that delivery
+against the enrollment, and every mutating GitHub call made by a worker tick
+re-runs the tick's admission gate through the adapter's authority guard.
 
 That source is inactive until an external
 service registry (mode exactly 0600, single link, non-writable same-user parent,

@@ -364,6 +364,11 @@ def _admission_hook(
             "review_epoch": row["review_epoch"],
             "policy_commit": enrolled.approved_policy_commit,
         }
+        # ``config`` is the core profile the engine reloaded for this delivery, which
+        # may differ from the one preflight saw; it must still be the registry's
+        # enrollment (App, installation, repository and reviewer actors) before any
+        # binding is staged or persisted under it.
+        require_profile_enrolled(service_config, registry, config)
         # The engine has classified this delivery as a binding candidate. Only now
         # are policy bytes required; if they are not staged, unwind the transaction
         # (nothing written) so the caller can fetch them outside the lock.
@@ -559,8 +564,19 @@ def run_service_tick(
     *,
     dry_run: bool,
 ) -> dict[str, Any]:
-    """Run the legacy-compatible worker only behind current admission bindings."""
+    """Run the legacy-compatible worker only behind current admission bindings.
+
+    The opening gate is re-run before every mutating GitHub call the tick makes
+    (check creation/update, ClawSweeper dispatch) through the client's authority
+    guard, so a registry revocation or profile edit after the gate stops the
+    remainder of the tick instead of letting it publish under stale authority.
+    """
     require_current_bindings(config, registry)
     import review_conductor_userland as userland
 
+    if not dry_run:
+        install = getattr(client, "set_authority_guard", None)
+        if install is None:
+            raise ServiceError("tick client cannot carry the admission authority guard")
+        install(lambda _method, _path: require_current_bindings(config, registry))
     return userland.run_tick(config, client, notifier, dry_run=dry_run)

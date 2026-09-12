@@ -100,7 +100,9 @@ def _open_registry_descriptor(
                 "service enrollment registry parent must be a same-user directory that is not group/world writable"
             )
         try:
-            return os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=held)
+            # O_NONBLOCK keeps a same-user FIFO at this path from blocking startup
+            # forever; the descriptor is then required to be a regular file.
+            return os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=held)
         except OSError as exc:
             raise service.ServiceError("service enrollment registry is unavailable or is a symlink") from exc
     finally:

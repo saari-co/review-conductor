@@ -21,8 +21,8 @@
       "source_path": "tools/review_conductor_runtime.py",
       "destination_path": "tools/review_conductor_runtime.py",
       "source_sha256": "22fff3925db126de0fc27e9c61be03cd710d24d9140342ff8367e9831e683d40",
-      "destination_sha256": "0be5a61f5f636a43dc7f3ec6f0b0fe9f52e99d9196390e01ef05f9e2559c7922",
-      "adaptation": "standalone policy-read/check adapter: Contents-read allowlist, profile-scoped token permissions validated against the two closed allowlists on a snapshot of the caller's map, injected signer seam, admitted HTTP ingestor, transient transport/429/5xx classification and retryable-ingest 503 mapping"
+      "destination_sha256": "dfb8bfa9a4c2c5918d72ca3e6d5d9acd82e2c833883e79e23d1e43d4ca209e8d",
+      "adaptation": "standalone policy-read/check adapter: Contents-read allowlist selected by profile kind and validated on a snapshot of the caller's App and ClawSweeper maps, injected signer seam, admitted HTTP ingestor, transient transport/429/5xx classification, retryable-ingest 503 mapping and a per-call admission authority guard before mutating GitHub operations"
     },
     {
       "source_path": "tools/review_conductor_userland.py",

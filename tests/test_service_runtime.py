@@ -610,7 +610,8 @@ class AdmissionIngressTests(unittest.TestCase):
             finally:
                 connection.close()
 
-        # Transient transport failure: 503, nothing persisted, GitHub redelivers.
+        # Transient transport failure: 503, nothing persisted; the delivery stays
+        # redeliverable from GitHub's delivery log/API (GitHub does not auto-retry).
         status, payload = runtime.handle_webhook_request(**request, ingestor=ingestor)
         self.assertEqual((int(status), payload), (503, {"ok": False, "reason": "dependency_unavailable"}))
         self.assertEqual(persisted(), (0, 0))
@@ -907,6 +908,138 @@ class AdmissionIngressTests(unittest.TestCase):
         expected = {name: level for name, level in runtime.STANDALONE_APP_PERMISSIONS.items() if name != "metadata"}
         self.assertEqual([request["permissions"] for request in token_requests], [expected])
         self.assertEqual(client.repository, REPOSITORY)
+
+    def test_client_clawsweeper_snapshot_and_profile_selected_permission_allowlist(self):
+        calls = []
+
+        def transport(method, url, headers, body, timeout):
+            calls.append((method, url))
+            if url.endswith("/access_tokens"):
+                return 201, json.dumps({"token": "fixture-token", "expires_at": "2099-01-01T00:00:00Z"}).encode()
+            return 204, b""
+
+        config = self.fx.app_config()
+        client = runtime.GitHubAppClient(config, "fixture-private-key", transport=transport,
+                                         signer=lambda *_: "fixture-jwt")
+        # Widening the caller's ClawSweeper map after construction must not widen the
+        # workflow-dispatch allowlist the client derived from it.
+        config["clawsweeper"]["workflow_id"] = "other-workflow.yml"
+        config["clawsweeper"]["ref"] = "release"
+        with self.assertRaises(core.ContractError):
+            client._call("POST", f"/repos/{REPOSITORY}/actions/workflows/other-workflow.yml/dispatches",
+                         {"ref": "release"}, expected={204})
+        self.assertEqual(calls, [])
+        client._call("POST", f"/repos/{REPOSITORY}/actions/workflows/clawsweeper-exact-tuple.yml/dispatches",
+                     {"ref": "main"}, expected={204})
+        self.assertEqual([url.rsplit("/", 2)[-2] for _method, url in calls if "dispatches" in url],
+                         ["clawsweeper-exact-tuple.yml"])
+        # The permission allowlist is selected by profile kind: a generalized profile
+        # must carry exactly the standalone map and a legacy profile exactly the
+        # legacy map; neither may present the other's.
+        legacy = {k: v for k, v in self.fx.app_config().items() if k not in ("review_policy", "clawsweeper", "adapter")}
+        legacy["github_app"]["permissions"] = dict(runtime.APP_PERMISSIONS)
+        runtime.GitHubAppClient(legacy, "fixture-private-key", transport=transport, signer=lambda *_: "fixture-jwt")
+        for label, bad in (
+            ("legacy-with-standalone", {**legacy, "github_app": {**legacy["github_app"], "permissions": dict(runtime.STANDALONE_APP_PERMISSIONS)}}),
+            ("generalized-with-legacy", {**self.fx.app_config(), "github_app": {**self.fx.app_config()["github_app"], "permissions": dict(runtime.APP_PERMISSIONS)}}),
+        ):
+            with self.subTest(label=label), self.assertRaises(core.ContractError):
+                runtime.GitHubAppClient(bad, "fixture-private-key", transport=transport, signer=lambda *_: "fixture-jwt")
+
+    def test_registry_fifo_fails_closed_instead_of_blocking_startup(self):
+        root = self.fx.root.resolve()
+        parent = root / "service"
+        parent.mkdir()
+        path = parent / "registry.json"
+        os.mkfifo(path, 0o600)
+        outcome = {}
+
+        def attempt():
+            try:
+                entrypoint.read_service_registry(path)
+                outcome["result"] = "loaded"
+            except core.ContractError as exc:
+                outcome["result"] = str(exc)
+
+        worker = threading.Thread(target=attempt, daemon=True)
+        worker.start()
+        worker.join(timeout=5)
+        self.assertFalse(worker.is_alive(), "opening a FIFO registry path blocked startup")
+        self.assertIn("regular file", outcome["result"])
+
+    def test_hook_revalidates_the_reloaded_core_profile_before_persisting(self):
+        original = json.loads(self.fx.config_path.read_text())
+        rotated = copy.deepcopy(original)
+        rotated["review_policy"]["reviewers"] = {"openclaw": "rotated-openclaw", "clawsweeper": REVIEWERS["clawsweeper"]}
+        loads = []
+        real_load = core.load_config
+
+        def racing_load(path, *args, **kwargs):
+            # Preflight sees the enrolled profile; the engine's own reload inside the
+            # delivery transaction sees an edited one.
+            loads.append(path)
+            if len(loads) >= 2:
+                self.fx.config_path.write_text(json.dumps(rotated) + "\n")
+            try:
+                return real_load(path, *args, **kwargs)
+            finally:
+                self.fx.config_path.write_text(json.dumps(original) + "\n")
+
+        with patch.object(core, "load_config", racing_load):
+            with self.assertRaises(core.ContractError) as ctx:
+                self.fx.ingest("racing-profile", self.fx.payload())
+        self.assertGreaterEqual(len(loads), 2)
+        self.assertIn("reviewer identities contradict", str(ctx.exception))
+        self.assertEqual(self.fx.binding_rows(), [])
+        connection = core.open_database(self.fx.state, REPOSITORY)
+        try:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0], 0)
+        finally:
+            connection.close()
+        self.assertEqual(self.fx.ingest("steady-profile", self.fx.payload())["result"], "accepted")
+
+    def test_tick_side_effects_revalidate_admission_before_each_mutating_call(self):
+        self.fx.ingest("initial", self.fx.payload())
+        calls = []
+        resolutions = []
+
+        def transport(method, url, headers, body, timeout):
+            calls.append((method, url))
+            if url.endswith("/access_tokens"):
+                return 201, json.dumps({"token": "fixture-token", "expires_at": "2099-01-01T00:00:00Z"}).encode()
+            return 201, json.dumps({"id": 11}).encode()
+
+        client = runtime.GitHubAppClient(self.fx.app_config(), "fixture-private-key", transport=transport,
+                                         signer=lambda *_: "fixture-jwt")
+        current = self.fx.registry()
+        revoked = self.fx.registry(policy=self.fx.policy + b"\n")
+
+        def provider():
+            # The opening gate sees the current registry; the registry is revoked
+            # before the tick's first mutating GitHub call.
+            resolutions.append(len(resolutions))
+            return current if len(resolutions) == 1 else revoked
+
+        def fake_tick(config, tick_client, notifier, *, dry_run):
+            tick_client.create_check("OpenClaw Review Rail", HEAD, "external", "queued")
+            return {"result": "unreachable"}
+
+        with patch.object(userland, "run_tick", fake_tick):
+            with self.assertRaises(core.ContractError):
+                service.run_service_tick(self.fx.app_config(), provider, client, object(), dry_run=False)
+        self.assertEqual(len(resolutions), 2)
+        self.assertEqual([url for method, url in calls if method != "GET" and "check-runs" in url], [])
+        # With authority intact the same side effect proceeds, and the guard is
+        # consulted once more for it.
+        resolutions.clear()
+        with patch.object(userland, "run_tick", fake_tick):
+            service.run_service_tick(self.fx.app_config(), lambda: current, client, object(), dry_run=False)
+        self.assertEqual(len([url for method, url in calls if method == "POST" and "check-runs" in url]), 1)
+        # Read-only calls are not side effects and pass without the guard; a client
+        # that cannot carry the guard cannot run a live tick at all.
+        self.assertIsNotNone(client._authority_guard)
+        with self.assertRaises(core.ContractError):
+            service.run_service_tick(self.fx.app_config(), lambda: current, object(), object(), dry_run=False)
 
     def test_registry_ancestor_swapped_for_symlink_after_canonicalization_is_refused(self):
         document = json.dumps({
@@ -1612,7 +1745,7 @@ MUTANTS = [
     (
         "mint tokens from an unvalidated permission map",
         "tools/review_conductor_runtime.py",
-        '        if app.get("permissions") not in (APP_PERMISSIONS, STANDALONE_APP_PERMISSIONS):\n',
+        '        if app.get("permissions") != expected_permissions:\n',
         "        if False:\n",
         "GitHubAdapterTests.test_token_is_exact_installation_repository_and_permission_scoped",
     ),
@@ -1717,8 +1850,8 @@ MUTANTS = [
     (
         "follow a symlinked registry leaf",
         "tools/service_entrypoint.py",
-        "            return os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=held)\n",
-        "            return os.open(name, os.O_RDONLY | os.O_CLOEXEC, dir_fd=held)\n",
+        "            return os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=held)\n",
+        "            return os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=held)\n",
         "AdmissionIngressTests.test_registry_leaf_swapped_for_symlink_after_canonicalization_is_refused",
     ),
     (
@@ -1734,6 +1867,48 @@ MUTANTS = [
         '             "review_epoch": self.review.review_epoch, "app_id": self.app_id,\n',
         '             "review_epoch": self.review.review_epoch,\n',
         "AdmissionIngressTests.test_binding_identity_separates_apps_with_identical_review_and_policy",
+    ),
+    (
+        "keep the caller's ClawSweeper map by reference",
+        "tools/review_conductor_runtime.py",
+        "        self._clawsweeper = copy.deepcopy(\n            config.get(\"clawsweeper\", {\"workflow_id\": \"clawsweeper-native-canary.yml\", \"ref\": \"main\"})\n        )\n",
+        "        self._clawsweeper = config.get(\"clawsweeper\", {\"workflow_id\": \"clawsweeper-native-canary.yml\", \"ref\": \"main\"})\n",
+        "AdmissionIngressTests.test_client_clawsweeper_snapshot_and_profile_selected_permission_allowlist",
+    ),
+    (
+        "accept either permission allowlist regardless of profile kind",
+        "tools/review_conductor_runtime.py",
+        '        expected_permissions = STANDALONE_APP_PERMISSIONS if config.get("review_policy") else APP_PERMISSIONS\n        if app.get("permissions") != expected_permissions:\n',
+        '        if app.get("permissions") not in (APP_PERMISSIONS, STANDALONE_APP_PERMISSIONS):\n',
+        "AdmissionIngressTests.test_client_clawsweeper_snapshot_and_profile_selected_permission_allowlist",
+    ),
+    (
+        "open the registry leaf without O_NONBLOCK",
+        "tools/service_entrypoint.py",
+        "            return os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=held)\n",
+        "            return os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=held)\n",
+        "AdmissionIngressTests.test_registry_fifo_fails_closed_instead_of_blocking_startup",
+    ),
+    (
+        "persist a binding under a reloaded profile that is no longer enrolled",
+        "tools/service_runtime.py",
+        "        require_profile_enrolled(service_config, registry, config)\n        # The engine has classified",
+        "        # The engine has classified",
+        "AdmissionIngressTests.test_hook_revalidates_the_reloaded_core_profile_before_persisting",
+    ),
+    (
+        "skip the authority guard before mutating GitHub calls",
+        "tools/review_conductor_runtime.py",
+        "        if self._authority_guard is not None and method != \"GET\":\n            self._authority_guard(method, path)\n",
+        "        pass\n",
+        "AdmissionIngressTests.test_tick_side_effects_revalidate_admission_before_each_mutating_call",
+    ),
+    (
+        "run a live tick without arming the authority guard",
+        "tools/service_runtime.py",
+        "        install(lambda _method, _path: require_current_bindings(config, registry))\n",
+        "        pass\n",
+        "AdmissionIngressTests.test_tick_side_effects_revalidate_admission_before_each_mutating_call",
     ),
     (
         "let the worker die silently on operational failure",
@@ -1814,7 +1989,8 @@ class GitHubAdapterTests(unittest.TestCase):
             with self.subTest(permissions=permissions), self.assertRaises(core.ContractError):
                 runtime.GitHubAppClient(config, "fixture-private-key", transport=transport,
                                         signer=lambda *_: "fixture-jwt")
-        legacy_config = self.fx.app_config()
+        legacy_config = {k: v for k, v in self.fx.app_config().items()
+                         if k not in ("review_policy", "clawsweeper", "adapter")}
         legacy_config["github_app"]["permissions"] = dict(runtime.APP_PERMISSIONS)
         runtime.GitHubAppClient(legacy_config, "fixture-private-key", transport=transport,
                                 signer=lambda *_: "fixture-jwt")

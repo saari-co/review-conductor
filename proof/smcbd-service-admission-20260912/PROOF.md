@@ -188,7 +188,9 @@ and `8366810` and were all reproduced against `cfe7908` before repair:
 16. **Transient policy failures answered 400.** `GitHubTransientError`
     (transport errors, HTTP 429/5xx) is raised by the adapter, and the service
     turns it into `RetryableIngestError`, which the webhook maps to 503
-    `dependency_unavailable` with nothing persisted so GitHub redelivers.
+    `dependency_unavailable` with nothing persisted, leaving the delivery
+    redeliverable from GitHub's delivery log or API (GitHub does not retry
+    webhook deliveries automatically).
     Non-transient reader failures, malformed and foreign deliveries still
     answer 400.
 17. **Leaf `is_symlink()`+`resolve()` TOCTOU.** Only the ancestors are
@@ -238,10 +240,39 @@ The `0033873c80f99ca4107a58562cf6bca921e654ce` results (local PASS; hosted run
 Documentation was also corrected: a 503 leaves the delivery redeliverable from
 GitHub's delivery log or API; GitHub does not retry automatically.
 
+## Seventh review repair after head `7c16089` (Copilot, two inline nits and five suppressed findings)
+
+The `7c16089346ad756a998d0f057e9a71e915d59b8b` results (local PASS; hosted run
+34698268704 success) are historical for that head.
+
+26. **ClawSweeper map by reference.** `GitHubAppClient` deep-copies the
+    ClawSweeper map too, so widening the caller's `workflow_id` afterwards
+    cannot widen the dispatch allowlist.
+27. **Either permission allowlist accepted.** The expected allowlist is selected
+    by profile kind: generalized profiles must present exactly the standalone
+    (Contents-read) map, legacy profiles exactly the legacy map.
+28. **FIFO at the registry path.** The leaf is opened with `O_NONBLOCK`; a
+    same-user FIFO fails closed as "not a regular file" instead of stalling
+    startup (proven with a bounded thread).
+29. **Hook trusted the engine-reloaded profile.** Before staging or persisting,
+    the hook runs `require_profile_enrolled` on the core profile the engine
+    reloaded for that delivery; a reviewer edit between preflight and the
+    engine's reload is refused with nothing written.
+30. **One-time tick gate.** `GitHubAppClient.set_authority_guard` runs before
+    every mutating call in `_call_raw`; `run_service_tick` arms it with
+    `require_current_bindings`, so a registry revocation after the opening gate
+    stops the tick before its first check write or dispatch. A live tick refuses
+    a client that cannot carry the guard.
+
+The two inline nits (PROOF.md item 16 and the `RetryableIngestError`
+docstring still saying GitHub redelivers) are corrected: a 503 leaves the
+delivery redeliverable from GitHub's delivery log or API; GitHub does not retry
+automatically.
+
 ## Verification at the repaired head (local CPython 3.14.6, macOS arm64)
 
 - `make check` — PASS: legacy engine/activation/userland/profile suites,
-  scaffold and repository guards, trusted admission (18), service runtime (39,
+  scaffold and repository guards, trusted admission (18), service runtime (43,
   including the mutation harness), launcher transport, workflow contract,
   extraction provenance (14 files) and Python compilation, `git diff --check`.
 - `make build` — PASS; the packaged zipapp still excludes service, admission
@@ -285,7 +316,13 @@ must fail its named test and only that test):
 31. accept a real directory renamed into the canonical parent's place;
 32. keep the caller's GitHub App map by reference;
 33. ignore ClawSweeper workflow authority in the profile digest;
-34. ignore the adapter artifact namespace in the profile digest.
+34. ignore the adapter artifact namespace in the profile digest;
+35. keep the caller's ClawSweeper map by reference;
+36. accept either permission allowlist regardless of profile kind;
+37. open the registry leaf without O_NONBLOCK;
+38. persist a binding under a reloaded profile that is no longer enrolled;
+39. skip the authority guard before mutating GitHub calls;
+40. run a live tick without arming the authority guard.
 
 Only CPython 3.14 was exercised locally; 3.11/3.12 evidence comes from hosted
 exact-head CI on the PR, recorded in the PR conversation, not here.

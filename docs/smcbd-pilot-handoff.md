@@ -46,7 +46,8 @@ device/inode, so a real directory renamed into place is refused) and a same-user
 directory that is not group/world writable, opens
 the original leaf name relative to that held parent without following symlinks
 (so a leaf swapped for a symlink is refused, never canonicalized), treats a
-symlink loop as an unavailable registry, validates and reads the opened descriptor,
+symlink loop as an unavailable registry, opens the leaf non-blocking so a FIFO
+cannot stall startup, validates and reads the opened descriptor,
 and re-reads and re-validates the file on every delivery and worker tick, so a
 promotion or revocation takes effect without restart and a registry that stops
 validating fails every delivery and tick closed. It must contain exactly the repository/name/ID,
@@ -74,7 +75,11 @@ closed, duplicate and stale deliveries never touch it. A transient GitHub
 failure answers the webhook with 503 `dependency_unavailable` and writes
 nothing, so the delivery can be redelivered from GitHub's delivery log or API
 (GitHub does not retry automatically), while malformed or foreign deliveries
-still answer 400. Fail-closed admission conditions are
+still answer 400. The delivery hook re-checks the engine's freshly reloaded
+profile against the enrollment before staging or persisting a binding, and the
+tick's opening gate is re-run before every mutating GitHub call (check
+creation/update, ClawSweeper dispatch) through the client's authority guard, so
+a revocation or profile edit after the gate stops the rest of that tick. Fail-closed admission conditions are
 retried on the next tick; any other worker failure (database, filesystem,
 unexpected) stops the whole service with exit status 2 rather than leaving
 ingress accepting deliveries that nothing will act on. The GitHub App client
