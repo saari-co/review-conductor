@@ -2579,7 +2579,7 @@ class GitHubAdapterTests(unittest.TestCase):
         calls = []
 
         def transport(method, url, headers, body, timeout):
-            calls.append((method, url, json.loads(body) if body else None))
+            calls.append((method, url, dict(headers), json.loads(body) if body else None))
             if url.endswith("/access_tokens"):
                 return 201, json.dumps(
                     {"token": "fixture-token", "expires_at": "2099-01-01T00:00:00Z"}
@@ -2618,12 +2618,20 @@ class GitHubAdapterTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual(token_call[0], "POST")
         self.assertTrue(token_call[1].endswith(f"/app/installations/{INSTALLATION_ID}/access_tokens"))
-        self.assertEqual(token_call[2]["repositories"], ["openclaw-smcbd-suite"])
+        self.assertEqual(token_call[2]["Authorization"], f"Bearer fixture-jwt-{APP_ID}")
+        self.assertEqual(content_call[2]["Authorization"], "Bearer fixture-token")
+        self.assertEqual(token_call[3]["repositories"], ["openclaw-smcbd-suite"])
         self.assertEqual(
-            token_call[2]["permissions"],
+            token_call[3]["permissions"],
             {"actions": "write", "checks": "write", "contents": "read", "pull_requests": "write"},
         )
         self.assertTrue(content_call[1].endswith(f"/.review-conductor.json?ref={POLICY_COMMIT}"))
+        artifact_headers = []
+        client._artifact_transport = lambda _url, headers, _timeout: (
+            artifact_headers.append(dict(headers)) or (200, b"fixture-zip")
+        )
+        self.assertEqual(client.download_artifact(9), b"fixture-zip")
+        self.assertEqual(artifact_headers[0]["Authorization"], "Bearer fixture-token")
 
     def test_token_cache_is_synchronized_and_policy_fetch_is_not_binding_fenced(self):
         token_calls = []
