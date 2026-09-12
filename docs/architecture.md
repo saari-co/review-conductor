@@ -6,8 +6,14 @@ Status: accepted direction from the owner on 2026-09-11; deployment deferred.
 
 Review Conductor has its own repository, runtime, build and release lifecycle.
 Targets declare review requirements in a versioned `.review-conductor.json`,
-similar to a repository-local reviewer configuration. The shared service reads
-approved configuration; it does not accumulate each product's implementation.
+similar to a repository-local reviewer configuration. One multi-tenant service
+implementation reads approved configuration; it does not accumulate each
+product's implementation. Initial enrollment is
+`saari-co/openclaw-smcbd-suite`, followed by `dinkuskit/blocks`. Tenants may
+share implementation and read-only dashboard visibility, but credentials, App
+installations, enrollment, mutable state, queues, proof and mutation authority
+remain isolated. Adding a later repository is explicit configuration/enrollment
+work, not a new service fork.
 
 | Owner | Responsibility |
 | --- | --- |
@@ -15,7 +21,7 @@ approved configuration; it does not accumulate each product's implementation.
 | Conductor service | Exact tuple/epoch state, admission, adapter sequencing, bounded repair routing, audit evidence |
 | Service enrollment registry | Numeric repo identity, App installation, approved policy SHA/hash, authoritative reviewer actors, credential references and isolation domains |
 | GitHub Actions | Deterministic CI |
-| Reviewer services | Comprehensive exact-tuple evidence through qualified adapters |
+| Reviewer services | Native detailed findings/comments plus comprehensive exact-tuple evidence through qualified adapters |
 | Gateway / Smoky | Narrow client requests and status explanations; no conductor database access |
 | Human owner | Policy promotion, adjudication authority and merge authorization |
 
@@ -28,6 +34,11 @@ Any base/head change invalidates evidence. Webhook authentication precedes
 parsing; replays are idempotent; conflicting deliveries fail closed. Uncertain
 non-idempotent dispatch is reconciled, not blindly retried. Two repair cycles
 exhaust automatic repair; reviewers never become mutation owners.
+
+The Conductor is the sole writer of the authoritative `OpenClaw Review Rail`
+and `ClawSweeper Review Rail` checks after it validates reviewer-native evidence.
+OpenClaw and ClawSweeper retain ownership of their detailed findings/comments.
+Dashboard projections are read-only, and merge authority remains human-only.
 
 ## Practical transition
 
