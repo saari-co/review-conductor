@@ -316,12 +316,19 @@ class GitHubAppClient:
         self._app = app
         self._private_key = private_key_pem
         self._transport = transport
-        self._artifact_transport = (
-            urllib_artifact_transport
-            if artifact_transport is None and transport is urllib_transport
-            else artifact_transport
-            or (lambda url, headers, timeout: transport("GET", url, headers, None, timeout))
-        )
+        if artifact_transport is not None:
+            self._artifact_transport = artifact_transport
+        elif transport is urllib_transport:
+            self._artifact_transport = urllib_artifact_transport
+        else:
+            def transport_artifact(url: str, headers: dict[str, str], timeout: float) -> tuple[int, bytes]:
+                response = transport("GET", url, headers, None, timeout)
+                if len(response) == 2:
+                    return response
+                status, _response_headers, raw = response
+                return status, raw
+
+            self._artifact_transport = transport_artifact
         self._clock = clock
         self._signer = signer or sign_app_jwt
         self._token: str | None = None

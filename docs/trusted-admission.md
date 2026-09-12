@@ -130,13 +130,15 @@ quiet period and merge policy. Each binding records the App, installation,
 policy commit/hash, the enrollment's reviewer actors and a digest of those
 policy-governed profile fields plus the adapter authority fields (ClawSweeper
 workflow id/name/path/ref/publish, the adapter contract/artifact prefix and the
-OpenClaw operator id/transport/worktree shelf);
+OpenClaw operator id/transport/worktree shelf and effective Spark dispatch
+target);
 a binding is current only while the registry
 still approves the same policy and names the same reviewers and the engine
 profile still digests identically, so reviewer rotation or a profile edit after
 admission blocks projection until the tuple is re-admitted.
 Databases created by the inactive service-core PR predate `profile_digest`.
-Startup adds that nullable column in place; pre-migration rows remain `NULL` and
+The next accepted binding candidate adds that nullable column in place;
+merely restarting does not migrate it. Pre-migration rows remain `NULL` and
 therefore cannot satisfy the read-only authority gate until the exact tuple is
 admitted under the current profile.
 

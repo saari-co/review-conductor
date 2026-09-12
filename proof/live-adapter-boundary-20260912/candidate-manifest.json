@@ -4,7 +4,8 @@
   "pre_split_full_candidate": "3b7516c892679a5ec302e84c3ee975c51331766d",
   "restored_adapter_commit": "9ca6f516cb8e0da4a57b7a814656a56f64df88ad",
   "boundary_repair_commit": "d18d336664fa993a4414851ab48d624be44f8b5e",
-  "captured_utc": "2026-09-12T16:01:27Z",
+  "review_repair_starting_head": "f877a11c648411db5e03c42fd08d907708f0ed2b",
+  "captured_utc": "2026-09-12T17:58:47Z",
   "scope": "authority_bound_live_adapters",
   "files": {
     "README.md": "7faa2f7b5975304fac12ea49760bc6c47b554b9b0a5a2f796c8e8277cef348cc",
@@ -13,17 +14,18 @@
     "docs/bootstrap.md": "d7fab758e263f1b7ba1c8a1431fa435bfa17685cd533fc603720130d860cca87",
     "docs/integration-contract.md": "4be2ede8991699adc24422491cc3c05d4a2807e9ac3dc11c2a2a715711252c58",
     "docs/migration.md": "72032323cd45fa6cb66ae9b28871dc20ff13e3655372a5cfd9325cee46ca9e9e",
-    "docs/provenance.json": "2ebb66d48ecc4fb0c207b799fe7af7fb5b66722248b9ea463fe0e90dcccca49e",
+    "docs/provenance.json": "3947720bc3a5b3870ec5a706ba1dd6ab21170687b77e1a0cec8437151da434cf",
     "docs/smcbd-pilot-handoff.md": "c702f818acbe62aee89245cb5d98f1d8ab0378f67c41428ef8cd2dafff8230f0",
-    "docs/trusted-admission.md": "ca11a82318dcfaade1d55617bfbed451ccfe35c6b984e2fcca5f3f8e853decf9",
+    "docs/trusted-admission.md": "d58253b9d1710b75dd90980fede0a8cedc8dc598ed513524b37ca5d8d92f6e27",
+    "proof/live-adapter-boundary-20260912/PROOF.md": "3d7769e5d6235c14606eae2b2664e168db12ddd65e8764d374e75de3c340cb7c",
     "proof/smcbd-service-admission-20260912/PROOF.md": "9fc215d180a5764db8ae3f33d3d905ff0d50d8e0d539a6a8332c57760d648810",
     "proof/smcbd-service-admission-20260912/candidate-manifest.json": "85e22fd6511cc7882718fb5586a2c5ebac514cf9a6f7488353759f36df707741",
     "tests/test_review_conductor_profiles.py": "bafad178ef7e5e4c0adb5c58f5a6141d0607fa1fa5131053cfaccab3877a6c88",
-    "tests/test_service_runtime.py": "147caff3d07e9ba5879aa4c57d0873dc39bafdb68740d4375fc14beee491a517",
+    "tests/test_service_runtime.py": "b5d0068f4254169810f611611666bffa5483e26a16e81b0ba27273be7e0db0b1",
     "tools/review_conductor.py": "dde1004db27b8692987b76360fa17771377ce812a06bcd7e367a1a651855002a",
-    "tools/review_conductor_runtime.py": "202eb2fa4993a4b19b1989d37c0331f2ef2fdeb903d38c5db3bfbe00e517ebd0",
+    "tools/review_conductor_runtime.py": "d6294d4d4df8a1d7b602f9b2949465ffc35539645c5dc4d7a199d6355895f3bb",
     "tools/review_conductor_userland.py": "57ae710ae8add11c982da04f874b0c4f993e50f2304d8bf7df2551b055523e02",
     "tools/service_entrypoint.py": "367b50e1051f414de8ad4d09637362933635f390772320707c40f370423127ba",
-    "tools/service_runtime.py": "d3466e4b18e1728a7abc7d88a496425b6fd46200632b60c498138917e2c90c37"
+    "tools/service_runtime.py": "58ba18d3ac7ce0663733fd41e8b1d8e6f9d0f1b796ce6de4534257fcc0525b49"
   }
 }

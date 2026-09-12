@@ -9,6 +9,8 @@
 - Restored adapter commit: `9ca6f516cb8e0da4a57b7a814656a56f64df88ad`.
 - Boundary repair commit: `d18d336664fa993a4414851ab48d624be44f8b5e`.
 - Branch: `openclaw/review-conductor-pr4-live-adapters`.
+- Normalized base: merged `main` at
+  `10ab35181c24d572351401628f2ec59ef26110a6`.
 
 This slice restores the live GitHub, checkout, OpenClaw, ClawSweeper,
 notification, worker, credential, and operator-handoff code removed from PR #3.
@@ -38,15 +40,20 @@ It remains disabled and is reviewed independently from the admission core.
 10. Authority denial before transport releases claimed check, ClawSweeper,
     checkout and OpenClaw work back to `pending`; it is not misclassified as a
     failed or uncertain external side effect.
+11. The binding digest includes the effective Spark dispatch target, so changing
+    the service-side OpenClaw destination invalidates existing bindings.
+12. The injected GitHub transport's two- and three-element response forms are
+    normalized for artifact downloads as well as API calls.
 
 ## Executable proof
 
-- Focused live service/adapter suite: 59 tests passed.
-- Executable mutation suite: all 57 precise mutants killed.
+- Focused live service/adapter suite: 60 tests passed.
+- Executable mutation suite: all 62 precise mutants killed.
 - The added cases directly exercise concurrent token minting, promotion after
   a stale binding, reloaded core identity, read-only/disappearing SQLite state,
-  checkout fencing, both OpenClaw command fences, per-notification fencing, and
-  incomplete live clients.
+  checkout fencing, both OpenClaw command fences, per-notification fencing,
+  incomplete live clients, the Spark dispatch target and header-aware artifact
+  transport normalization.
 - Complete `make check`: passed before this evidence-only commit.
 - Extraction provenance: 14 files verified and Python compilation passed.
 - `git diff --check`: passed.

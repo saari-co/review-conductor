@@ -221,9 +221,10 @@ def profile_policy_digest(core_config: dict[str, Any], service_config: dict[str,
 
     Covers the engine fields the policy pins (repository, default branch, CI
     workflow, quiet period, merge policy) and the adapter authority fields that
-    select the review producer and its artifact namespace (ClawSweeper workflow
-    id/name/path/ref/publish and the adapter contract/artifact prefix). Stored
-    with each binding and recompared on every tick, so a profile edited after
+    select the review producers and their destinations (ClawSweeper workflow
+    id/name/path/ref/publish, adapter contract/artifact prefix, OpenClaw
+    operator/transport/worktree shelf and effective Spark target). Stored with
+    each binding and recompared on every tick, so a profile edited after
     admission (for example across a restart) cannot keep an old binding
     unlocking projection under rules the admitted policy never approved.
     """
@@ -231,6 +232,14 @@ def profile_policy_digest(core_config: dict[str, Any], service_config: dict[str,
     ci = core.require_object(core_config.get("ci"), "core ci")
     clawsweeper = core.require_object(core_config.get("clawsweeper"), "core clawsweeper")
     openclaw = core.require_object(core_config.get("openclaw"), "core openclaw")
+    spark = service_config.get("spark")
+    spark_target = None
+    if spark is not None:
+        spark_target = core.require_text(
+            core.require_object(spark, "service spark").get("target"),
+            "service spark target",
+            255,
+        )
     adapter = service_config.get("adapter")
     if adapter is not None:
         adapter = core.require_object(adapter, "service adapter")
@@ -251,6 +260,7 @@ def profile_policy_digest(core_config: dict[str, Any], service_config: dict[str,
             "openclaw": {
                 key: openclaw.get(key) for key in ("operator_id", "transport", "remote_worktree_shelf")
             },
+            "spark_target": spark_target,
             "quiet_seconds": review_policy.get("quiet_seconds"),
             "merge_policy": core_config.get("merge_policy"),
         },

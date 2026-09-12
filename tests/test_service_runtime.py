@@ -121,6 +121,7 @@ class ServiceFixture:
                 "workflow_id": "clawsweeper-exact-tuple.yml",
                 "ref": "main",
             },
+            "spark": {"target": "spark-2"},
             "adapter": {"contract": "exact-tuple-comprehensive-v1", "artifact_prefix": "fixture-review"},
         }
 
@@ -576,6 +577,10 @@ class AdmissionIngressTests(unittest.TestCase):
                 changed_service["adapter"] = adapter
             with self.subTest(adapter=adapter), self.assertRaises(core.ContractError):
                 service.require_current_bindings(changed_service, self.fx.registry())
+        changed_service = copy.deepcopy(self.fx.app_config())
+        changed_service["spark"]["target"] = "spark-2.swarm"
+        with self.assertRaises(core.ContractError):
+            service.require_current_bindings(changed_service, self.fx.registry())
         service.require_current_bindings(self.fx.app_config(), self.fx.registry())
         # Non-policy edits (for example reviewer-independent operator fields) do not
         # change the digest.
@@ -2511,6 +2516,20 @@ MUTANTS = [
         "AdmissionIngressTests.test_tick_side_effects_revalidate_admission_before_each_mutating_call",
     ),
     (
+        "omit the effective Spark dispatch target from the binding digest",
+        "tools/service_runtime.py",
+        '            "spark_target": spark_target,\n',
+        '            "spark_target": None,\n',
+        "AdmissionIngressTests.test_profile_change_after_admission_invalidates_existing_bindings",
+    ),
+    (
+        "unpack a header-aware artifact fallback as a two-tuple",
+        "tools/review_conductor_runtime.py",
+        '                if len(response) == 2:\n                    return response\n                status, _response_headers, raw = response\n                return status, raw\n',
+        '                status, raw = response\n                return status, raw\n',
+        "GitHubAdapterTests.test_header_aware_transport_fallback_normalizes_artifact_downloads",
+    ),
+    (
         "treat rate-limited GitHub 403 responses as permanent authorization failures",
         "tools/review_conductor_runtime.py",
         '            rate_limited = status == 403 and (\n                header_value(response_headers, "Retry-After") is not None\n                or header_value(response_headers, "X-RateLimit-Remaining") == "0"\n            )\n',
@@ -2632,6 +2651,24 @@ class GitHubAdapterTests(unittest.TestCase):
         )
         self.assertEqual(client.download_artifact(9), b"fixture-zip")
         self.assertEqual(artifact_headers[0]["Authorization"], "Bearer fixture-token")
+
+    def test_header_aware_transport_fallback_normalizes_artifact_downloads(self):
+        calls = []
+
+        def transport(method, url, headers, body, timeout):
+            calls.append((method, url, dict(headers)))
+            if url.endswith("/access_tokens"):
+                return 201, {}, json.dumps({
+                    "token": "fixture-token", "expires_at": "2099-01-01T00:00:00Z"
+                }).encode()
+            return 200, {"X-Fixture": "artifact"}, b"fixture-zip"
+
+        client = runtime.GitHubAppClient(
+            self.fx.app_config(), "fixture-private-key", transport=transport,
+            signer=lambda *_: "fixture-jwt",
+        )
+        self.assertEqual(client.download_artifact(9), b"fixture-zip")
+        self.assertEqual(calls[-1][2]["Authorization"], "Bearer fixture-token")
 
     def test_token_cache_is_synchronized_and_policy_fetch_is_not_binding_fenced(self):
         token_calls = []
