@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/saari-co/review-conductor/blob/main/contracts/target-manifest.schema.json",
+  "title": "Review Conductor repository requirements v1",
+  "$comment": "Wire format is UTF-8 JSON, at most 16384 bytes, no duplicate keys. Validation does not enroll a target.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "repository",
+    "default_branch",
+    "ci",
+    "review",
+    "merge_policy"
+  ],
+  "properties": {
+    "schema": {
+      "const": "review-conductor.target.v1"
+    },
+    "repository": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$"
+    },
+    "default_branch": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9_./-]{0,254}$",
+      "not": {
+        "anyOf": [
+          {
+            "pattern": "\\.\\.|//"
+          },
+          {
+            "pattern": "(/|\\.|\\.lock)$"
+          }
+        ]
+      }
+    },
+    "ci": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workflow_name",
+        "workflow_path"
+      ],
+      "properties": {
+        "workflow_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[^\\u0000-\\u001f]*\\S[^\\u0000-\\u001f]*$"
+        },
+        "workflow_path": {
+          "type": "string",
+          "pattern": "^\\.github/workflows/[A-Za-z0-9_-][A-Za-z0-9_.-]*\\.ya?ml$"
+        }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "quiet_seconds",
+        "scope",
+        "rails"
+      ],
+      "properties": {
+        "quiet_seconds": {
+          "type": "integer",
+          "minimum": 600,
+          "maximum": 86400
+        },
+        "scope": {
+          "const": "comprehensive"
+        },
+        "rails": {
+          "const": [
+            "openclaw",
+            "clawsweeper"
+          ]
+        }
+      }
+    },
+    "merge_policy": {
+      "const": "human_only"
+    }
+  }
+}

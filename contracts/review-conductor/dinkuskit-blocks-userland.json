@@ -1,0 +1,126 @@
+{
+  "schema": "smoky.review-conductor.userland.v1",
+  "mode": "cp1-current-user",
+  "legacy_cp1_route": "disabled",
+  "core_config": "contracts/review-conductor/dinkuskit-blocks.json",
+  "paths": {
+    "state_root": ".local/state/smoky/review-conductor/blocks",
+    "proof_root": ".local/share/smoky/review-conductor/blocks/proof",
+    "blocks_checkout": "Developer/review-conductor/dinkuskit-blocks",
+    "openclaw_terminal_inbox": ".local/share/smoky/review-conductor/blocks/proof/inbox/openclaw",
+    "clawsweeper_terminal_inbox": ".local/share/smoky/review-conductor/blocks/proof/inbox/clawsweeper"
+  },
+  "ingress": {
+    "bind_host": "127.0.0.1",
+    "bind_port": 9443,
+    "path": "/github/webhook",
+    "public_hostname": "blocks-review-1306882611.ztoned.com",
+    "max_body_bytes": 1048576,
+    "request_timeout_seconds": 10
+  },
+  "worker": {
+    "claim_lease_seconds": 1800,
+    "max_actions_per_tick": 20,
+    "tick_seconds": 10
+  },
+  "spark": {
+    "target": "spark-2.swarm",
+    "transport": "bundle",
+    "smoky_path": "bin/smoky",
+    "ssh_path": "/usr/bin/ssh",
+    "scp_path": "/usr/bin/scp"
+  },
+  "github_app": {
+    "api_base": "https://api.github.com",
+    "app_id": 4751895,
+    "installation_id": 157287342,
+    "repository": "dinkuskit/blocks",
+    "repository_id": 1306882611,
+    "permissions": {
+      "actions": "write",
+      "checks": "write",
+      "metadata": "read",
+      "pull_requests": "write"
+    },
+    "denied_permissions": [
+      "administration",
+      "contents",
+      "deployments",
+      "issues",
+      "members",
+      "merge_queue",
+      "organization_administration",
+      "secrets",
+      "workflows"
+    ],
+    "events": [
+      "pull_request",
+      "workflow_run"
+    ]
+  },
+  "projection": {
+    "check_names": [
+      "OpenClaw Review Rail",
+      "ClawSweeper Review Rail"
+    ],
+    "ready_label": "status: 👀 ready for maintainer look"
+  },
+  "credentials": {
+    "webhook_secret_fd_env": "SMOKY_REVIEW_CONDUCTOR_WEBHOOK_SECRET_FD",
+    "github_private_key_fd_env": "SMOKY_REVIEW_CONDUCTOR_GITHUB_PRIVATE_KEY_FD"
+  },
+  "onepassword": {
+    "op_path": "/opt/homebrew/bin/op",
+    "bootstrap_root": ".config/smoky/review-conductor/bootstrap",
+    "recovery_vault": "Smoky Review Conductor Bootstrap Administration",
+    "domains": [
+      {
+        "capability_id": "review-conductor.blocks.webhook-verify",
+        "recovery_item": "Blocks Webhook Service Account Recovery",
+        "recovery_field": "token",
+        "runtime_vault": "Review Conductor Blocks Webhook Runtime",
+        "runtime_item": "Review Conductor Blocks Webhook",
+        "runtime_field": "secret",
+        "bootstrap_file": "webhook-verify.token"
+      },
+      {
+        "capability_id": "review-conductor.blocks.github-installation",
+        "recovery_item": "Blocks GitHub App Service Account Recovery",
+        "recovery_field": "token",
+        "runtime_vault": "Review Conductor Blocks GitHub App Runtime",
+        "runtime_item": "Review Conductor Blocks GitHub App",
+        "runtime_field": "private-key.pem",
+        "bootstrap_file": "github-installation.token"
+      },
+      {
+        "capability_id": "review-conductor.blocks.cloudflare-tunnel",
+        "recovery_item": "Blocks Cloudflare Tunnel Service Account Recovery",
+        "recovery_field": "token",
+        "runtime_vault": "Smoky Review Conductor Blocks Cloudflare Tunnel",
+        "runtime_item": "DinkusKit Blocks Cloudflare Tunnel",
+        "runtime_field": "connector-token",
+        "bootstrap_file": "cloudflare-tunnel.token"
+      }
+    ]
+  },
+  "tunnel": {
+    "cloudflared_path": "/opt/homebrew/bin/cloudflared",
+    "tunnel_id": "9dd6e25e-3f9e-4c6b-b2f0-2bbdd1deed64",
+    "tunnel_name": "smoky-blocks-review-conductor-1306882611"
+  },
+  "notifications": {
+    "openclaw_path": "/opt/homebrew/bin/openclaw",
+    "agent_id": "main",
+    "session_key": "agent:main:review-conductor",
+    "discord_target_env": "SMOKY_REVIEW_CONDUCTOR_DISCORD_TARGET",
+    "signal_target_env": "SMOKY_REVIEW_CONDUCTOR_SIGNAL_TARGET",
+    "ready_overall_tiers": [
+      "S",
+      "A",
+      "B"
+    ],
+    "ready_proof_statuses": [
+      "sufficient"
+    ]
+  }
+}

@@ -1,0 +1,142 @@
+{
+  "schema": "smoky.review-conductor.userland.v2",
+  "mode": "cp1-current-user",
+  "legacy_cp1_route": "disabled",
+  "core_config": "contracts/review-conductor/openclaw-smcbd-suite.json",
+  "paths": {
+    "state_root": ".local/state/smoky/review-conductor/openclaw-smcbd-suite",
+    "proof_root": ".local/share/smoky/review-conductor/openclaw-smcbd-suite/proof",
+    "openclaw_terminal_inbox": ".local/share/smoky/review-conductor/openclaw-smcbd-suite/proof/inbox/openclaw",
+    "clawsweeper_terminal_inbox": ".local/share/smoky/review-conductor/openclaw-smcbd-suite/proof/inbox/clawsweeper",
+    "source_checkout": "Developer/review-conductor/openclaw-smcbd-suite"
+  },
+  "ingress": {
+    "bind_host": "127.0.0.1",
+    "bind_port": 9444,
+    "path": "/github/webhook",
+    "public_hostname": "unprovisioned-smcbd-suite.invalid",
+    "max_body_bytes": 1048576,
+    "request_timeout_seconds": 10
+  },
+  "worker": {
+    "claim_lease_seconds": 1800,
+    "max_actions_per_tick": 20,
+    "tick_seconds": 10
+  },
+  "spark": {
+    "target": "spark-2.swarm",
+    "transport": "bundle",
+    "smoky_path": "bin/smoky",
+    "ssh_path": "/usr/bin/ssh",
+    "scp_path": "/usr/bin/scp"
+  },
+  "github_app": {
+    "api_base": "https://api.github.com",
+    "app_id": null,
+    "installation_id": null,
+    "repository": "saari-co/openclaw-smcbd-suite",
+    "repository_id": 1366416798,
+    "permissions": {
+      "actions": "write",
+      "checks": "write",
+      "metadata": "read",
+      "pull_requests": "write"
+    },
+    "denied_permissions": [
+      "administration",
+      "contents",
+      "deployments",
+      "issues",
+      "members",
+      "merge_queue",
+      "organization_administration",
+      "secrets",
+      "workflows"
+    ],
+    "events": [
+      "pull_request",
+      "workflow_run"
+    ]
+  },
+  "projection": {
+    "check_names": [
+      "OpenClaw Review Rail",
+      "ClawSweeper Review Rail"
+    ],
+    "ready_label": "status: \ud83d\udc40 ready for maintainer look"
+  },
+  "credentials": {
+    "webhook_secret_fd_env": "SMOKY_SMCBD_REVIEW_CONDUCTOR_WEBHOOK_SECRET_FD",
+    "github_private_key_fd_env": "SMOKY_SMCBD_REVIEW_CONDUCTOR_GITHUB_PRIVATE_KEY_FD"
+  },
+  "onepassword": {
+    "op_path": "/opt/homebrew/bin/op",
+    "bootstrap_root": ".config/smoky/review-conductor/openclaw-smcbd-suite/bootstrap",
+    "recovery_vault": "SMCBD Suite Review Conductor Bootstrap Administration",
+    "domains": [
+      {
+        "capability_id": "review-conductor.openclaw-smcbd-suite.webhook-verify",
+        "recovery_item": "SMCBD Suite Webhook Service Account Recovery",
+        "recovery_field": "token",
+        "runtime_vault": "Review Conductor SMCBD Suite Webhook Runtime",
+        "runtime_item": "Review Conductor SMCBD Suite Webhook",
+        "runtime_field": "secret",
+        "bootstrap_file": "webhook-verify.token"
+      },
+      {
+        "capability_id": "review-conductor.openclaw-smcbd-suite.github-installation",
+        "recovery_item": "SMCBD Suite GitHub App Service Account Recovery",
+        "recovery_field": "token",
+        "runtime_vault": "Review Conductor SMCBD Suite GitHub App Runtime",
+        "runtime_item": "Review Conductor SMCBD Suite GitHub App",
+        "runtime_field": "private-key.pem",
+        "bootstrap_file": "github-installation.token"
+      },
+      {
+        "capability_id": "review-conductor.openclaw-smcbd-suite.cloudflare-tunnel",
+        "recovery_item": "SMCBD Suite Cloudflare Tunnel Service Account Recovery",
+        "recovery_field": "token",
+        "runtime_vault": "Smoky Review Conductor SMCBD Suite Cloudflare Tunnel",
+        "runtime_item": "SMCBD Suite Cloudflare Tunnel",
+        "runtime_field": "connector-token",
+        "bootstrap_file": "cloudflare-tunnel.token"
+      }
+    ]
+  },
+  "tunnel": {
+    "cloudflared_path": "/opt/homebrew/bin/cloudflared",
+    "tunnel_id": null,
+    "tunnel_name": null
+  },
+  "notifications": {
+    "openclaw_path": "/opt/homebrew/bin/openclaw",
+    "agent_id": "main",
+    "session_key": "agent:main:review-conductor:openclaw-smcbd-suite",
+    "discord_target_env": "SMOKY_SMCBD_REVIEW_CONDUCTOR_DISCORD_TARGET",
+    "signal_target_env": "SMOKY_SMCBD_REVIEW_CONDUCTOR_SIGNAL_TARGET",
+    "ready_overall_tiers": [
+      "S",
+      "A",
+      "B"
+    ],
+    "ready_proof_statuses": [
+      "sufficient"
+    ]
+  },
+  "profile_id": "openclaw-smcbd-suite",
+  "enrollment": {
+    "enabled": false,
+    "blockers": [
+      "Authoritative repository-specific reviewer identities are not enrolled.",
+      "Dedicated GitHub App installation, webhook and external-review credentials are not provisioned.",
+      "Dedicated ingress and tunnel are not provisioned.",
+      "Private exact-tuple comprehensive ClawSweeper workflow/artifact adapter is not installed or qualified.",
+      "Main has only bootstrap README; CI and rail placeholders remain on PR #3.",
+      "Conductor check ownership and required-check App binding require separately authorized target-repository changes."
+    ]
+  },
+  "adapter": {
+    "contract": "exact-tuple-comprehensive-v1",
+    "artifact_prefix": "smcbd-suite-review"
+  }
+}
