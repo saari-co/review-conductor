@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import dataclasses
 import hashlib
 import hmac
 import http.client
@@ -116,6 +117,7 @@ class ServiceFixture:
                 "workflow_id": "clawsweeper-exact-tuple.yml",
                 "ref": "main",
             },
+            "adapter": {"contract": "exact-tuple-comprehensive-v1", "artifact_prefix": "fixture-review"},
         }
 
     def payload(self, *, installation=INSTALLATION_ID, repository=REPOSITORY, repository_id=REPOSITORY_ID):
@@ -152,6 +154,9 @@ class ServiceFixture:
     def binding_rows(self):
         connection = core.open_database(self.state, REPOSITORY)
         try:
+            tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "service_policy_bindings" not in tables:
+                return []
             return [
                 dict(row) for row in connection.execute(
                     "SELECT * FROM service_policy_bindings ORDER BY created_at"
@@ -186,7 +191,7 @@ class AdmissionIngressTests(unittest.TestCase):
         self.assertRegex(receipt["admission_binding_id"], r"^[0-9a-f]{64}$")
         connection = core.open_database(self.fx.state, REPOSITORY)
         try:
-            binding = service.binding_for_current_head(connection, self.fx.registry(), REPOSITORY, 7, self.fx.core_config())
+            binding = service.binding_for_current_head(connection, self.fx.registry(), REPOSITORY, 7, self.fx.core_config(), self.fx.app_config())
             self.assertEqual(binding["app_id"], APP_ID)
             self.assertEqual(binding["installation_id"], INSTALLATION_ID)
             self.assertEqual(binding["binding_id"], receipt["admission_binding_id"])
@@ -295,7 +300,7 @@ class AdmissionIngressTests(unittest.TestCase):
         connection = core.open_database(self.fx.state, REPOSITORY)
         try:
             self.assertIsNone(
-                service.binding_for_current_head(connection, promoted_registry, REPOSITORY, 7, self.fx.core_config())
+                service.binding_for_current_head(connection, promoted_registry, REPOSITORY, 7, self.fx.core_config(), self.fx.app_config())
             )
         finally:
             connection.close()
@@ -323,7 +328,7 @@ class AdmissionIngressTests(unittest.TestCase):
         try:
             with self.assertRaises(core.ContractError):
                 service._persist_binding(connection, conflicting, promoted_registry.enrollments[0],
-                                         service.profile_policy_digest(self.fx.core_config()))
+                                         service.profile_policy_digest(self.fx.core_config(), self.fx.app_config()))
             connection.rollback()
         finally:
             connection.close()
@@ -453,7 +458,7 @@ class AdmissionIngressTests(unittest.TestCase):
         connection = core.open_database(self.fx.state, REPOSITORY)
         try:
             self.assertIsNone(service.binding_for_current_head(
-                connection, rotated_registry, REPOSITORY, 7, self.fx.core_config()))
+                connection, rotated_registry, REPOSITORY, 7, self.fx.core_config(), self.fx.app_config()))
         finally:
             connection.close()
         ready = self.fx.payload()
@@ -469,7 +474,7 @@ class AdmissionIngressTests(unittest.TestCase):
         service.require_current_bindings(self.fx.app_config(), self.fx.registry())
         original = self.fx.config_path.read_text()
         digest = self.fx.binding_rows()[0]["profile_digest"]
-        self.assertEqual(digest, service.profile_policy_digest(self.fx.core_config()))
+        self.assertEqual(digest, service.profile_policy_digest(self.fx.core_config(), self.fx.app_config()))
         # Simulate a restart with an edited engine profile while the registry still
         # approves the same policy commit/hash: every policy-governed field change
         # blocks projection of the old binding.
@@ -479,6 +484,11 @@ class AdmissionIngressTests(unittest.TestCase):
             "workflow_name": lambda c: c["ci"].__setitem__("workflow_name", "Other pipeline"),
             "workflow_path": lambda c: c["ci"].__setitem__("workflow_path", ".github/workflows/other.yml"),
             "merge_policy": lambda c: c.__setitem__("merge_policy", "auto"),
+            # Adapter authority: which workflow produces the review and from which ref.
+            "clawsweeper_workflow_id": lambda c: c["clawsweeper"].update(
+                workflow_id="other-review.yml", workflow_path=".github/workflows/other-review.yml"),
+            "clawsweeper_ref": lambda c: c["clawsweeper"].__setitem__("ref", "release"),
+            "clawsweeper_workflow_name": lambda c: c["clawsweeper"].__setitem__("workflow_name", "Other review"),
         }
         for label, edit in edits.items():
             changed = json.loads(original)
@@ -488,7 +498,7 @@ class AdmissionIngressTests(unittest.TestCase):
                 # is sensitive instead.
                 variant = json.loads(original)
                 variant["review_policy"]["quiet_seconds"] = 900
-                self.assertNotEqual(service.profile_policy_digest(variant), digest)
+                self.assertNotEqual(service.profile_policy_digest(variant, self.fx.app_config()), digest)
                 continue
             self.fx.config_path.write_text(json.dumps(changed) + "\n")
             try:
@@ -498,16 +508,31 @@ class AdmissionIngressTests(unittest.TestCase):
                 with self.subTest(label=label), self.assertRaises(core.ContractError):
                     service.require_current_bindings(self.fx.app_config(), self.fx.registry())
                 continue
-            self.assertNotEqual(service.profile_policy_digest(loaded), digest)
+            self.assertNotEqual(service.profile_policy_digest(loaded, self.fx.app_config()), digest)
             with self.subTest(label=label), self.assertRaises(core.ContractError):
                 service.require_current_bindings(self.fx.app_config(), self.fx.registry())
         self.fx.config_path.write_text(original)
+        service.require_current_bindings(self.fx.app_config(), self.fx.registry())
+        # The service profile's adapter contract/artifact prefix select which
+        # artifact namespace the worker accepts; changing either blocks projection.
+        for adapter in (
+            {"contract": "exact-tuple-comprehensive-v1", "artifact_prefix": "other-prefix"},
+            {"contract": "other-contract", "artifact_prefix": "fixture-review"},
+            None,
+        ):
+            changed_service = {**self.fx.app_config()}
+            if adapter is None:
+                del changed_service["adapter"]
+            else:
+                changed_service["adapter"] = adapter
+            with self.subTest(adapter=adapter), self.assertRaises(core.ContractError):
+                service.require_current_bindings(changed_service, self.fx.registry())
         service.require_current_bindings(self.fx.app_config(), self.fx.registry())
         # Non-policy edits (for example reviewer-independent operator fields) do not
         # change the digest.
         cosmetic = json.loads(original)
         cosmetic["max_repair_cycles"] = 1
-        self.assertEqual(service.profile_policy_digest(cosmetic), digest)
+        self.assertEqual(service.profile_policy_digest(cosmetic, self.fx.app_config()), digest)
 
     def test_policy_transport_never_runs_under_the_write_lock(self):
         database = self.fx.state / "review-conductor.sqlite3"
@@ -544,8 +569,6 @@ class AdmissionIngressTests(unittest.TestCase):
             service.stage_approved_policy(self.fx.registry().enrollments[0], lambda *_: b"{}")
         self.assertIn("hash does not match", str(ctx.exception))
         self.assertEqual(service._STAGED_POLICIES, {})
-        with self.assertRaises(core.ContractError):
-            service._staged_reader(self.fx.registry().enrollments[0], None)(REPOSITORY, POLICY_COMMIT)
         with self.assertRaises(core.ContractError):
             service._staged_reader(self.fx.registry().enrollments[0], self.fx.policy)(REPOSITORY, "e" * 40)
 
@@ -724,6 +747,166 @@ class AdmissionIngressTests(unittest.TestCase):
         self.assertEqual(first.binding_id, row["binding_id"])
         self.assertEqual((first.policy.policy_id, first.review), (second.policy.policy_id, second.review))
         self.assertNotEqual(first.binding_id, second.binding_id)
+
+    def test_closed_duplicate_and_stale_deliveries_never_touch_policy_transport(self):
+        def unavailable(repository, commit):
+            self.fx.reads.append((repository, commit))
+            raise runtime.GitHubTransientError("GitHub API transport failed")
+
+        config = self.fx.app_config()
+
+        def deliver(delivery, payload, *, reader):
+            body, signature = self.fx.signed(payload)
+            return runtime.handle_webhook_request(
+                config=config, method="POST", path="/github/webhook",
+                headers={"content-type": "application/json", "x-github-event": "pull_request",
+                         "x-github-delivery": delivery, "x-hub-signature-256": signature},
+                body=body, secret=SECRET,
+                ingestor=lambda **kwargs: service.ingest_service_delivery(
+                    **kwargs, registry=self.fx.registry(), read_policy=reader, service_config=config),
+            )
+
+        # A close arriving on a cold cache while the policy dependency is down is
+        # still a valid, state-recording delivery: no policy read, no 503.
+        closed = self.fx.payload()
+        closed["action"] = "closed"
+        status, payload = deliver("cold-close", closed, reader=unavailable)
+        self.assertEqual(int(status), 202)
+        self.assertEqual(self.fx.reads, [])
+        self.assertEqual(self.fx.binding_rows(), [])
+        # A binding candidate needs the policy: exactly one read, staged outside the
+        # transaction, then the binding exists.
+        opened = self.fx.payload()
+        opened["pull_request"]["updated_at"] = "2026-08-30T20:11:00Z"
+        status, payload = deliver("open", opened, reader=self.fx.read)
+        self.assertEqual((int(status), payload["result"]), (202, "accepted"))
+        self.assertEqual(self.fx.reads, [(REPOSITORY, POLICY_COMMIT)])
+        self.assertEqual(len(self.fx.binding_rows()), 1)
+        # With the cache cold again and the dependency down, an idempotent replay, a
+        # stale delivery and a close all succeed without any policy read.
+        service.clear_staged_policies()
+        self.fx.reads.clear()
+        status, payload = deliver("open", opened, reader=unavailable)
+        self.assertEqual((int(status), payload["result"]), (202, "duplicate_delivery"))
+        stale = self.fx.payload()
+        stale["pull_request"]["updated_at"] = "2026-08-30T20:09:00Z"
+        status, payload = deliver("stale", stale, reader=unavailable)
+        self.assertEqual((int(status), payload["result"]), (202, "stale"))
+        closed["pull_request"]["updated_at"] = "2026-08-30T20:12:00Z"
+        status, payload = deliver("close", closed, reader=unavailable)
+        self.assertEqual(int(status), 202)
+        self.assertEqual(self.fx.reads, [])
+        self.assertEqual(len(self.fx.binding_rows()), 1)
+        # Only a genuinely new binding candidate reports the dependency outage, and
+        # it does so without writing anything.
+        fresh = self.fx.payload()
+        fresh["action"] = "reopened"
+        fresh["pull_request"]["head"]["sha"] = "e" * 40
+        fresh["pull_request"]["updated_at"] = "2026-08-30T20:13:00Z"
+        status, payload = deliver("fresh", fresh, reader=unavailable)
+        self.assertEqual((int(status), payload), (503, {"ok": False, "reason": "dependency_unavailable"}))
+        self.assertEqual(self.fx.reads, [(REPOSITORY, POLICY_COMMIT)])
+        self.assertEqual(len(self.fx.binding_rows()), 1)
+        connection = core.open_database(self.fx.state, REPOSITORY)
+        try:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM deliveries WHERE delivery_id='fresh'").fetchone()[0], 0)
+        finally:
+            connection.close()
+        status, payload = deliver("fresh", fresh, reader=self.fx.read)
+        self.assertEqual((int(status), payload["result"]), (202, "accepted"))
+        self.assertEqual(len(self.fx.binding_rows()), 2)
+
+    def test_staged_policy_cache_is_bounded_and_deduplicated(self):
+        base = self.fx.registry().enrollments[0]
+        enrollments = []
+        for index in range(2 * service.MAX_STAGED_POLICIES + 1):
+            content = json.dumps({"index": index}).encode()
+            enrollments.append((dataclasses.replace(
+                base, approved_policy_commit=f"{index:040x}", approved_policy_sha256=hashlib.sha256(content).hexdigest(),
+            ), content))
+        errors = []
+
+        def stage(enrolled, content):
+            try:
+                self.assertEqual(service.stage_approved_policy(enrolled, lambda *_: content), content)
+            except Exception as exc:  # pragma: no cover - surfaced below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=stage, args=item) for item in enrollments]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        self.assertEqual(errors, [])
+        self.assertLessEqual(len(service._STAGED_POLICIES), service.MAX_STAGED_POLICIES)
+        # A concurrent stager that lands first wins; the later fetch is discarded and
+        # the bound is re-checked after the fetch, not before it.
+        service.clear_staged_policies()
+        enrolled, content = enrollments[0]
+        first = bytes(content)
+
+        def racing_reader(*_):
+            service._STAGED_POLICIES[service._staged_key(enrolled)] = first
+            return bytes(content)
+
+        self.assertIs(service.stage_approved_policy(enrolled, racing_reader), first)
+        self.assertEqual(len(service._STAGED_POLICIES), 1)
+
+    def test_registry_parent_replaced_by_real_directory_after_canonicalization_is_refused(self):
+        root = self.fx.root.resolve()
+        parent = root / "service"
+        parent.mkdir()
+        path = parent / "registry.json"
+        path.write_text(json.dumps(self.fx.registry_document()))
+        path.chmod(0o600)
+        replacement = root / "replacement"
+        replacement.mkdir()
+        (replacement / "registry.json").write_text(json.dumps(self.fx.registry_document(app_id=APP_ID + 1)))
+        (replacement / "registry.json").chmod(0o600)
+        real_open = os.open
+        swapped = threading.Event()
+
+        def racing_open(name, flags, *args, **kwargs):
+            # A same-user writer renames a different real directory (not a symlink)
+            # into the canonicalized parent's place; it passes owner/mode checks.
+            if not swapped.is_set() and "dir_fd" in kwargs:
+                swapped.set()
+                os.rename(parent, root / "service-old")
+                os.rename(replacement, parent)
+            return real_open(name, flags, *args, **kwargs)
+
+        with patch.object(entrypoint.os, "open", racing_open):
+            with self.assertRaises(core.ContractError) as ctx:
+                entrypoint.read_service_registry(path)
+        self.assertTrue(swapped.is_set())
+        self.assertIn("parent changed after canonicalization", str(ctx.exception))
+        # The directory now at that path is a legitimate canonical parent on its own.
+        self.assertEqual(entrypoint.read_service_registry(path).enrollments[0].app_id, APP_ID + 1)
+
+    def test_client_permissions_snapshot_ignores_later_caller_mutation(self):
+        token_requests = []
+
+        def transport(method, url, headers, body, timeout):
+            if url.endswith("/access_tokens"):
+                token_requests.append(json.loads(body))
+                return 201, json.dumps({"token": "fixture-token", "expires_at": "2099-01-01T00:00:00Z"}).encode()
+            content = base64.b64encode(self.fx.policy).decode()
+            return 200, json.dumps({"encoding": "base64", "content": content}).encode()
+
+        config = self.fx.app_config()
+        config["github_app"]["permissions"] = dict(runtime.STANDALONE_APP_PERMISSIONS)
+        client = runtime.GitHubAppClient(config, "fixture-private-key", transport=transport,
+                                         signer=lambda *_: "fixture-jwt")
+        # The caller widens its own map after construction; the adapter must keep
+        # requesting exactly the validated allowlist.
+        config["github_app"]["permissions"]["contents"] = "write"
+        config["github_app"]["permissions"]["administration"] = "write"
+        config["github_app"]["repository"] = "dinkuskit/blocks"
+        self.assertEqual(client.read_policy(REPOSITORY, POLICY_COMMIT), self.fx.policy)
+        expected = {name: level for name, level in runtime.STANDALONE_APP_PERMISSIONS.items() if name != "metadata"}
+        self.assertEqual([request["permissions"] for request in token_requests], [expected])
+        self.assertEqual(client.repository, REPOSITORY)
 
     def test_registry_ancestor_swapped_for_symlink_after_canonicalization_is_refused(self):
         document = json.dumps({
@@ -1471,16 +1654,44 @@ MUTANTS = [
     (
         "keep bindings current after the engine profile changes",
         "tools/service_runtime.py",
-        '    if profile_policy_digest(core_config) != row["profile_digest"]:\n',
+        '    if profile_policy_digest(core_config, service_config) != row["profile_digest"]:\n',
         "    if False:\n",
         "AdmissionIngressTests.test_profile_change_after_admission_invalidates_existing_bindings",
     ),
     (
-        "run policy transport inside the engine write transaction",
+        "stage policy for every pull_request delivery before the engine classifies it",
         "tools/service_runtime.py",
-        "        admission_hook=_admission_hook(registry, enrolled, _staged_reader(enrolled, staged)),\n",
-        "        admission_hook=_admission_hook(registry, enrolled, read_policy),\n",
-        "AdmissionIngressTests.test_policy_transport_never_runs_under_the_write_lock",
+        "    for _attempt in range(2):\n        try:\n            return core.ingest_github_delivery(\n",
+        "    stage_approved_policy(enrolled, read_policy)\n    for _attempt in range(2):\n        try:\n            return core.ingest_github_delivery(\n",
+        "AdmissionIngressTests.test_closed_duplicate_and_stale_deliveries_never_touch_policy_transport",
+    ),
+    (
+        "accept a real directory renamed into the canonical parent's place",
+        "tools/service_entrypoint.py",
+        "        if (parent_metadata.st_dev, parent_metadata.st_ino) != parent_identity:\n",
+        "        if False:\n",
+        "AdmissionIngressTests.test_registry_parent_replaced_by_real_directory_after_canonicalization_is_refused",
+    ),
+    (
+        "keep the caller's GitHub App map by reference",
+        "tools/review_conductor_runtime.py",
+        '        app = copy.deepcopy(config["github_app"])\n',
+        '        app = config["github_app"]\n',
+        "AdmissionIngressTests.test_client_permissions_snapshot_ignores_later_caller_mutation",
+    ),
+    (
+        "ignore ClawSweeper workflow authority in the profile digest",
+        "tools/service_runtime.py",
+        '            "clawsweeper": {\n                key: clawsweeper.get(key)\n                for key in ("workflow_id", "workflow_name", "workflow_path", "ref", "publish")\n            },\n',
+        '            "clawsweeper": None,\n',
+        "AdmissionIngressTests.test_profile_change_after_admission_invalidates_existing_bindings",
+    ),
+    (
+        "ignore the adapter artifact namespace in the profile digest",
+        "tools/service_runtime.py",
+        '            "adapter": None if adapter is None else {\n                "contract": adapter.get("contract"), "artifact_prefix": adapter.get("artifact_prefix")\n            },\n',
+        '            "adapter": None,\n',
+        "AdmissionIngressTests.test_profile_change_after_admission_invalidates_existing_bindings",
     ),
     (
         "reject transient policy failures instead of asking for redelivery",

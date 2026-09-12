@@ -47,15 +47,20 @@ def _forbidden_identities(forbidden_roots: Iterable[Path]) -> set[tuple[int, int
     return identities
 
 
-def _open_registry_descriptor(parent: Path, name: str, forbidden_roots: Iterable[Path]) -> int:
+def _open_registry_descriptor(
+    parent: Path, name: str, forbidden_roots: Iterable[Path], parent_identity: tuple[int, int]
+) -> int:
     """Walk the canonical parent with held directory descriptors and open the leaf.
 
     Every component is opened relative to the previously validated directory with
     O_NOFOLLOW, so an ancestor swapped for a symlink after canonicalization fails
     instead of being followed. Forbidden roots are compared by device/inode on
-    each held directory, and the parent is validated on its descriptor before
-    the original leaf name is opened relative to it with O_NOFOLLOW; the leaf is
-    never canonicalized, so a leaf swapped for a symlink is refused too.
+    each held directory. The held parent must be the very directory that was
+    canonicalized (same device/inode), so a real directory renamed into place
+    after canonicalization is refused as well; the parent is then validated on
+    its descriptor before the original leaf name is opened relative to it with
+    O_NOFOLLOW. The leaf is never canonicalized, so a leaf swapped for a symlink
+    is refused too.
     """
     forbidden = _forbidden_identities(forbidden_roots)
     parts = parent.parts
@@ -81,11 +86,15 @@ def _open_registry_descriptor(parent: Path, name: str, forbidden_roots: Iterable
                 raise service.ServiceError(
                     "service enrollment registry must be service-owned, outside source, checkout, state and proof roots"
                 )
-        parent = os.fstat(held)
+        parent_metadata = os.fstat(held)
+        if (parent_metadata.st_dev, parent_metadata.st_ino) != parent_identity:
+            raise service.ServiceError(
+                "service enrollment registry parent changed after canonicalization"
+            )
         if (
-            not stat.S_ISDIR(parent.st_mode)
-            or parent.st_uid != os.getuid()
-            or parent.st_mode & 0o022
+            not stat.S_ISDIR(parent_metadata.st_mode)
+            or parent_metadata.st_uid != os.getuid()
+            or parent_metadata.st_mode & 0o022
         ):
             raise service.ServiceError(
                 "service enrollment registry parent must be a same-user directory that is not group/world writable"
@@ -98,13 +107,21 @@ def _open_registry_descriptor(parent: Path, name: str, forbidden_roots: Iterable
         os.close(held)
 
 
-def _registry_bytes(parent: Path, name: str, forbidden_roots: Iterable[Path]) -> bytes:
+def _registry_bytes(
+    parent: Path, name: str, forbidden_roots: Iterable[Path], parent_identity: tuple[int, int] | None = None
+) -> bytes:
     """Open once via held directories, validate the descriptor, read from it.
 
     Every ownership/mode/size check runs on the opened descriptor, so a same-user
     writer cannot swap the path between validation and the read.
     """
-    descriptor = _open_registry_descriptor(parent, name, forbidden_roots)
+    if parent_identity is None:
+        try:
+            metadata = os.stat(parent)
+        except OSError as exc:
+            raise service.ServiceError("service enrollment registry is unavailable") from exc
+        parent_identity = (metadata.st_dev, metadata.st_ino)
+    descriptor = _open_registry_descriptor(parent, name, forbidden_roots, parent_identity)
     try:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
@@ -143,9 +160,12 @@ def read_service_registry(path: Path, forbidden_roots: Iterable[Path] = ()) -> a
         # parent, so it is never followed. Symlink loops raise RuntimeError on
         # older Pythons and OSError on newer ones; both are an unavailable path.
         parent = path.parent.resolve(strict=True)
+        # Pin the canonical parent's identity; the descriptor walk must land on
+        # exactly this directory, not a real directory renamed into its place.
+        metadata = os.stat(parent)
     except (OSError, RuntimeError) as exc:
         raise service.ServiceError("service enrollment registry is unavailable") from exc
-    raw = _registry_bytes(parent, path.name, tuple(forbidden_roots))
+    raw = _registry_bytes(parent, path.name, tuple(forbidden_roots), (metadata.st_dev, metadata.st_ino))
     try:
         registry = admission.load_registry(raw)
     except admission.AdmissionError as exc:

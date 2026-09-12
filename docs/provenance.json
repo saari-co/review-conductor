@@ -21,8 +21,8 @@
       "source_path": "tools/review_conductor_runtime.py",
       "destination_path": "tools/review_conductor_runtime.py",
       "source_sha256": "22fff3925db126de0fc27e9c61be03cd710d24d9140342ff8367e9831e683d40",
-      "destination_sha256": "6d7f505f1a1f5a7676cb0e3f4c3479b62b90da387e65e23ef15b05fc3206b85d",
-      "adaptation": "standalone policy-read/check adapter: Contents-read allowlist, profile-scoped token permissions validated against the two closed allowlists, injected signer seam, admitted HTTP ingestor, transient transport/429/5xx classification and retryable-ingest 503 mapping"
+      "destination_sha256": "0be5a61f5f636a43dc7f3ec6f0b0fe9f52e99d9196390e01ef05f9e2559c7922",
+      "adaptation": "standalone policy-read/check adapter: Contents-read allowlist, profile-scoped token permissions validated against the two closed allowlists on a snapshot of the caller's map, injected signer seam, admitted HTTP ingestor, transient transport/429/5xx classification and retryable-ingest 503 mapping"
     },
     {
       "source_path": "tools/review_conductor_userland.py",

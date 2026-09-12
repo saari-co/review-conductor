@@ -208,10 +208,40 @@ and `8366810` and were all reproduced against `cfe7908` before repair:
 `docs/provenance.json` destination hash and adaptation note were updated for
 the transient classification and 503 mapping.
 
+## Sixth review repair after head `0033873` (Copilot, three inline and two suppressed findings)
+
+The `0033873c80f99ca4107a58562cf6bca921e654ce` results (local PASS; hosted run
+34697408754 success) are historical for that head.
+
+21. **Policy staged for every `pull_request` delivery.** Staging is now on
+    demand: the admission hook, after the engine has classified the delivery
+    as a new non-closed binding candidate, raises `PolicyNotStaged` when the
+    bytes are not in the stage; the transaction is rolled back with nothing
+    written, the service fetches outside any lock and re-runs the delivery
+    once. Closed, duplicate and stale deliveries are proven to succeed with a
+    cold cache while the dependency is down, with zero policy reads.
+22. **Cache bound under the threaded server.** Dictionary access is guarded by
+    a lock that is never held during a fetch, with a post-fetch re-check that
+    keeps a concurrently staged identical entry; proven with concurrent
+    stagers.
+23. **Real directory renamed into the canonical parent's place.** The
+    canonical parent's device/inode is pinned after `resolve()` and the held
+    parent descriptor must match it; a renamed-in replacement that passes
+    owner/mode checks is refused.
+24. **Caller-mutable App map.** `GitHubAppClient` deep-copies the App
+    configuration at construction, so widening the caller's `permissions`
+    afterwards cannot change the installation-token request.
+25. **Digest omitted adapter authority.** `profile_policy_digest` now covers
+    ClawSweeper workflow id/name/path/ref/publish and the service adapter's
+    contract/artifact prefix, with regressions for each field.
+
+Documentation was also corrected: a 503 leaves the delivery redeliverable from
+GitHub's delivery log or API; GitHub does not retry automatically.
+
 ## Verification at the repaired head (local CPython 3.14.6, macOS arm64)
 
 - `make check` — PASS: legacy engine/activation/userland/profile suites,
-  scaffold and repository guards, trusted admission (18), service runtime (35,
+  scaffold and repository guards, trusted admission (18), service runtime (39,
   including the mutation harness), launcher transport, workflow contract,
   extraction provenance (14 files) and Python compilation, `git diff --check`.
 - `make build` — PASS; the packaged zipapp still excludes service, admission
@@ -245,13 +275,17 @@ must fail its named test and only that test):
 21. trust the profile's reviewer actors instead of enrollment;
 22. keep bindings current after reviewer rotation;
 23. keep bindings current after the engine profile changes;
-24. run policy transport inside the engine write transaction;
+24. stage policy for every pull_request delivery before the engine classifies it;
 25. reject transient policy failures instead of asking for redelivery;
 26. answer 400 for a retryable dependency failure;
 27. classify transient GitHub statuses as rejected operations;
 28. follow a symlinked registry leaf;
 29. let a symlink loop escape as a traceback;
-30. drop the App id from binding identity.
+30. drop the App id from binding identity;
+31. accept a real directory renamed into the canonical parent's place;
+32. keep the caller's GitHub App map by reference;
+33. ignore ClawSweeper workflow authority in the profile digest;
+34. ignore the adapter artifact namespace in the profile digest.
 
 Only CPython 3.14 was exercised locally; 3.11/3.12 evidence comes from hosted
 exact-head CI on the PR, recorded in the PR conversation, not here.

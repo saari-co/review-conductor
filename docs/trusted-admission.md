@@ -128,20 +128,27 @@ refuses a conflicting rebinding outright. Before binding, the admitted manifest
 must agree with the engine profile's repository, default branch, CI workflow,
 quiet period and merge policy. Each binding records the App, installation,
 policy commit/hash, the enrollment's reviewer actors and a digest of those
-policy-governed profile fields; a binding is current only while the registry
+policy-governed profile fields plus the adapter authority fields (ClawSweeper
+workflow id/name/path/ref/publish and the adapter contract/artifact prefix);
+a binding is current only while the registry
 still approves the same policy and names the same reviewers and the engine
 profile still digests identically, so reviewer rotation or a profile edit after
 admission blocks projection until the tuple is re-admitted.
 
 Approved-policy transport never runs inside the engine's SQLite write
-transaction: the service stages the bounded read before `BEGIN IMMEDIATE`,
-hash-verifies the bytes against the enrollment and keeps at most eight such
-immutable `(repository, commit, sha256)` entries in memory; the admission hook
-re-hashes and re-validates the staged bytes inside the transaction from a reader
-that performs no I/O. A transient transport failure (connection error, timeout,
-HTTP 429/5xx) is a retryable service failure: the webhook answers 503
-`dependency_unavailable`, nothing is written, and GitHub redelivers. Malformed,
-foreign or otherwise rejected deliveries still answer 400.
+transaction and only runs for deliveries that need a binding. The admission
+hook, once the engine has classified a delivery as a new non-closed binding
+candidate, reads the policy bytes from an in-memory stage; if they are not
+staged it unwinds the transaction (nothing written), the service fetches the
+bounded bytes outside any lock, hash-verifies them against the enrollment,
+keeps at most eight immutable `(repository, commit, sha256)` entries under a
+lock that is never held during a fetch, and re-runs the delivery once. Closed,
+duplicate and stale deliveries therefore never touch the policy dependency. A
+transient transport failure (connection error, timeout, HTTP 429/5xx) is a
+retryable service failure: the webhook answers 503 `dependency_unavailable` and
+nothing is written, so the delivery can be redelivered from GitHub's delivery
+log or API (GitHub does not retry automatically). Malformed, foreign or
+otherwise rejected deliveries still answer 400.
 
 That source is inactive until an external
 service registry (mode exactly 0600, single link, non-writable same-user parent,

@@ -41,7 +41,9 @@ exactly `0600`, never a target-repository file. The entrypoint refuses a registr
 located inside this source tree, the target checkout, or the state/proof roots,
 canonicalizes only the ancestors, walks them with held directory descriptors
 (refusing any symlink component and any forbidden root by device/inode),
-requires a same-user parent directory that is not group/world writable, opens
+requires the held parent to be the very directory that was canonicalized (same
+device/inode, so a real directory renamed into place is refused) and a same-user
+directory that is not group/world writable, opens
 the original leaf name relative to that held parent without following symlinks
 (so a leaf swapped for a symlink is refused, never canonicalized), treats a
 symlink loop as an unavailable registry, validates and reads the opened descriptor,
@@ -64,11 +66,15 @@ Every worker tick re-checks that the running profile's App, installation,
 repository and reviewer actors are the registry's enrollment, and that each live
 head's binding was admitted under the same policy, reviewer actors and
 policy-governed profile fields that hold now; rotating reviewers or editing the
-profile blocks projection until each head is re-admitted. Approved-policy
-transport is staged before the engine's write transaction and hash-verified
-against the enrollment; a transient GitHub failure answers the webhook with 503
-`dependency_unavailable` and writes nothing, so GitHub redelivers, while
-malformed or foreign deliveries still answer 400. Fail-closed admission conditions are
+profile (including the ClawSweeper workflow, ref or adapter artifact prefix)
+blocks projection until each head is re-admitted. Approved-policy transport
+runs only for deliveries the engine has classified as new binding candidates,
+never inside its write transaction, and is hash-verified against the enrollment;
+closed, duplicate and stale deliveries never touch it. A transient GitHub
+failure answers the webhook with 503 `dependency_unavailable` and writes
+nothing, so the delivery can be redelivered from GitHub's delivery log or API
+(GitHub does not retry automatically), while malformed or foreign deliveries
+still answer 400. Fail-closed admission conditions are
 retried on the next tick; any other worker failure (database, filesystem,
 unexpected) stops the whole service with exit status 2 rather than leaving
 ingress accepting deliveries that nothing will act on. The GitHub App client

@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any, Callable, Union
 
@@ -26,12 +27,33 @@ MAX_STAGED_POLICIES = 8
 # Approved policy bytes keyed by (repository, commit, sha256). Content is
 # immutable under that key and is hash-verified before it is stored, so a hit
 # is exactly the bytes the registry approves; the hook re-hashes and
-# re-validates them inside the write transaction without any remote I/O.
+# re-validates them inside the write transaction without any remote I/O. The
+# lock guards only the dictionary (never a fetch), so the bound holds under the
+# threaded HTTP server.
 _STAGED_POLICIES: dict[tuple[str, str, str], bytes] = {}
+_STAGED_LOCK = threading.Lock()
+
+
+class PolicyNotStaged(Exception):
+    """Raised inside the engine transaction when a binding needs unstaged policy bytes.
+
+    The transaction is rolled back with nothing written; the caller stages the
+    bytes outside any lock and re-runs the delivery.
+    """
 
 
 def clear_staged_policies() -> None:
-    _STAGED_POLICIES.clear()
+    with _STAGED_LOCK:
+        _STAGED_POLICIES.clear()
+
+
+def _staged_key(enrolled: admission.Enrollment) -> tuple[str, str, str]:
+    return (enrolled.repository, enrolled.approved_policy_commit, enrolled.approved_policy_sha256)
+
+
+def staged_policy(enrolled: admission.Enrollment) -> bytes | None:
+    with _STAGED_LOCK:
+        return _STAGED_POLICIES.get(_staged_key(enrolled))
 
 
 def stage_approved_policy(enrolled: admission.Enrollment, read_policy: PolicyReader) -> bytes:
@@ -42,8 +64,8 @@ def stage_approved_policy(enrolled: admission.Enrollment, read_policy: PolicyRea
     written) instead of a rejected delivery; every other failure stays a
     ``ServiceError``.
     """
-    key = (enrolled.repository, enrolled.approved_policy_commit, enrolled.approved_policy_sha256)
-    staged = _STAGED_POLICIES.get(key)
+    key = _staged_key(enrolled)
+    staged = staged_policy(enrolled)
     if staged is not None:
         return staged
     try:
@@ -57,16 +79,22 @@ def stage_approved_policy(enrolled: admission.Enrollment, read_policy: PolicyRea
     raw = bytes(raw)
     if hashlib.sha256(raw).hexdigest() != enrolled.approved_policy_sha256:
         raise ServiceError("approved policy content hash does not match enrollment")
-    if len(_STAGED_POLICIES) >= MAX_STAGED_POLICIES:
-        _STAGED_POLICIES.clear()
-    _STAGED_POLICIES[key] = raw
+    with _STAGED_LOCK:
+        # Re-check after the fetch: a concurrent delivery may have staged the same
+        # key; keep its bytes (identical by hash) and never exceed the bound.
+        existing = _STAGED_POLICIES.get(key)
+        if existing is not None:
+            return existing
+        if len(_STAGED_POLICIES) >= MAX_STAGED_POLICIES:
+            _STAGED_POLICIES.clear()
+        _STAGED_POLICIES[key] = raw
     return raw
 
 
-def _staged_reader(enrolled: admission.Enrollment, staged: bytes | None) -> PolicyReader:
-    """A reader that only ever returns the bytes staged before the transaction."""
+def _staged_reader(enrolled: admission.Enrollment, staged: bytes) -> PolicyReader:
+    """A reader that only ever returns bytes already staged; it performs no I/O."""
     def read(repository: str, commit: str) -> bytes:
-        if staged is None or (repository, commit) != (enrolled.repository, enrolled.approved_policy_commit):
+        if (repository, commit) != (enrolled.repository, enrolled.approved_policy_commit):
             raise ServiceError("approved policy was not staged for this delivery")
         return staged
 
@@ -184,15 +212,23 @@ def require_policy_matches_profile(policy: admission.AdmittedPolicy, config: dic
             raise ServiceError("approved policy contradicts the engine profile")
 
 
-def profile_policy_digest(core_config: dict[str, Any]) -> str:
-    """Digest of every engine-profile field the admitted policy governs.
+def profile_policy_digest(core_config: dict[str, Any], service_config: dict[str, Any]) -> str:
+    """Digest of every profile field that governs what the admitted policy reviews.
 
-    Stored with each binding and recompared on every tick, so a profile edited
-    after admission (for example across a restart) cannot keep an old binding
+    Covers the engine fields the policy pins (repository, default branch, CI
+    workflow, quiet period, merge policy) and the adapter authority fields that
+    select the review producer and its artifact namespace (ClawSweeper workflow
+    id/name/path/ref/publish and the adapter contract/artifact prefix). Stored
+    with each binding and recompared on every tick, so a profile edited after
+    admission (for example across a restart) cannot keep an old binding
     unlocking projection under rules the admitted policy never approved.
     """
     review_policy = core.require_object(core_config.get("review_policy"), "core review_policy")
     ci = core.require_object(core_config.get("ci"), "core ci")
+    clawsweeper = core.require_object(core_config.get("clawsweeper"), "core clawsweeper")
+    adapter = service_config.get("adapter")
+    if adapter is not None:
+        adapter = core.require_object(adapter, "service adapter")
     canonical = json.dumps(
         {
             "schema": PROFILE_DIGEST_SCHEMA,
@@ -200,6 +236,13 @@ def profile_policy_digest(core_config: dict[str, Any]) -> str:
             "repository_id": core_config.get("repository_id"),
             "default_branch": core_config.get("default_branch"),
             "ci": {"workflow_name": ci.get("workflow_name"), "workflow_path": ci.get("workflow_path")},
+            "clawsweeper": {
+                key: clawsweeper.get(key)
+                for key in ("workflow_id", "workflow_name", "workflow_path", "ref", "publish")
+            },
+            "adapter": None if adapter is None else {
+                "contract": adapter.get("contract"), "artifact_prefix": adapter.get("artifact_prefix")
+            },
             "quiet_seconds": review_policy.get("quiet_seconds"),
             "merge_policy": core_config.get("merge_policy"),
         },
@@ -285,7 +328,7 @@ def _persist_binding(
 def _admission_hook(
     registry: admission.Registry,
     enrolled: admission.Enrollment,
-    read_policy: PolicyReader,
+    service_config: dict[str, Any],
 ) -> Callable[[sqlite3.Connection, dict[str, Any], str, dict[str, Any], dict[str, Any]], dict[str, Any] | None]:
     def hook(
         connection: sqlite3.Connection,
@@ -321,12 +364,18 @@ def _admission_hook(
             "review_epoch": row["review_epoch"],
             "policy_commit": enrolled.approved_policy_commit,
         }
+        # The engine has classified this delivery as a binding candidate. Only now
+        # are policy bytes required; if they are not staged, unwind the transaction
+        # (nothing written) so the caller can fetch them outside the lock.
+        staged = staged_policy(enrolled)
+        if staged is None:
+            raise PolicyNotStaged(enrolled.repository)
         try:
-            bound = admission.admit(registry, request, read_policy)
+            bound = admission.admit(registry, request, _staged_reader(enrolled, staged))
         except admission.AdmissionError as exc:
             raise ServiceError("approved policy could not be bound to the exact review tuple") from exc
         require_policy_matches_profile(bound.policy, config)
-        _persist_binding(connection, bound, enrolled, profile_policy_digest(config))
+        _persist_binding(connection, bound, enrolled, profile_policy_digest(config, service_config))
         return {
             "schema": BINDING_TABLE_SCHEMA,
             "binding_id": bound.binding_id,
@@ -361,17 +410,26 @@ def ingest_service_delivery(
         or core_config["repository_id"] != enrolled.repository_id
     ):
         raise ServiceError("core profile contradicts trusted service enrollment")
-    staged = stage_approved_policy(enrolled, read_policy) if event_type == "pull_request" else None
-    return core.ingest_github_delivery(
-        config_path=config_path,
-        state_root=state_root,
-        event_type=event_type,
-        delivery_id=delivery_id,
-        signature=signature,
-        body=body,
-        secret=secret,
-        admission_hook=_admission_hook(registry, enrolled, _staged_reader(enrolled, staged)),
-    )
+    # Policy transport runs only when the engine, inside its transaction, has
+    # classified the delivery as a new non-closed binding candidate; closed,
+    # duplicate and stale deliveries never touch the policy dependency. The
+    # fetch itself happens after the transaction has been rolled back, and the
+    # delivery is re-run once with the staged bytes.
+    for _attempt in range(2):
+        try:
+            return core.ingest_github_delivery(
+                config_path=config_path,
+                state_root=state_root,
+                event_type=event_type,
+                delivery_id=delivery_id,
+                signature=signature,
+                body=body,
+                secret=secret,
+                admission_hook=_admission_hook(registry, enrolled, service_config),
+            )
+        except PolicyNotStaged:
+            stage_approved_policy(enrolled, read_policy)
+    raise runtime.RetryableIngestError("approved policy staging raced cache eviction")
 
 
 def build_service_http_handler(
@@ -397,6 +455,7 @@ def binding_for_current_head(
     repository: str,
     pr_number: int,
     core_config: dict[str, Any],
+    service_config: dict[str, Any],
 ) -> dict[str, Any] | None:
     """Return the current binding only while every authority it was admitted under holds.
 
@@ -434,7 +493,7 @@ def binding_for_current_head(
         or enrolled.reviewer_clawsweeper != row["reviewer_clawsweeper"]
     ):
         return None
-    if profile_policy_digest(core_config) != row["profile_digest"]:
+    if profile_policy_digest(core_config, service_config) != row["profile_digest"]:
         return None
     return dict(row)
 
@@ -485,7 +544,7 @@ def require_current_bindings(config: dict[str, Any], registry: RegistrySource) -
         ).fetchall()
         for row in rows:
             if binding_for_current_head(
-                connection, registry, row["repository"], row["pr_number"], core_config
+                connection, registry, row["repository"], row["pr_number"], core_config, config
             ) is None:
                 raise ServiceError("current review tuple lacks a current approved-policy binding")
     finally:

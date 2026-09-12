@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import copy
 import contextlib
 import datetime as dt
 import hashlib
@@ -264,7 +265,10 @@ class GitHubAppClient:
         signer: Callable[[int, str, int], str] | None = None,
     ) -> None:
         core.require_enabled({"review_policy": config.get("review_policy", {})})
-        app = config["github_app"]
+        # Snapshot the caller's map: the token request is derived from this object
+        # later, so a caller mutating its own config after construction must not
+        # be able to change the permissions the adapter validated here.
+        app = copy.deepcopy(config["github_app"])
         # The adapter derives its token request from this map, so it must be one of
         # the two closed allowlists regardless of how the client was constructed.
         if app.get("permissions") not in (APP_PERMISSIONS, STANDALONE_APP_PERMISSIONS):
