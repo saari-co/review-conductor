@@ -35,8 +35,8 @@
       "source_path": "tools/review_conductor_userland_launcher.py",
       "destination_path": "tools/review_conductor_userland_launcher.py",
       "source_sha256": "9de97341e8f2343b70e46458586d04ce58e711ef2dc94b0ef4f046fd0a4e0256",
-      "destination_sha256": "9de97341e8f2343b70e46458586d04ce58e711ef2dc94b0ef4f046fd0a4e0256",
-      "adaptation": "byte-identical"
+      "destination_sha256": "0e6f0f6296516c6e32726332514c09a041a3d2996bc47d39219fe04398fdc511",
+      "adaptation": "standalone review repair: bounded verified-unlinked descriptor transport replaces pre-reader pipe writes; partial acquisition cleanup and kill/reap on spawn failure"
     },
     {
       "source_path": "contracts/review-conductor/dinkuskit-blocks-userland.json",

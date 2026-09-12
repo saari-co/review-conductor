@@ -326,15 +326,41 @@ def resolve_runtime_value(
     return value
 
 
-def pipe_value(value: bytes) -> int:
-    read_fd, write_fd = os.pipe()
+def credential_descriptor(value: bytes) -> int:
+    """Return a bounded, rewound, anonymous file descriptor (never a filled pipe).
+
+    TemporaryFile uses O_TMPFILE where available, otherwise unlinks before it
+    returns. Verify anonymity *before* writing any value; unsupported hosts fail
+    closed. This may use disk-backed anonymous storage, not guaranteed RAM-only
+    storage. No credential is written to a persistent named file.
+    """
+    if not isinstance(value, bytes) or not value or len(value) > 1024 * 1024:
+        raise LauncherError("runtime descriptor value has an invalid bounded shape")
     try:
-        with os.fdopen(write_fd, "wb") as writer:
-            writer.write(value)
-    except Exception:
-        os.close(read_fd)
-        raise
-    return read_fd
+        with tempfile.TemporaryFile(mode="w+b") as stream:
+            metadata = os.fstat(stream.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 0:
+                raise LauncherError("anonymous runtime descriptor is unavailable")
+            os.fchmod(stream.fileno(), 0o600)
+            if stream.write(value) != len(value):
+                raise LauncherError("runtime descriptor write was incomplete")
+            stream.flush()
+            stream.seek(0)
+            # dup is non-inheritable; Popen grants only the explicit pass_fds.
+            return os.dup(stream.fileno())
+    except OSError:
+        raise LauncherError("anonymous runtime descriptor preparation failed") from None
+
+
+def stop_child(process: Any) -> None:
+    """Bound graceful shutdown, then kill and reap a surviving child."""
+    if process.poll() is None:
+        process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=10)
 
 
 def child_environment(config: dict[str, Any], webhook_fd: int, github_fd: int) -> dict[str, str]:
@@ -362,30 +388,35 @@ def start(
     profiles.require_enabled(config)
     if bootstrap_status(config)["result"] != "ready":
         raise LauncherError("current-user service-account bootstrap is not ready")
-    webhook = resolve_runtime_value(config, profiles.capabilities(config)[0])
-    github = resolve_runtime_value(config, profiles.capabilities(config)[1])
-    connector = resolve_runtime_value(config, profiles.capabilities(config)[2])
-    webhook_fd = pipe_value(webhook)
-    github_fd = pipe_value(github)
-    connector_fd = pipe_value(connector)
-    webhook = github = connector = b""
     conductor = None
     tunnel = None
-    try:
-        conductor = popen(
-            [
-                sys.executable,
-                str(ROOT / "tools/review_conductor_userland.py"),
-                "--config",
-                str(config_path),
-                "serve",
-                "--apply",
-            ],
-            cwd=config["source_root"],
-            env=child_environment(config, webhook_fd, github_fd),
-            pass_fds=(webhook_fd, github_fd),
-        )
+    # Register each descriptor immediately, so partial preparation/spawn failure
+    # closes everything already acquired. No child exists while values are written.
+    with contextlib.ExitStack() as descriptors:
+        prepared = []
+        for capability in profiles.capabilities(config):
+            value = resolve_runtime_value(config, capability)
+            try:
+                descriptor = credential_descriptor(value)
+            finally:
+                value = b""
+            descriptors.callback(os.close, descriptor)
+            prepared.append(descriptor)
+        webhook_fd, github_fd, connector_fd = prepared
         try:
+            conductor = popen(
+                [
+                    sys.executable,
+                    str(ROOT / "tools/review_conductor_userland.py"),
+                    "--config",
+                    str(config_path),
+                    "serve",
+                    "--apply",
+                ],
+                cwd=config["source_root"],
+                env=child_environment(config, webhook_fd, github_fd),
+                pass_fds=(webhook_fd, github_fd),
+            )
             tunnel = popen(
                 [
                     config["tunnel"]["cloudflared_path"],
@@ -399,17 +430,10 @@ def start(
                 env=clean_environment(config),
                 pass_fds=(connector_fd,),
             )
-        except Exception:
-            conductor.terminate()
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                conductor.wait(timeout=10)
-            if conductor.poll() is None:
-                conductor.kill()
+        except BaseException:
+            if conductor is not None:
+                stop_child(conductor)
             raise
-    finally:
-        for descriptor in (webhook_fd, github_fd, connector_fd):
-            with contextlib.suppress(OSError):
-                os.close(descriptor)
     assert conductor is not None and tunnel is not None
     previous_handlers: dict[int, Any] = {}
 
@@ -426,10 +450,7 @@ def start(
     finally:
         request_stop(signal.SIGTERM, None)
         for process in (tunnel, conductor):
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                process.wait(timeout=10)
-            if process.poll() is None:
-                process.kill()
+            stop_child(process)
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
     conductor_code = conductor.returncode or 0

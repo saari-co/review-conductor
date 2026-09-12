@@ -1,5 +1,8 @@
 # PR #1 security/governance hardening — 2026-09-11
 
+> Historical evidence for the earlier candidate only; not current-head clearance.
+> Superseded by `proof/review-repairs-20260911/PROOF.md` for the review repairs.
+
 ## Exact source and scope
 
 - Repository: `saari-co/review-conductor`; PR #1 remains draft/open.
@@ -56,7 +59,7 @@ repository/PR/base/head/epoch, HMAC/replay, stale-evidence, draft/quiet-period,
 isolation, bounded-repair and human-only merge behavior remains regression tested.
 
 The final commit identity, post-commit local results, hosted workflow/check URLs,
-issuer and head/base stability are reported after push, outside this immutable
+issuer and head/base stability are reported after push, outside this versioned
 proof to avoid a self-referential commit. Hosted PASS must be observed at that
 exact resulting head, not inferred from starting-head CI or local tests.
 External OpenClaw / ClawSweeper reviews: **NOT RUN / not enrolled**, not PASS.

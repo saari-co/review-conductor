@@ -51,3 +51,20 @@ sensitive details publicly. Maintainers coordinate incident containment and
 rotation through the credential owner; deleting a file or rewriting Git does not
 revoke a leaked credential. Do not conduct live exploitation, rotate credentials,
 rewrite history or change deployments without the applicable authorization.
+
+## Legacy launcher descriptor repair (offline qualification only)
+
+Resolved runtime values are bounded to 1 MiB and passed via explicitly inherited
+file descriptors, never consumer argv/environment values or log output. The
+launcher uses the standard-library `TemporaryFile`, verifies a regular file with
+zero links **before** writing any value, sets mode 0600, and rewinds before child
+startup. Hosts unable to supply that anonymous storage fail closed. Anonymous
+storage can be disk-backed: this is not a RAM-only or secure-erasure guarantee.
+Only descriptor numbers and `/dev/fd/N` references enter consumer argv/env.
+Partial preparation/spawn failures close parent descriptors; a failed tunnel
+spawn terminates/kills and reaps the already-created conductor child.
+
+This repairs a legacy transport deadlock; it does not qualify live cloudflared,
+1Password, service lifecycle, credentials or deployment. Historical 1Password
+bootstrap/resolver code remains regression-only, including its service-account
+environment flow; the standalone package still excludes all launcher code.

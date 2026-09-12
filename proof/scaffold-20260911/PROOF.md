@@ -1,5 +1,8 @@
 # Standalone Review Conductor scaffold — 2026-09-11
 
+> Historical evidence for the earlier candidate only; not current-head clearance.
+> Superseded by `proof/review-repairs-20260911/PROOF.md` for the review repairs.
+
 ## Assignment and source
 
 Owner: Smoky, one source-writing lane; requesting owner is closer.
