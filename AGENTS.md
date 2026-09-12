@@ -4,7 +4,9 @@ This repository owns deterministic review orchestration, not a conversational
 agent, Gateway, CI executor, source-repair worker, or merge service.
 
 - Read docs/architecture.md and docs/integration-contract.md before changes.
-- One mutation owner per isolated branch/worktree. Commit work; never self-merge.
+- One mutation owner per isolated branch/worktree. Commit work; never self-approve.
+  Owner self-merge is allowed only through the documented, auditable trusted-owner
+  bypass; it is not review PASS and must retain exact-head CI evidence.
 - Preserve repository/PR/base/head/epoch binding, HMAC/replay protection,
   stale-result rejection, action claims, bounded repairs, and human-only merge.
 - Repository manifests describe requirements; they cannot grant authority.
@@ -20,6 +22,6 @@ agent, Gateway, CI executor, source-repair worker, or merge service.
 Governance: read CONTRIBUTING.md and SECURITY.md. The two human owners are mapped
 in .github/owners.json; .github/CODEOWNERS covers all paths. Those files do not
 supply service reviewer authority. Evaluate policy changes against approved base.
-Keep PR #1 draft; docs/bootstrap.md defines the pending human bootstrap gate.
+docs/bootstrap.md defines PR #1's exact-tuple bootstrap gate and exception record.
 docs/main-protection.proposed.json records the applied baseline body but remains
 review-only; it is never permission to change or reapply repository settings.

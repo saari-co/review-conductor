@@ -14,9 +14,9 @@ integration contracts before changing this security-sensitive foundation.
   invalidates prior evidence. CI green is not external review clearance.
 - Request owner review only when authorized to do so. Reviewers do not inherit
   mutation, policy-promotion, adjudication, deployment or merge authority.
-- Human merge authorization is separate from technical readiness. Keep PR #1
-  draft until an explicit bootstrap decision; do not create an approval record
-  on behalf of either owner. See [bootstrap](docs/bootstrap.md).
+- Human merge authorization is separate from technical readiness. Do not create
+  an approval or trusted-owner override record on behalf of either owner. See
+  [bootstrap](docs/bootstrap.md).
 
 ## Ownership
 
@@ -29,12 +29,19 @@ This map is repository governance only, not the service enrollment/reviewer map.
 [CODEOWNERS](.github/CODEOWNERS) covers **all files**, including itself, workflows,
 schemas, tests, proof, scripts and documentation. GitHub's two entries mean
 **either owner**, not two required approvals. The applied baseline requires one
-eligible non-author code-owner approval and approval after the latest push.
+eligible non-author code-owner approval on the normal path. It deliberately does
+not require approval by someone other than the latest pusher.
 For security/governance, workflow/check ownership, credential, policy/admission,
 bootstrap or cutover changes, obtain explicit exact-head acknowledgement from
 both designated owners before merge (an author's own acknowledgement is not a
 GitHub review approval). This extra policy is human-verified, not enforced by
 CODEOWNERS. Never claim two signatures merely because both names are listed.
+
+Only the two mapped owners may use the protected-branch trusted-owner bypass.
+Use it for an explicit emergency or maintainer override, never to manufacture
+review PASS. Preserve the PR, exact-head CI and review evidence; record the actor,
+reason, accepted risk and exact tuple in the PR conversation so GitHub's bypass
+and audit events remain attributable. No team, App, bot or other user may bypass.
 
 A PR cannot weaken the rules used to review itself. Evaluate governance changes
 against the approved base; if no approved base exists, follow the bootstrap gate.
