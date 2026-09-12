@@ -14,7 +14,7 @@
     "bind_host": "127.0.0.1",
     "bind_port": 9444,
     "path": "/github/webhook",
-    "public_hostname": "unprovisioned-smcbd-suite.invalid",
+    "public_hostname": "smcbd-suite-review-1366416798.ztoned.com",
     "max_body_bytes": 1048576,
     "request_timeout_seconds": 10
   },
@@ -39,12 +39,12 @@
     "permissions": {
       "actions": "write",
       "checks": "write",
+      "contents": "read",
       "metadata": "read",
       "pull_requests": "write"
     },
     "denied_permissions": [
       "administration",
-      "contents",
       "deployments",
       "issues",
       "members",
@@ -106,7 +106,7 @@
   "tunnel": {
     "cloudflared_path": "/opt/homebrew/bin/cloudflared",
     "tunnel_id": null,
-    "tunnel_name": null
+    "tunnel_name": "review-conductor-smcbd-suite-1366416798"
   },
   "notifications": {
     "openclaw_path": "/opt/homebrew/bin/openclaw",
@@ -130,10 +130,10 @@
       "Authoritative repository-specific reviewer identities are not enrolled.",
       "GitHub App 4916376 installation 161027021 lacks the required Contents: read permission for approved-policy retrieval.",
       "Dedicated webhook, GitHub App private-key and external-review credentials are not provisioned.",
-      "The target default branch does not yet contain an owner-approved .review-conductor.json commit/hash.",
+      "The owner-approved target .review-conductor.json commit/hash is not yet promoted into the external enrollment registry.",
       "Dedicated ingress and tunnel are not provisioned.",
       "Private exact-tuple comprehensive ClawSweeper workflow/artifact adapter is not installed or qualified.",
-      "Main has only bootstrap README; CI and rail placeholders remain on PR #3.",
+      "The SMCBD shadow pilot and genuine exact-revision reviewer producers are not yet qualified.",
       "Conductor check ownership and required-check App binding require separately authorized target-repository changes."
     ]
   },

@@ -248,8 +248,7 @@ class ProfilesTest(unittest.TestCase):
         candidate=json.loads((ROOT/'contracts/review-conductor/openclaw-smcbd-suite-userland.json').read_text())
         self.assertEqual(candidate['github_app']['app_id'],4916376)
         self.assertEqual(candidate['github_app']['installation_id'],161027021)
-        self.assertNotIn('contents',candidate['github_app']['permissions'])
-        self.assertIn('contents',candidate['github_app']['denied_permissions'])
+        self.assertEqual(candidate['github_app']['permissions']['contents'],'read')
         self.assertFalse(candidate['enrollment']['enabled'])
 
 

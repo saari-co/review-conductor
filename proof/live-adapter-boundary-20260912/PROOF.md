@@ -1,0 +1,109 @@
+# Authority-bound live-adapter proof — 2026-09-12
+
+## Identity and scope
+
+- Repository: `saari-co/review-conductor`.
+- Stacked base: reduced inactive-core PR #3 at
+  `c58921ee791eed9fdaab73b4bbf08d23db2e2247`.
+- Pre-split full candidate: `3b7516c892679a5ec302e84c3ee975c51331766d`.
+- Restored adapter commit: `9ca6f516cb8e0da4a57b7a814656a56f64df88ad`.
+- Boundary repair commit: `d18d336664fa993a4414851ab48d624be44f8b5e`.
+- Branch: `openclaw/review-conductor-pr4-live-adapters`.
+- Normalized base: merged `main` at
+  `10ab35181c24d572351401628f2ec59ef26110a6`.
+
+This slice restores the live GitHub, checkout, OpenClaw, ClawSweeper,
+notification, worker, credential, and operator-handoff code removed from PR #3.
+It remains disabled and is reviewed independently from the admission core.
+
+## Final authority-boundary repairs
+
+1. Installation-token cache reads and replacement are synchronized, so a
+   shared ingress/worker client issues only one concurrent mint.
+2. Installation-token minting and read-only approved-policy retrieval are not
+   fenced by an old tuple binding. This prevents a stale binding from blocking
+   retrieval of the newly promoted policy. The subsequent repository mutation
+   is still fenced after token minting.
+3. The core profile's repository name and numeric ID must equal the
+   service-owned enrollment on every provider read, delivery, and tick.
+4. The authority-gate SQLite connection uses URI `mode=ro`; disappearance
+   between the existence check and open is a failed gate, not empty state.
+5. Checkout hydration is fenced before the checkout is touched and again
+   immediately before a fetch.
+6. The materialize and queue commands of an OpenClaw dispatch each receive a
+   fresh authority fence.
+7. Every individual notification send receives a fresh authority fence.
+8. A live client must implement both guard installation and authority
+   assertion; partial implementations fail closed.
+9. Databases created before profile-digest binding are migrated in place, but
+   their legacy rows remain untrusted until exact-tuple readmission.
+10. Authority denial before transport releases claimed check, ClawSweeper,
+    checkout and OpenClaw work back to `pending`; it is not misclassified as a
+    failed or uncertain external side effect.
+11. The binding digest includes the effective Spark dispatch target and the
+    configured `smoky`, `ssh` and `scp` executable selectors, so changing the
+    service-side OpenClaw destination or binaries invalidates existing bindings.
+12. The injected GitHub transport's two- and three-element response forms are
+    normalized for artifact downloads as well as API calls.
+13. Failed OpenClaw actions and uncertain notifications have supported
+    standalone recovery commands. Each command rechecks the whole profile and
+    then the selected PR's current policy binding inside the state-mutation
+    transaction; revocation leaves state unchanged.
+14. Every current review side effect carries its canonical repository, PR,
+    base SHA, head SHA and review epoch into the final transport fence. A newly
+    admitted head cannot authorize pending work or notifications selected for a
+    superseded tuple; direct regression and mutation coverage prove the bound.
+15. OpenClaw adapter commands receive a dedicated allowlisted subprocess
+    environment. The threaded service never clears or restores process-global
+    `os.environ`, so concurrent webhook work and environment updates remain
+    intact while a long-running adapter command executes.
+16. The standalone process holds `umask 077` for the complete threaded service
+    lifecycle. Nested file-creation guards can restore only that same restrictive
+    value while ingress and worker threads are active.
+17. A notification row is committed as `uncertain` before its transport begins.
+    Process death after provider delivery therefore cannot expose the row as
+    retryable; explicit provider reconciliation is required.
+18. The legacy userland launcher is not represented as a standalone-service
+    launcher. Registry-aware inherited-descriptor supervisor wiring remains an
+    activation prerequisite.
+19. Notification subprocesses receive only an explicit runtime identity/locale
+    allowlist; service credentials and unrelated environment values are not
+    inherited.
+20. Maintenance-mode SQLite failures stay within the controlled standalone CLI
+    error boundary and return status 2 without a traceback.
+
+## Executable proof
+
+- Focused live service/adapter suite: 70 tests passed.
+- Executable mutation suite: all 73 precise mutants killed.
+- The added cases directly exercise concurrent token minting, promotion after
+  a stale binding, reloaded core identity, read-only/disappearing SQLite state,
+  checkout fencing, both OpenClaw command fences, per-notification fencing,
+  incomplete live clients, the Spark dispatch target and executable selectors,
+  header-aware artifact
+  transport normalization, authority-bound standalone maintenance and exact
+  tuple rejection after head supersession, including stale review-result
+  notification suppression, concurrent process-environment preservation and
+  exact propagation of the allowlisted environment to the subprocess boundary,
+  restrictive umask retention across the threaded lifecycle, and a simulated
+  process death after the durable notification claim but before a transport
+  result can be recorded, notification subprocess environment isolation, and
+  controlled maintenance-database failure handling.
+- Complete `make check`: passed on this repair tree.
+- Extraction provenance: 14 files verified and Python compilation passed.
+- `git diff --check`: passed.
+
+The complete gate, reproducible build, exact stacked-base/head whitespace check,
+and hosted matrix are rerun on the final evidence commit. Local PASS is not
+activation, deployment, or review clearance.
+
+## Explicitly not done
+
+- No App setting, key, secret, webhook, tunnel, credential, deployment, target
+  repository, branch protection, check binding, merge, or adjudication change.
+- The SMCBD candidate profile remains disabled.
+- The proposed HTTPS endpoint remains unprovisioned and unverified.
+- Registry-aware inherited-descriptor launcher or supervisor wiring remains
+  unimplemented and unqualified.
+- Fixture and hosted CI PASS are not genuine App-owned OpenClaw or ClawSweeper
+  review PASS.

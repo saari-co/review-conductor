@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
+import copy
 import contextlib
 import datetime as dt
 import hashlib
@@ -48,6 +50,10 @@ APP_PERMISSIONS = {
     "metadata": "read",
     "pull_requests": "write",
 }
+STANDALONE_APP_PERMISSIONS = {
+    **APP_PERMISSIONS,
+    "contents": "read",
+}
 DENIED_PERMISSIONS = {
     "administration",
     "contents",
@@ -59,9 +65,13 @@ DENIED_PERMISSIONS = {
     "secrets",
     "workflows",
 }
+STANDALONE_DENIED_PERMISSIONS = DENIED_PERMISSIONS - {"contents"}
 APP_EVENTS = ["pull_request", "workflow_run"]
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 API_VERSION = "2022-11-28"
+# GitHub statuses that describe a transient upstream condition rather than a
+# rejected operation; callers may retry without changing the request.
+TRANSIENT_STATUSES = frozenset({429, 500, 502, 503, 504})
 FIXED_GIT = Path("/usr/bin/git")
 
 
@@ -72,6 +82,72 @@ class RuntimeError(core.ContractError):
 
 class GitHubApiError(RuntimeError):
     """A fixed GitHub API operation failed without exposing response material."""
+
+
+class GitHubTransientError(GitHubApiError):
+    """The transport or GitHub itself failed transiently; the same call may be retried."""
+
+
+class RetryableIngestError(Exception):
+    """A dependency failed transiently before any state was written.
+
+    Deliberately not a ContractError: the delivery was neither malformed nor
+    foreign, so the HTTP edge answers 503 and leaves the delivery redeliverable
+    from GitHub's delivery log or API (GitHub does not retry automatically).
+    """
+
+
+def tuple_authority(record: Any) -> dict[str, Any]:
+    """Return the canonical review tuple that owns a prospective side effect."""
+    try:
+        repository = record["repository"]
+        pr_number = record["pr_number"]
+        base_sha = record["base_sha"]
+        head_sha = record["head_sha"]
+        review_epoch = record["review_epoch"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError("side-effect authority is missing exact tuple identity") from exc
+    return {
+        "repository": core.require_text(repository, "authority repository", 200),
+        "pr_number": core.require_positive_int(pr_number, "authority PR number"),
+        "base_sha": core.require_sha(base_sha, "authority base SHA"),
+        "head_sha": core.require_sha(head_sha, "authority head SHA"),
+        "review_epoch": require_review_epoch(review_epoch, "authority review epoch"),
+    }
+
+
+def guarded_client_kwargs(client: Any, record: Any) -> dict[str, Any]:
+    """Pass tuple authority to clients that implement the live guard contract.
+
+    Legacy and test-only adapters have no authority-guard installer and retain
+    their historical signatures. A live service refuses such a client before a
+    tick starts, so this compatibility path cannot weaken the standalone route.
+    """
+    if callable(getattr(client, "set_authority_guard", None)):
+        return {"authority": tuple_authority(record)}
+    return {}
+
+
+def assert_authority(client: Any, operation: str, authority: Any | None = None) -> None:
+    """Run the client's admission authority guard before a non-GitHub side effect.
+
+    Worker phases that act outside the GitHub client (OpenClaw dispatch,
+    notifications) call this so the same per-side-effect fence applies to them.
+    Clients without a guard (legacy route, dry runs) are unaffected.
+    """
+    check = getattr(client, "assert_authority", None)
+    if check is not None:
+        try:
+            if authority is not None and callable(
+                getattr(client, "set_authority_guard", None)
+            ):
+                check(operation, tuple_authority(authority))
+            else:
+                check(operation)
+        except core.AuthorityDenied:
+            raise
+        except Exception as exc:
+            raise core.AuthorityDenied("authority revoked before side effect") from exc
 
 
 def require_absolute_path(value: Any, label: str) -> Path:
@@ -112,7 +188,8 @@ def sign_app_jwt(app_id: int, private_key_pem: str, now: int | None = None) -> s
     return f"{header}.{claims}.{b64url(signature)}"
 
 
-Transport = Callable[[str, str, dict[str, str], bytes | None, float], tuple[int, bytes]]
+TransportResponse = tuple[int, bytes] | tuple[int, dict[str, str], bytes]
+Transport = Callable[[str, str, dict[str, str], bytes | None, float], TransportResponse]
 ArtifactTransport = Callable[[str, dict[str, str], float], tuple[int, bytes]]
 ArtifactRequest = Callable[
     [str, dict[str, str], float], tuple[int, dict[str, str], bytes]
@@ -125,15 +202,21 @@ ARTIFACT_BLOB_HOST_RE = re.compile(
 
 def urllib_transport(
     method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float
-) -> tuple[int, bytes]:
+) -> tuple[int, dict[str, str], bytes]:
     request = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return int(response.status), response.read(1024 * 1024)
+            return (
+                int(response.status),
+                dict(response.headers.items()),
+                response.read(1024 * 1024),
+            )
     except urllib.error.HTTPError as exc:
-        return int(exc.code), b""
+        response_headers = dict(exc.headers.items()) if exc.headers is not None else {}
+        exc.close()
+        return int(exc.code), response_headers, b""
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise GitHubApiError("GitHub API transport failed") from exc
+        raise GitHubTransientError("GitHub API transport failed") from exc
 
 
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -240,12 +323,27 @@ class GitHubAppClient:
         transport: Transport = urllib_transport,
         artifact_transport: ArtifactTransport | None = None,
         clock: Callable[[], float] = time.time,
+        signer: Callable[[int, str, int], str] | None = None,
     ) -> None:
         core.require_enabled({"review_policy": config.get("review_policy", {})})
-        app = config["github_app"]
+        # Snapshot the caller's map: the token request is derived from this object
+        # later, so a caller mutating its own config after construction must not
+        # be able to change the permissions the adapter validated here.
+        app = copy.deepcopy(config["github_app"])
+        # The adapter derives its token request from this map, so it must be exactly
+        # the closed allowlist the profile kind authorizes: only generalized
+        # (standalone) profiles may request Contents read for approved-policy
+        # retrieval; a legacy profile is held to the legacy allowlist.
+        expected_permissions = STANDALONE_APP_PERMISSIONS if config.get("review_policy") else APP_PERMISSIONS
+        if app.get("permissions") != expected_permissions:
+            raise GitHubApiError("GitHub App permissions are outside the profile's closed allowlist")
         if config.get("review_policy") and not config.get("clawsweeper"):
             raise RuntimeError("generalized profile requires its own ClawSweeper adapter")
-        self._clawsweeper = config.get("clawsweeper", {"workflow_id": "clawsweeper-native-canary.yml", "ref": "main"})
+        # Same for the ClawSweeper map: _allow() and dispatch derive the authorized
+        # workflow endpoint from it.
+        self._clawsweeper = copy.deepcopy(
+            config.get("clawsweeper", {"workflow_id": "clawsweeper-native-canary.yml", "ref": "main"})
+        )
         self._strict_adapter = bool(config.get("review_policy"))
         if app["app_id"] is None or app["installation_id"] is None:
             raise RuntimeError("GitHub App IDs are not configured")
@@ -254,15 +352,45 @@ class GitHubAppClient:
         self._app = app
         self._private_key = private_key_pem
         self._transport = transport
-        self._artifact_transport = (
-            urllib_artifact_transport
-            if artifact_transport is None and transport is urllib_transport
-            else artifact_transport
-            or (lambda url, headers, timeout: transport("GET", url, headers, None, timeout))
-        )
+        if artifact_transport is not None:
+            self._artifact_transport = artifact_transport
+        elif transport is urllib_transport:
+            self._artifact_transport = urllib_artifact_transport
+        else:
+            def transport_artifact(url: str, headers: dict[str, str], timeout: float) -> tuple[int, bytes]:
+                response = transport("GET", url, headers, None, timeout)
+                if len(response) == 2:
+                    return response
+                status, _response_headers, raw = response
+                return status, raw
+
+            self._artifact_transport = transport_artifact
         self._clock = clock
+        self._signer = signer or sign_app_jwt
         self._token: str | None = None
         self._token_expires = 0.0
+        self._token_lock = threading.Lock()
+        self._authority_guard: Callable[[str, str, dict[str, Any] | None], None] | None = None
+
+    def set_authority_guard(
+        self,
+        guard: Callable[[str, str, dict[str, Any] | None], None] | None,
+    ) -> None:
+        """Install a check that runs before every mutating GitHub call.
+
+        The service uses it to re-validate current admission (registry, reviewer
+        actors, profile digest) immediately before each side effect of a tick, so
+        a revocation or profile edit after the tick's opening gate cannot leave
+        the remainder of that tick dispatching or publishing.
+        """
+        self._authority_guard = guard
+
+    def assert_authority(
+        self, operation: str, authority: dict[str, Any] | None = None
+    ) -> None:
+        """Run the installed guard for a side effect that is not a GitHub call."""
+        if self._authority_guard is not None:
+            self._authority_guard("SIDE_EFFECT", operation, authority)
 
     @property
     def repository(self) -> str:
@@ -274,6 +402,19 @@ class GitHubAppClient:
             ("POST", rf"/app/installations/{self._app['installation_id']}/access_tokens", "installation-token"),
             ("POST", rf"/repos/{repository}/check-runs", "check-create"),
             ("PATCH", rf"/repos/{repository}/check-runs/[1-9][0-9]*", "check-update"),
+            # Approved-policy retrieval is a generalized-profile capability; the
+            # legacy allowlist never reaches repository contents.
+            *(
+                (
+                    (
+                        "GET",
+                        rf"/repos/{repository}/contents/\.review-conductor\.json\?ref=[0-9a-f]{{40}}",
+                        "approved-policy-read",
+                    ),
+                )
+                if self._strict_adapter
+                else ()
+            ),
             ("POST", rf"/repos/{repository}/issues/[1-9][0-9]*/labels", "label-add"),
             ("DELETE", rf"/repos/{repository}/issues/[1-9][0-9]*/labels/.+", "label-remove"),
             (
@@ -305,6 +446,7 @@ class GitHubAppClient:
         *,
         expected: set[int],
         app_jwt: str | None = None,
+        authority: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         _operation, raw = self._call_raw(
             method,
@@ -312,6 +454,7 @@ class GitHubAppClient:
             payload,
             expected=expected,
             app_jwt=app_jwt,
+            authority=authority,
         )
         if not raw:
             return {}
@@ -331,6 +474,7 @@ class GitHubAppClient:
         *,
         expected: set[int],
         app_jwt: str | None = None,
+        authority: dict[str, Any] | None = None,
     ) -> tuple[str, bytes]:
         operation = self._allow(method, path)
         token = app_jwt if operation == "installation-token" else self._installation_token()
@@ -344,44 +488,114 @@ class GitHubAppClient:
         if payload is not None:
             body = core.canonical_json(payload).encode()
             headers["Content-Type"] = "application/json"
-        status, raw = self._transport(
+        # Fence immediately before the mutating request itself: token minting above
+        # is a separate call, and authority may have been revoked while it ran.
+        if (
+            self._authority_guard is not None
+            and method != "GET"
+            and operation != "installation-token"
+        ):
+            try:
+                self._authority_guard(method, path, authority)
+            except core.AuthorityDenied:
+                raise
+            except Exception as exc:
+                raise core.AuthorityDenied(
+                    "authority revoked before GitHub request"
+                ) from exc
+        response = self._transport(
             method, self._app["api_base"] + path, headers, body, 15.0
         )
+        if len(response) == 2:
+            status, raw = response
+            response_headers: dict[str, str] = {}
+        else:
+            status, response_headers, raw = response
         if status not in expected:
+            rate_limited = status == 403 and (
+                header_value(response_headers, "Retry-After") is not None
+                or header_value(response_headers, "X-RateLimit-Remaining") == "0"
+            )
+            if status in TRANSIENT_STATUSES or rate_limited:
+                raise GitHubTransientError(
+                    f"allowlisted GitHub API operation failed transiently ({operation})"
+                )
             raise GitHubApiError(f"allowlisted GitHub API operation failed ({operation})")
         return operation, raw
 
     def _installation_token(self) -> str:
         if self._token is not None and self._clock() < self._token_expires - 60:
             return self._token
-        app_jwt = sign_app_jwt(
-            self._app["app_id"], self._private_key, int(self._clock())
-        )
-        response = self._call(
-            "POST",
-            f"/app/installations/{self._app['installation_id']}/access_tokens",
-            {
-                "repositories": [self.repository.split("/", 1)[1]],
-                "permissions": {
-                    name: level for name, level in APP_PERMISSIONS.items() if name != "metadata"
+        # A shared service client may be used by ingress and the worker. Only one
+        # thread may mint/replace an installation token; late contenders re-use
+        # the first validated result instead of racing duplicate token requests.
+        with self._token_lock:
+            if self._token is not None and self._clock() < self._token_expires - 60:
+                return self._token
+            app_jwt = self._signer(
+                self._app["app_id"], self._private_key, int(self._clock())
+            )
+            response = self._call(
+                "POST",
+                f"/app/installations/{self._app['installation_id']}/access_tokens",
+                {
+                    "repositories": [self.repository.split("/", 1)[1]],
+                    "permissions": {
+                        name: level
+                        for name, level in self._app["permissions"].items()
+                        if name != "metadata"
+                    },
                 },
-            },
-            expected={201},
-            app_jwt=app_jwt,
-        )
-        token = response.get("token")
-        expires_at = response.get("expires_at")
-        if not isinstance(token, str) or not token or not isinstance(expires_at, str):
-            raise GitHubApiError("installation token response is incomplete")
-        try:
-            expiry = dt.datetime.fromisoformat(expires_at.replace("Z", "+00:00")).timestamp()
-        except ValueError as exc:
-            raise GitHubApiError("installation token expiry is invalid") from exc
-        self._token = token
-        self._token_expires = expiry
-        return token
+                expected={201},
+                app_jwt=app_jwt,
+            )
+            token = response.get("token")
+            expires_at = response.get("expires_at")
+            if not isinstance(token, str) or not token or not isinstance(expires_at, str):
+                raise GitHubApiError("installation token response is incomplete")
+            try:
+                expiry = dt.datetime.fromisoformat(expires_at.replace("Z", "+00:00")).timestamp()
+            except ValueError as exc:
+                raise GitHubApiError("installation token expiry is invalid") from exc
+            self._token = token
+            self._token_expires = expiry
+            return token
 
-    def create_check(self, name: str, head_sha: str, external_id: str, state: str) -> int:
+    def read_policy(self, repository: str, commit: str) -> bytes:
+        if repository != self.repository:
+            raise GitHubApiError("approved policy repository is outside the installation")
+        core.require_sha(commit, "approved policy commit")
+        _operation, raw = self._call_raw(
+            "GET",
+            f"/repos/{self.repository}/contents/.review-conductor.json?ref={commit}",
+            None,
+            expected={200},
+        )
+        try:
+            response = core.require_object(json.loads(raw), "approved policy response")
+            if response.get("encoding") != "base64" or not isinstance(response.get("content"), str):
+                raise GitHubApiError("approved policy response is not base64 file content")
+            encoded = response["content"]
+            if re.fullmatch(r"[A-Za-z0-9+/=\r\n]+", encoded) is None:
+                raise GitHubApiError("approved policy response is not canonical base64")
+            content = base64.b64decode(
+                encoded.replace("\r", "").replace("\n", ""), validate=True
+            )
+        except (binascii.Error, ValueError, UnicodeError, json.JSONDecodeError, core.ContractError) as exc:
+            raise GitHubApiError("approved policy response is malformed") from exc
+        if not content or len(content) > 16384:
+            raise GitHubApiError("approved policy content has an invalid bounded size")
+        return content
+
+    def create_check(
+        self,
+        name: str,
+        head_sha: str,
+        external_id: str,
+        state: str,
+        *,
+        authority: dict[str, Any] | None = None,
+    ) -> int:
         if name not in CHECK_NAMES:
             raise GitHubApiError("check name is outside the fixed allowlist")
         payload = check_payload(name, head_sha, external_id, state)
@@ -390,10 +604,20 @@ class GitHubAppClient:
             f"/repos/{self.repository}/check-runs",
             payload,
             expected={201},
+            authority=authority,
         )
         return core.require_positive_int(response.get("id"), "GitHub check run id")
 
-    def update_check(self, check_id: int, name: str, head_sha: str, external_id: str, state: str) -> None:
+    def update_check(
+        self,
+        check_id: int,
+        name: str,
+        head_sha: str,
+        external_id: str,
+        state: str,
+        *,
+        authority: dict[str, Any] | None = None,
+    ) -> None:
         if name not in CHECK_NAMES:
             raise GitHubApiError("check name is outside the fixed allowlist")
         self._call(
@@ -401,27 +625,36 @@ class GitHubAppClient:
             f"/repos/{self.repository}/check-runs/{check_id}",
             check_payload(name, head_sha, external_id, state),
             expected={200},
+            authority=authority,
         )
 
-    def add_ready_label(self, pr_number: int) -> None:
+    def add_ready_label(
+        self, pr_number: int, *, authority: dict[str, Any] | None = None
+    ) -> None:
         self._call(
             "POST",
             f"/repos/{self.repository}/issues/{pr_number}/labels",
             {"labels": [READY_LABEL]},
             expected={200},
+            authority=authority,
         )
 
-    def remove_ready_label(self, pr_number: int) -> None:
+    def remove_ready_label(
+        self, pr_number: int, *, authority: dict[str, Any] | None = None
+    ) -> None:
         encoded = urllib.parse.quote(READY_LABEL, safe="")
         self._call(
             "DELETE",
             f"/repos/{self.repository}/issues/{pr_number}/labels/{encoded}",
             None,
             expected={200, 204, 404},
+            authority=authority,
         )
 
     def dispatch_clawsweeper(
-        self, *, pr_number: int, base_sha: str, head_sha: str, publish: bool, review_epoch: int | None = None
+        self, *, pr_number: int, base_sha: str, head_sha: str, publish: bool,
+        review_epoch: int | None = None,
+        authority: dict[str, Any] | None = None,
     ) -> None:
         core.require_sha(base_sha, "ClawSweeper dispatch base_sha")
         core.require_sha(head_sha, "ClawSweeper dispatch head_sha")
@@ -445,6 +678,7 @@ class GitHubAppClient:
                 },
             },
             expected={204},
+            authority=authority,
         )
 
     def list_run_artifacts(self, workflow_run_id: int) -> list[dict[str, Any]]:
@@ -687,6 +921,7 @@ def reconcile_projection(
         rows = connection.execute(query, params).fetchall()
         for row in rows:
             projection = ensure_projection_row(connection, row)
+            authority_kwargs = guarded_client_kwargs(client, row)
             state = core.state_projection(dict(row))
             clawsweeper_publication_owner = False
             if row["state"] == "clawsweeper_queued":
@@ -776,7 +1011,31 @@ def reconcile_projection(
                     )
                     if current is None or int(current["review_epoch"]) != row["review_epoch"]:
                         raise RuntimeError("check creation claim became stale before projection")
-                    check_id = client.create_check(name, row["head_sha"], external_id, check_state)
+                    try:
+                        check_id = client.create_check(
+                            name,
+                            row["head_sha"],
+                            external_id,
+                            check_state,
+                            **authority_kwargs,
+                        )
+                    except core.AuthorityDenied:
+                        connection.execute(
+                            f"""
+                            UPDATE projections SET {create_state_column} = 'pending',
+                              last_error = 'authority revoked before check creation',
+                              updated_at = ?
+                            WHERE repository = ? AND pr_number = ? AND base_sha = ?
+                              AND head_sha = ? AND review_epoch = ? AND {column} IS NULL
+                              AND {create_state_column} = 'creating'
+                            """,
+                            (
+                                core.utc_now(), row["repository"], row["pr_number"],
+                                row["base_sha"], row["head_sha"], row["review_epoch"],
+                            ),
+                        )
+                        connection.commit()
+                        raise
                     connection.execute(
                         f"""
                         UPDATE projections SET {column} = ?, {create_state_column} = 'active',
@@ -791,16 +1050,23 @@ def reconcile_projection(
                         ),
                     )
                 else:
-                    client.update_check(check_id, name, row["head_sha"], external_id, check_state)
+                    client.update_check(
+                        check_id,
+                        name,
+                        row["head_sha"],
+                        external_id,
+                        check_state,
+                        **authority_kwargs,
+                    )
             desired = bool(state["ready_for_human_label"])
             label_action = item["ready_label_action"]
             if label_action == "ensure_present":
-                client.add_ready_label(row["pr_number"])
+                client.add_ready_label(row["pr_number"], **authority_kwargs)
             elif label_action in {
                 "ensure_absent",
                 "ensure_absent_before_clawsweeper_publication",
             }:
-                client.remove_ready_label(row["pr_number"])
+                client.remove_ready_label(row["pr_number"], **authority_kwargs)
             if label_action != "hold_for_clawsweeper_publication":
                 connection.execute(
                     """
@@ -1050,8 +1316,9 @@ def dispatch_clawsweeper_action(
             raise RuntimeError("ClawSweeper action is not safely claimable")
         if not claim_clawsweeper_preparation(connection, action, config, "cp1-worker"):
             return {"action_id": action_id, "result": "not_claimed", "merge_dispatched": False}
+        authority_kwargs = guarded_client_kwargs(client, action)
         try:
-            client.remove_ready_label(action["pr_number"])
+            client.remove_ready_label(action["pr_number"], **authority_kwargs)
         except Exception:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
@@ -1144,7 +1411,21 @@ def dispatch_clawsweeper_action(
                 head_sha=payload["head_sha"],
                 publish=payload["publish"],
                 **({"review_epoch": payload["review_epoch"]} if config.get("review_policy") else {}),
+                **authority_kwargs,
             )
+        except core.AuthorityDenied:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE actions SET status = 'pending', claim_owner = NULL,
+                  claimed_at = NULL, lease_expires_at = NULL,
+                  last_error = 'authority revoked before workflow dispatch', updated_at = ?
+                WHERE action_id = ? AND status = 'dispatching' AND attempts = ?
+                """,
+                (core.utc_now(), action_id, attempts),
+            )
+            connection.commit()
+            raise
         except Exception:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
@@ -1186,9 +1467,13 @@ def dispatch_clawsweeper_action(
         connection.close()
 
 
-@contextlib.contextmanager
-def service_transport_environment(config: dict[str, Any]):
-    allowed = {
+def service_transport_environment(config: dict[str, Any]) -> dict[str, str]:
+    """Return the isolated environment for one adapter subprocess.
+
+    The threaded service must never rewrite ``os.environ`` process-wide: other
+    webhook threads and libraries may read it while an adapter is running.
+    """
+    return {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin"),
         "PYTHONUNBUFFERED": "1",
         "SMOKY_REVIEW_CONDUCTOR_SMOKY": config["spark"]["smoky_path"],
@@ -1197,14 +1482,6 @@ def service_transport_environment(config: dict[str, Any]):
         "SPARK_OPENCLAW_MATERIALIZE_TARGET": config["spark"]["target"],
         "SPARK_OPENCLAW_AUTOREVIEW_TARGET": config["spark"]["target"],
     }
-    previous = os.environ.copy()
-    os.environ.clear()
-    os.environ.update(allowed)
-    try:
-        yield
-    finally:
-        os.environ.clear()
-        os.environ.update(previous)
 
 
 def drain_actions(
@@ -1245,6 +1522,21 @@ def drain_actions(
             )
             continue
         if action["kind"] == "openclaw.enqueue":
+            authority = tuple_authority(action)
+
+            def before_external_command(
+                index: int,
+                _command: list[str],
+                *,
+                action_id: str = action["action_id"],
+                exact_authority: dict[str, Any] = authority,
+            ) -> None:
+                assert_authority(
+                    client,
+                    f"openclaw.enqueue:{action_id}:step:{index + 1}",
+                    exact_authority,
+                )
+
             args = argparse.Namespace(
                 config=Path(config["core_config"]),
                 state_root=Path(config["paths"]["state_root"]),
@@ -1254,10 +1546,21 @@ def drain_actions(
                 retry=action["status"] == "failed",
                 claim_owner="cp1-worker",
                 claim_lease_seconds=config["worker"]["claim_lease_seconds"],
+                before_external_command=before_external_command,
+                command_environment=service_transport_environment(config),
+            )
+            # Each OpenClaw dispatch is an external side effect; fence it like a
+            # GitHub write so revoked authority stops the whole drain here instead
+            # of being recorded as an adapter rejection of this one action.
+            assert_authority(
+                client,
+                f"openclaw.enqueue:{action['action_id']}",
+                authority,
             )
             try:
-                with service_transport_environment(config):
-                    outcomes.append(core.dispatch_action(args))
+                outcomes.append(core.dispatch_action(args))
+            except core.AuthorityDenied:
+                raise
             except core.ContractError:
                 connection = core.open_database(Path(config["paths"]["state_root"]), config["github_app"]["repository"])
                 try:
@@ -1741,6 +2044,8 @@ def handle_webhook_request(
             "result": receipt["result"],
             "merge_dispatched": False,
         }
+    except RetryableIngestError:
+        return HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "reason": "dependency_unavailable"}
     except core.ContractError:
         return HTTPStatus.BAD_REQUEST, {"ok": False, "reason": "request_rejected"}
     except sqlite3.Error:

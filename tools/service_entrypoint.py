@@ -1,16 +1,21 @@
-"""Service-owned enrollment-registry loader for the inactive service core.
-
-This module deliberately has no executable entrypoint, credential reader,
-worker, network listener, or external side effect. Live wiring belongs to the
-separately reviewed adapter slice.
-"""
+#!/usr/bin/env python3
+"""Inactive standalone service entrypoint; activation requires external state."""
 from __future__ import annotations
 
+import argparse
+import json
 import os
 from pathlib import Path
+import sqlite3
 import stat
+import sys
+import threading
 from typing import Iterable
 
+import review_conductor as core
+import review_conductor_profiles as profiles
+import review_conductor_runtime as runtime
+import review_conductor_userland as userland
 import service_runtime as service
 import trusted_admission as admission
 
@@ -204,3 +209,195 @@ def registry_provider(path: Path, config: dict):
         return registry
 
     return provide
+
+
+class ServiceStopped(service.ServiceError):
+    """The worker hit an operational failure and stopped the whole service."""
+
+
+def serve(profile_path: Path, registry_path: Path) -> None:
+    """Hold a restrictive process umask for the complete threaded lifecycle."""
+    previous_umask = os.umask(0o077)
+    try:
+        _serve_with_restrictive_umask(profile_path, registry_path)
+    finally:
+        os.umask(previous_umask)
+
+
+def _serve_with_restrictive_umask(profile_path: Path, registry_path: Path) -> None:
+    config = userland.load_config(profile_path)
+    profiles.require_enabled(config)
+    provide_registry = registry_provider(registry_path, config)
+    provide_registry()
+    webhook_secret = userland.read_inherited_value(
+        config["credentials"]["webhook_secret_fd_env"], "GitHub webhook secret"
+    )
+    client = userland.build_client(config)
+    notifier = userland.OpenClawNotifier(config)
+    stop = threading.Event()
+    failure: list[BaseException] = []
+    server = None
+    worker = threading.Thread(
+        target=lambda: _worker_loop(config, provide_registry, client, notifier, stop, failure, lambda: server),
+        name="review-conductor-service",
+        daemon=False,
+    )
+    try:
+        # Bind ingress before any worker exists so a failed startup cannot leave a
+        # detached worker draining actions, publishing checks or notifying.
+        handler = service.build_service_http_handler(
+            config,
+            secret=webhook_secret,
+            registry=provide_registry,
+            read_policy=client.read_policy,
+        )
+        server = runtime.BoundedHTTPServer(
+            (config["ingress"]["bind_host"], config["ingress"]["bind_port"]),
+            handler,
+            request_timeout_seconds=config["ingress"]["request_timeout_seconds"],
+        )
+        worker.start()
+        server.serve_forever(poll_interval=0.5)
+    finally:
+        stop.set()
+        if server is not None:
+            server.server_close()
+        if worker.is_alive():
+            # A tick may be inside a bounded external adapter operation far longer
+            # than the polling interval. Never return while that worker still owns
+            # a claim or subprocess; its adapter timeout remains the upper bound.
+            worker.join()
+        webhook_secret = ""
+    if failure:
+        # The worker stopped the service; surface its operational failure instead of
+        # letting ingress keep accepting deliveries that nothing will act on.
+        raise ServiceStopped("worker failed; service stopped") from failure[0]
+
+
+def _worker_loop(config, provide_registry, client, notifier, stop, failure, get_server) -> None:
+    while not stop.is_set():
+        try:
+            service.run_service_tick(
+                config, provide_registry, client, notifier, dry_run=False
+            )
+        except core.ContractError:
+            # Fail-closed admission/policy conditions are retried on the next tick.
+            pass
+        except BaseException as exc:  # sqlite3.Error, OSError, or anything unexpected
+            failure.append(exc)
+            stop.set()
+            server = get_server()
+            if server is not None:
+                server.shutdown()
+            return
+        if stop.wait(config["worker"]["tick_seconds"]):
+            return
+
+
+def run_maintenance(
+    profile_path: Path,
+    registry_path: Path,
+    command: str,
+    pr_number: int,
+    *,
+    apply: bool,
+    channel: str | None = None,
+    disposition: str | None = None,
+    confirmation: str | None = None,
+) -> dict:
+    """Run a supported state recovery only under current standalone authority."""
+    config = userland.load_config(profile_path)
+    profiles.require_enabled(config)
+    provide_registry = registry_provider(registry_path, config)
+    # Match the worker's whole-profile opening gate, then re-check the target
+    # binding inside the mutation transaction immediately before state changes.
+    service.require_current_bindings(config, provide_registry)
+
+    def require_target(connection) -> None:
+        service.require_current_binding(
+            connection, config, provide_registry, pr_number
+        )
+
+    if command == "retry-openclaw":
+        return userland.retry_failed_openclaw(
+            config,
+            pr_number,
+            apply=apply,
+            authority_guard=require_target,
+        )
+    if command == "reconcile-notification":
+        return userland.reconcile_uncertain_notification(
+            config,
+            pr_number,
+            channel,
+            disposition,
+            confirmation,
+            apply=apply,
+            authority_guard=require_target,
+        )
+    raise service.ServiceError("unsupported standalone maintenance operation")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--profile", type=Path, required=True)
+    parser.add_argument("--registry", type=Path, required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--apply", action="store_true")
+    parser.add_argument(
+        "command",
+        nargs="?",
+        default="serve",
+        choices=("serve", "retry-openclaw", "reconcile-notification"),
+    )
+    parser.add_argument("--pr", type=int)
+    parser.add_argument(
+        "--channel", choices=("openclaw_context", "discord", "signal")
+    )
+    parser.add_argument("--disposition", choices=("sent", "retry"))
+    parser.add_argument("--confirm")
+    args = parser.parse_args(argv)
+    if args.command == "serve":
+        if args.dry_run:
+            parser.error("serve requires --apply")
+        if any(
+            value is not None
+            for value in (args.pr, args.channel, args.disposition, args.confirm)
+        ):
+            parser.error("serve does not accept maintenance arguments")
+    elif args.pr is None:
+        parser.error(f"{args.command} requires --pr")
+    elif args.command == "retry-openclaw" and any(
+        value is not None for value in (args.channel, args.disposition, args.confirm)
+    ):
+        parser.error("retry-openclaw does not accept notification arguments")
+    elif args.command == "reconcile-notification" and any(
+        value is None for value in (args.channel, args.disposition, args.confirm)
+    ):
+        parser.error(
+            "reconcile-notification requires --channel, --disposition and --confirm"
+        )
+    try:
+        if args.command == "serve":
+            serve(args.profile, args.registry)
+        else:
+            result = run_maintenance(
+                args.profile,
+                args.registry,
+                args.command,
+                args.pr,
+                apply=args.apply,
+                channel=args.channel,
+                disposition=args.disposition,
+                confirmation=args.confirm,
+            )
+            print(json.dumps(result, indent=2, sort_keys=True))
+    except (core.ContractError, OSError, sqlite3.Error) as exc:
+        print(f"review-conductor-service: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -253,9 +253,15 @@ def load_config(
         raise UserlandError("legacy GitHub App scope must remain exact dinkuskit/blocks")
     if app["repository"] != core_profile["repository"] or app["repository_id"] != core_profile["repository_id"]:
         raise UserlandError("GitHub App scope must match the exact core repository")
-    if app["permissions"] != runtime.APP_PERMISSIONS:
+    expected_permissions = (
+        runtime.STANDALONE_APP_PERMISSIONS if generalized else runtime.APP_PERMISSIONS
+    )
+    expected_denied_permissions = (
+        runtime.STANDALONE_DENIED_PERMISSIONS if generalized else runtime.DENIED_PERMISSIONS
+    )
+    if app["permissions"] != expected_permissions:
         raise UserlandError("GitHub App permissions differ from the closed allowlist")
-    if set(app["denied_permissions"]) != runtime.DENIED_PERMISSIONS:
+    if set(app["denied_permissions"]) != expected_denied_permissions:
         raise UserlandError("GitHub App denied permissions are incomplete")
     if app["events"] != runtime.APP_EVENTS:
         raise UserlandError("GitHub App events must remain pull_request and workflow_run")
@@ -1327,6 +1333,7 @@ def hydrate_exact_pr_head(
     action: sqlite3.Row,
     *,
     runner: CommandRunner = subprocess.run,
+    authority_client: Any | None = None,
 ) -> dict[str, Any]:
     checkout = Path(config["paths"]["blocks_checkout"])
     try:
@@ -1380,10 +1387,16 @@ def hydrate_exact_pr_head(
     original_head = core.require_sha(current_head.stdout.strip(), "Blocks checkout HEAD")
     head_sha = core.require_sha(action["head_sha"], "OpenClaw action head")
     base_sha = core.require_sha(action["base_sha"], "OpenClaw action base")
+    authority = runtime.tuple_authority(action)
 
     available = git("cat-file", "-e", f"{head_sha}^{{commit}}")
     fetched = False
     if available.returncode != 0:
+        runtime.assert_authority(
+            authority_client,
+            f"checkout-hydration:{action['action_id']}:fetch",
+            authority,
+        )
         pull_ref = f"refs/pull/{core.require_positive_int(action['pr_number'], 'PR number')}/head"
         fetched_result = git(
             "fetch",
@@ -1426,7 +1439,7 @@ def hydrate_exact_pr_head(
 
 
 def hydrate_pending_openclaw_heads(
-    config: dict[str, Any], *, dry_run: bool
+    config: dict[str, Any], *, dry_run: bool, authority_client: Any | None = None
 ) -> list[dict[str, Any]]:
     connection = core.open_database(Path(config["paths"]["state_root"]), config["github_app"]["repository"])
     try:
@@ -1460,8 +1473,23 @@ def hydrate_pending_openclaw_heads(
         ]
     outcomes: list[dict[str, Any]] = []
     for row in rows:
+        authority = runtime.tuple_authority(row)
+        # Admission revocation is not a checkout failure. Keep the fence outside
+        # the adapter-error handler so it stops the tick instead of marking the
+        # action failed and continuing under revoked authority.
+        runtime.assert_authority(
+            authority_client,
+            f"checkout-hydration:{row['action_id']}",
+            authority,
+        )
         try:
-            outcomes.append(hydrate_exact_pr_head(config, row))
+            outcomes.append(
+                hydrate_exact_pr_head(
+                    config, row, authority_client=authority_client
+                )
+            )
+        except core.AuthorityDenied:
+            raise
         except core.ContractError:
             connection = core.open_database(Path(config["paths"]["state_root"]), config["github_app"]["repository"])
             try:
@@ -1489,11 +1517,17 @@ def hydrate_pending_openclaw_heads(
 
 
 def retry_failed_openclaw(
-    config: dict[str, Any], pr_number: int, *, apply: bool
+    config: dict[str, Any],
+    pr_number: int,
+    *,
+    apply: bool,
+    authority_guard: Callable[[sqlite3.Connection], None] | None = None,
 ) -> dict[str, Any]:
     connection = core.open_database(Path(config["paths"]["state_root"]), config["github_app"]["repository"])
     try:
         connection.execute("BEGIN IMMEDIATE")
+        if authority_guard is not None:
+            authority_guard(connection)
         head = core.current_head(connection, config["github_app"]["repository"], pr_number)
         if head is None or head["state"] != "openclaw_failed":
             raise UserlandError("PR does not have a current failed OpenClaw adapter action")
@@ -1561,6 +1595,7 @@ def reconcile_uncertain_notification(
     confirmation: str,
     *,
     apply: bool,
+    authority_guard: Callable[[sqlite3.Connection], None] | None = None,
 ) -> dict[str, Any]:
     confirmations = {
         "sent": "provider-delivery-observed",
@@ -1576,6 +1611,8 @@ def reconcile_uncertain_notification(
     try:
         ensure_userland_tables(connection)
         connection.execute("BEGIN IMMEDIATE")
+        if authority_guard is not None:
+            authority_guard(connection)
         head = core.current_head(connection, config["github_app"]["repository"], pr_number)
         if head is None:
             raise UserlandError("PR does not have a current Review Conductor head")
@@ -1750,6 +1787,20 @@ class OpenClawNotifier:
         self.runner = runner
         self.environment = os.environ if environment is None else environment
 
+    def subprocess_environment(self) -> dict[str, str]:
+        """Expose only ordinary runtime identity and locale to OpenClaw."""
+        child = {
+            "PATH": self.environment.get(
+                "PATH", "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            ),
+            "PYTHONUNBUFFERED": "1",
+        }
+        for name in ("HOME", "USER", "LOGNAME", "TMPDIR", "LC_ALL"):
+            value = self.environment.get(name)
+            if value:
+                child[name] = value
+        return child
+
     def command(self, channel: str, message: str) -> list[str]:
         notifications = self.config["notifications"]
         command = notifications["openclaw_path"]
@@ -1792,6 +1843,7 @@ class OpenClawNotifier:
                 stderr=subprocess.PIPE,
                 timeout=90,
                 check=False,
+                env=self.subprocess_environment(),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise UserlandError("OpenClaw notification outcome is uncertain") from exc
@@ -1807,6 +1859,7 @@ def deliver_notifications(
     notifier: OpenClawNotifier | Any,
     *,
     dry_run: bool,
+    authority_client: Any | None = None,
 ) -> dict[str, Any]:
     queue_notifications(config)
     connection = core.open_database(Path(config["paths"]["state_root"]), config["github_app"]["repository"])
@@ -1826,14 +1879,59 @@ def deliver_notifications(
             if dry_run:
                 outcomes.append({"event_key": row["event_key"], "channel": row["channel"], "result": "planned"})
                 continue
+            # Operator alerts are intentionally unbound repository-level
+            # maintenance. Review-result notifications carry and revalidate the
+            # exact tuple that produced them.
+            authority = (
+                None if int(row["pr_number"]) == 0 else runtime.tuple_authority(row)
+            )
+            claimed = connection.execute(
+                """
+                UPDATE notification_deliveries
+                SET status = 'uncertain', attempts = attempts + 1,
+                  last_error = 'delivery in progress; reconcile if interrupted',
+                  updated_at = ?
+                WHERE event_key = ? AND channel = ? AND status = 'pending'
+                """,
+                (core.utc_now(), row["event_key"], row["channel"]),
+            )
+            if claimed.rowcount != 1:
+                connection.rollback()
+                continue
+            # Commit the uncertain claim before any transport. A crash or SQLite
+            # failure after a successful send can therefore never make this row
+            # look retryable; an operator must reconcile the provider outcome.
+            connection.commit()
+            try:
+                runtime.assert_authority(
+                    authority_client,
+                    f"notification:{row['event_key']}:{row['channel']}",
+                    authority,
+                )
+            except core.AuthorityDenied as exc:
+                restored = connection.execute(
+                    """
+                    UPDATE notification_deliveries
+                    SET status = 'pending', attempts = attempts - 1,
+                      last_error = ?, updated_at = ?
+                    WHERE event_key = ? AND channel = ? AND status = 'uncertain'
+                    """,
+                    (str(exc)[:300], core.utc_now(), row["event_key"], row["channel"]),
+                )
+                connection.commit()
+                if restored.rowcount != 1:
+                    raise UserlandError(
+                        "notification authority denial changed during recovery"
+                    ) from exc
+                raise
             try:
                 notifier.send(row["channel"], payload["message"])
             except NotificationUnavailable as exc:
                 connection.execute(
                     """
                     UPDATE notification_deliveries
-                    SET attempts = attempts + 1, last_error = ?, updated_at = ?
-                    WHERE event_key = ? AND channel = ? AND status = 'pending'
+                    SET status = 'pending', last_error = ?, updated_at = ?
+                    WHERE event_key = ? AND channel = ? AND status = 'uncertain'
                     """,
                     (str(exc)[:300], core.utc_now(), row["event_key"], row["channel"]),
                 )
@@ -1844,9 +1942,8 @@ def deliver_notifications(
                 connection.execute(
                     """
                     UPDATE notification_deliveries
-                    SET status = 'uncertain', attempts = attempts + 1,
-                      last_error = ?, updated_at = ?
-                    WHERE event_key = ? AND channel = ? AND status = 'pending'
+                    SET last_error = ?, updated_at = ?
+                    WHERE event_key = ? AND channel = ? AND status = 'uncertain'
                     """,
                     (str(exc)[:300], core.utc_now(), row["event_key"], row["channel"]),
                 )
@@ -1856,9 +1953,8 @@ def deliver_notifications(
             connection.execute(
                 """
                 UPDATE notification_deliveries
-                SET status = 'sent', attempts = attempts + 1,
-                  last_error = NULL, updated_at = ?
-                WHERE event_key = ? AND channel = ? AND status = 'pending'
+                SET status = 'sent', last_error = NULL, updated_at = ?
+                WHERE event_key = ? AND channel = ? AND status = 'uncertain'
                 """,
                 (core.utc_now(), row["event_key"], row["channel"]),
             )
@@ -1887,7 +1983,9 @@ def run_tick(
         if dry_run
         else runtime.drain_bridge_inboxes(config)
     )
-    hydration = hydrate_pending_openclaw_heads(config, dry_run=dry_run)
+    hydration = hydrate_pending_openclaw_heads(
+        config, dry_run=dry_run, authority_client=client
+    )
     worker = runtime.drain_actions(config, client, dry_run=dry_run)
     openclaw = collect_openclaw_terminals(config, dry_run=dry_run)
     clawsweeper = collect_clawsweeper_terminals(config, client, dry_run=dry_run)
@@ -1901,6 +1999,7 @@ def run_tick(
         config,
         notifier,
         dry_run=dry_run,
+        authority_client=client,
     )
     return {
         "schema": "smoky.review-conductor.userland-tick.v1",
@@ -2043,6 +2142,10 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         config = load_config(args.config)
+        if config.get("profile_id") and args.command not in {"health", "status"}:
+            raise UserlandError(
+                "standalone profiles require tools/service_entrypoint.py and trusted admission"
+            )
         if args.command not in {"health", "status"}:
             profiles.require_enabled(config)
         if args.command == "health":
