@@ -297,7 +297,8 @@ class BindingTests(unittest.TestCase):
                      ("dinkuskit/blocks", BLOCKS_INSTALL, good.policy), (good.review, BLOCKS_INSTALL, {"commit": BLOCKS_COMMIT})]:
             with self.subTest(args=args), self.assertRaises(ta.AdmissionError):
                 ta.Admission(*args)
-        for kwargs in [{"repository": SMCBD}, {"repository_id": 1366416798}, {"repository": "attacker/blocks"},
+        for kwargs in [{"repository": SMCBD}, {"repository": []},
+                       {"repository_id": 1366416798}, {"repository": "attacker/blocks"},
                        {"repository_id": "1306882611"}, {"commit": HEAD.upper()}, {"sha256": "z" * 64},
                        {"quiet_seconds": 0}, {"quiet_seconds": True}, {"quiet_seconds": 601},
                        {"default_branch": ""}, {"default_branch": "forged"},
@@ -305,7 +306,8 @@ class BindingTests(unittest.TestCase):
                        {"manifest_bytes": good.policy.manifest_bytes.decode()}]:
             with self.subTest(kwargs=kwargs), self.assertRaises(ta.AdmissionError):
                 dataclasses.replace(good.policy, **kwargs)
-        for kwargs in [{"repository": SMCBD}, {"repository_id": 1366416798}, {"installation_id": 0},
+        for kwargs in [{"repository": SMCBD}, {"repository": []},
+                       {"repository_id": 1366416798}, {"installation_id": 0},
                        {"installation_account": "saari-co"}, {"approved_policy_commit": "main"}]:
             with self.subTest(kwargs=kwargs), self.assertRaises(ta.AdmissionError):
                 dataclasses.replace(self.registry.enrollments[0], **kwargs)

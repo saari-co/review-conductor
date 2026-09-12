@@ -70,7 +70,7 @@ class Enrollment:
     approved_policy_sha256: str
 
     def __post_init__(self):
-        if self.repository not in INITIAL_ENROLLMENT_SCOPE:
+        if not isinstance(self.repository, str) or self.repository not in INITIAL_ENROLLMENT_SCOPE:
             _fail("repository is outside the initial enrollment scope")
         if type(self.repository_id) is not int or self.repository_id != INITIAL_ENROLLMENT_SCOPE[self.repository]:
             _fail("enrollment repository_id contradicts the recorded numeric identity")
@@ -149,7 +149,7 @@ class AdmittedPolicy:
     manifest_bytes: bytes
 
     def __post_init__(self):
-        if self.repository not in INITIAL_ENROLLMENT_SCOPE:
+        if not isinstance(self.repository, str) or self.repository not in INITIAL_ENROLLMENT_SCOPE:
             _fail("policy repository is outside the initial enrollment scope")
         if type(self.repository_id) is not int or self.repository_id != INITIAL_ENROLLMENT_SCOPE[self.repository]:
             _fail("policy repository_id contradicts the recorded numeric identity")
