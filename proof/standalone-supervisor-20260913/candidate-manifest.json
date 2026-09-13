@@ -1,10 +1,11 @@
 {
   "schema": "review-conductor.candidate-manifest.v1",
+  "follow_up_of": "3861081bccaebb66d34171e81a8c588f9e0dc8d5",
   "base_sha": "9acb1ee3300490aa2f31ffd56b3999552834803b",
   "captured_date": "2026-09-13",
   "files": {
     "Makefile": "26c6fb958b85890ece2fb1ec0fd2c2114a5b8437af4ea9c0396c34c2d2c7a7f7",
-    "README.md": "7bbabf63da8ddea55c3beedd3c10bc34953801b2d5753da0b3da2d7b2cef68b1",
+    "README.md": "c765d1d92a3e99dc5d6418d61e73af2e47f7decad22f489de0b1043a0c7930e7",
     "SECURITY.md": "a36d251ab28bb89ac54e2bca9d45889e82ac72d402d03eefc25d7a74e83c3ef6",
     "docs/integration-contract.md": "143bb54666ccc247db880bda6081322a9c66c6ec90feb297258f6d4d8f74d353",
     "docs/migration.md": "6b7b37257cd23ad82ea9918cb15b7ead8327ed815bb9cce7f9e46bde79f209a2",

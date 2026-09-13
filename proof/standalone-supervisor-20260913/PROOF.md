@@ -107,3 +107,12 @@ qualification is accepted, separately update and owner-promote the SMCBD target
 manifest to scheduling v2 and record its exact commit/hash in the external
 registry. Deployment, protected resolver wiring, tunnel/service startup and
 shadow activation each remain separate explicit authorizations.
+
+## Exact-head source-review follow-up
+
+Owner approval was subsequently granted to publish this source slice for review
+and begin the separate target-repository scheduling-v2 change. Exact-head review
+found one duplicated README inventory row and removed it in a follow-up commit;
+runtime, tests and security-contract bytes were unchanged. The complete local
+gate set was rerun before publication. Draft publication does not authorize
+merge, deployment, manifest-hash promotion or shadow activation.
