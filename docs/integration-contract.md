@@ -48,8 +48,9 @@ and GitHub App credentials move only through explicitly inherited descriptors.
 The foreground supervisor exposes identity-bound local health/stop/restart
 control, retains anonymous descriptor copies for explicit restart, and leaves a
 crashed service failed until that restart is requested. The service runs in an
-owned process session so explicit stop/restart bounds its adapter subprocesses
-with the service generation. It neither provisions
+owned process session so explicit stop/restart signals that process group even
+after the leader has exited, then SIGKILLs any remaining descendants before a
+new generation starts. It neither provisions
 credentials nor starts an HTTPS tunnel, and it is not installed or active.
 
 ## Service-owned enrollment

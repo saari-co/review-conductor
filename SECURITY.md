@@ -101,6 +101,8 @@ a tunnel, install a service unit or activate the profile. It closes the incoming
 descriptors after creating verified anonymous copies, rewinds those copies before
 each explicit child start, and closes them plus the socket on every exit path.
 The service starts in its own process session; stop and restart signal that owned
-process group, then bound termination, kill and reap of its leader so an active
-adapter subprocess is not intentionally carried into the next generation.
+process group independently of whether the leader has already exited, wait while
+any member remains, then SIGKILL the group if it is still present and reap the
+leader when possible so an adapter descendant cannot be carried into the next
+generation.
 Anonymous storage may still be disk-backed and is not a secure-erasure guarantee.

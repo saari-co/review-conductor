@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import fcntl
 import hashlib
 import json
@@ -14,6 +15,7 @@ import socket
 import stat
 import subprocess
 import sys
+import time
 from typing import Any, Callable
 
 import review_conductor as core
@@ -26,6 +28,7 @@ SERVICE_ENTRYPOINT = ROOT / "tools/service_entrypoint.py"
 CONTROL_SOCKET_NAME = ".standalone-supervisor.sock"
 SUPERVISOR_LOCK_NAME = ".standalone-supervisor.lock"
 MAX_CONTROL_BYTES = 4096
+GROUP_SHUTDOWN_SECONDS = 10
 
 
 class SupervisorError(core.ContractError):
@@ -183,27 +186,59 @@ def spawn_service(
         raise SupervisorError("standalone service could not be started") from exc
 
 
+def _missing_process_group(exc: BaseException) -> bool:
+    return isinstance(exc, ProcessLookupError) or (
+        isinstance(exc, OSError) and getattr(exc, "errno", None) == errno.ESRCH
+    )
+
+
+def process_group_exists(
+    pgid: int, *, kill_group: Callable[[int, int], None]
+) -> bool:
+    try:
+        kill_group(pgid, 0)
+    except OSError as exc:
+        if _missing_process_group(exc):
+            return False
+        raise
+    return True
+
+
 def stop_service_process(
-    process: Any, *, kill_group: Callable[[int, int], None] | None = None
+    process: Any,
+    *,
+    kill_group: Callable[[int, int], None] | None = None,
+    timeout: float = GROUP_SHUTDOWN_SECONDS,
 ) -> None:
-    """Bound shutdown of the service-owned process group and reap its leader."""
-    if process.poll() is not None:
-        return
+    """Bound shutdown of the service-owned process group, independent of leader state."""
     if kill_group is None:
         kill_group = os.killpg
+    pgid = process.pid
     try:
-        kill_group(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        # Test doubles and an exit racing the signal may have no visible group.
-        process.terminate()
-    try:
-        process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        try:
-            kill_group(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            process.kill()
-        process.wait(timeout=10)
+        kill_group(pgid, signal.SIGTERM)
+    except OSError as exc:
+        if not _missing_process_group(exc):
+            raise
+    deadline = time.monotonic() + timeout
+    while process_group_exists(pgid, kill_group=kill_group):
+        if time.monotonic() >= deadline:
+            try:
+                kill_group(pgid, signal.SIGKILL)
+            except OSError as exc:
+                if _missing_process_group(exc):
+                    break
+                raise
+            kill_deadline = time.monotonic() + timeout
+            while process_group_exists(pgid, kill_group=kill_group):
+                if time.monotonic() >= kill_deadline:
+                    break
+                time.sleep(0.05)
+            break
+        time.sleep(0.05)
+    with contextlib.suppress(
+        ChildProcessError, ProcessLookupError, subprocess.TimeoutExpired
+    ):
+        process.wait(timeout=1)
 
 
 class Supervisor:

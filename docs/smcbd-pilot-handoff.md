@@ -115,7 +115,8 @@ supplying only the non-secret profile and registry paths plus fixed lifecycle
 verbs as arguments. It binds local health/stop/restart control to the complete
 validated profile, registry path, tenant roots and loopback port; a crashed
 service remains failed pending explicit restart. Explicit stop/restart also
-signals the owned service process group before bounded termination and reap.
+signals the owned service process group independently of leader exit, waits
+while the group exists, then SIGKILLs any remaining descendants before reap.
 This is synthetic qualification, not an installed supervisor or activation.
 Secret values must never be entered in chat,
 command arguments, environment values, Git, logs, proof, PR comments or Actions

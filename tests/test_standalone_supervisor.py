@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -22,6 +23,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 import standalone_supervisor as supervisor
 
 
+REAL_KILLPG = os.killpg
 WEBHOOK = b"synthetic-webhook-" + b"w" * (1024 * 1024 - 18)
 PRIVATE_KEY = (
     b"-----BEGIN " + b"PRIVATE KEY-----\nsynthetic-only\n-----END PRIVATE KEY-----"
@@ -37,6 +39,7 @@ class FakeProcess:
         self.returncode = returncode
         self.terminated = False
         self.killed = False
+        self.reaped = False
 
     def poll(self):
         return self.returncode
@@ -51,6 +54,7 @@ class FakeProcess:
 
     def wait(self, timeout):
         del timeout
+        self.reaped = True
         return self.returncode
 
 
@@ -314,6 +318,10 @@ assert values[1].startswith(b'-----BEGIN ' + b'PRIVATE KEY-----')
         signals = []
 
         def kill_group(pid, signum):
+            if signum == 0:
+                if any(sent == signal.SIGTERM for _, sent in signals):
+                    raise ProcessLookupError
+                return
             signals.append((pid, signum))
             process.returncode = -signum
 
@@ -321,21 +329,83 @@ assert values[1].startswith(b'-----BEGIN ' + b'PRIVATE KEY-----')
         self.assertEqual(signals, [(process.pid, signal.SIGTERM)])
         self.assertEqual(process.returncode, -signal.SIGTERM)
 
-    def test_control_rejects_wrong_identity_before_restart_or_stop(self):
-        process = FakeProcess()
-        item = supervisor.Supervisor(
-            self.config, self.profile, self.registry, (3, 4), "expected",
-            popen=lambda *_args, **_kwargs: process,
+    def test_stop_targets_process_group_after_leader_exit(self):
+        process = FakeProcess(returncode=9)
+        signals = []
+
+        def kill_group(pid, signum):
+            if signum == 0:
+                if any(sent == signal.SIGTERM for _, sent in signals):
+                    raise ProcessLookupError
+                return
+            signals.append((pid, signum))
+
+        supervisor.stop_service_process(process, kill_group=kill_group)
+        self.assertEqual(signals, [(process.pid, signal.SIGTERM)])
+
+    def test_exited_leader_does_not_leave_sigterm_ignoring_descendant(self):
+        program = """
+import os, signal, time
+child = os.fork()
+if child == 0:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    time.sleep(60)
+    os._exit(0)
+os._exit(0)
+"""
+        proc = subprocess.Popen(
+            [sys.executable, "-c", program],
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
-        item.child = process
-        left, right = socket.socketpair()
-        with left, right:
-            right.sendall(b'{"command":"restart","identity":"wrong"}\n')
-            self.assertTrue(supervisor._handle_control(left, item))
-            response = json.loads(right.recv(4096))
-        self.assertEqual(response["status"], "rejected")
-        self.assertFalse(process.terminated)
-        self.assertEqual(item.generation, 0)
+
+        def cleanup_group():
+            with contextlib.suppress(ProcessLookupError, OSError):
+                REAL_KILLPG(proc.pid, signal.SIGKILL)
+
+        self.addCleanup(cleanup_group)
+        proc.wait(timeout=5)
+        self.assertIsNotNone(proc.poll())
+        deadline = time.monotonic() + 2
+        while True:
+            try:
+                REAL_KILLPG(proc.pid, 0)
+                break
+            except ProcessLookupError:
+                if time.monotonic() >= deadline:
+                    self.fail("descendant never appeared in the service process group")
+                time.sleep(0.01)
+        with patch.object(supervisor.os, "killpg", REAL_KILLPG):
+            supervisor.stop_service_process(proc, timeout=1)
+        with self.assertRaises(ProcessLookupError):
+            REAL_KILLPG(proc.pid, 0)
+
+    def test_control_rejects_wrong_identity_before_restart_or_stop(self):
+        with tempfile.TemporaryFile("w+b") as webhook, tempfile.TemporaryFile("w+b") as key:
+            webhook.write(b"x")
+            key.write(b"y")
+            webhook.flush()
+            key.flush()
+            process = FakeProcess()
+            item = supervisor.Supervisor(
+                self.config,
+                self.profile,
+                self.registry,
+                (webhook.fileno(), key.fileno()),
+                "expected",
+                popen=lambda *_args, **_kwargs: FakeProcess(),
+            )
+            item.child = process
+            left, right = socket.socketpair()
+            with left, right:
+                right.sendall(b'{"command":"restart","identity":"wrong"}\n')
+                self.assertTrue(supervisor._handle_control(left, item))
+                response = json.loads(right.recv(4096))
+            self.assertEqual(response["status"], "rejected")
+            self.assertEqual(item.generation, 0)
+            self.assertIs(item.child, process)
 
     def test_fragmented_health_control_request_is_read_to_its_bound(self):
         process = FakeProcess()
@@ -493,7 +563,7 @@ assert values[1].startswith(b'-----BEGIN ' + b'PRIVATE KEY-----')
             self.assert_closed(sources)
         self.assertFalse(thread.is_alive())
         self.assertEqual(result, [0])
-        self.assertTrue(process.terminated)
+        self.assertTrue(process.reaped)
         self.assertFalse(socket_path.exists())
         self.assert_closed(captured)
 
@@ -591,9 +661,14 @@ class MutationTests(unittest.TestCase):
             'test_descriptor_transport_rewinds_for_restart_without_secret_exposure',
         ),
         (
-            '        kill_group(process.pid, signal.SIGTERM)\n',
-            '        process.terminate()\n',
-            'test_stop_targets_service_process_group',
+            '        kill_group(pgid, signal.SIGTERM)\n',
+            '        if process.poll() is not None:\n            return\n        kill_group(pgid, signal.SIGTERM)\n',
+            'test_exited_leader_does_not_leave_sigterm_ignoring_descendant',
+        ),
+        (
+            '                kill_group(pgid, signal.SIGKILL)\n',
+            '                pass\n',
+            'test_exited_leader_does_not_leave_sigterm_ignoring_descendant',
         ),
         (
             '            os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,\n',

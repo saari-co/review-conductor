@@ -32,11 +32,13 @@ state/checkout/proof roots, and loopback host/port. Identity mismatch is rejecte
 before lifecycle mutation. The service is not automatically restarted after a
 crash: health reports `failed` until an explicit restart. Startup failure,
 normal stop and exceptional exit remove the socket, close descriptors and bound
-termination of the service-owned process group through terminate/kill/reap.
+termination of the service-owned process group independently of leader state:
+SIGTERM the group, wait while any member remains, SIGKILL the group if it is
+still present, and reap the leader when possible.
 
 ## Direct tests and mutants
 
-The focused suite passed 17 tests. It exercised:
+The focused suite passed 19 tests. It exercised:
 
 - maximum-size descriptor transport through a real inherited `/dev/fd`
   consumer before any service reader;
@@ -55,8 +57,10 @@ The focused suite passed 17 tests. It exercised:
 - control timeout/failure classification and response-status/identity verification;
 - signal-handler installation before child spawn and restoration after failure.
 - isolated process-session creation and process-group shutdown on stop/restart.
+- shutdown of a SIGTERM-ignoring descendant after the service leader has exited,
+  so restart cannot overlap generations.
 
-Sixteen disposable-copy mutants were killed by one named test each:
+Seventeen disposable-copy mutants were killed by one named test each:
 
 1. omit `pass_fds`;
 2. omit registry path from the control identity;
@@ -73,7 +77,8 @@ Sixteen disposable-copy mutants were killed by one named test each:
 13. accept a response for a foreign control identity;
 14. spawn the child before installing stop-signal handlers.
 15. launch the service in the supervisor's process session;
-16. signal only the service leader instead of its owned process group.
+16. return from shutdown when the service leader has already exited;
+17. omit SIGKILL of a process group that ignored SIGTERM.
 
 Each mutant ran with a bounded timeout and required nonzero status, `Ran 1 test`
 and the intended `FAIL` or `ERROR` name.
@@ -83,7 +88,7 @@ and the intended `FAIL` or `ERROR` name.
 Locally exercised interpreter: CPython 3.14.6 on macOS.
 
 - `make check` — PASS, including all legacy suites, 72 service-runtime tests,
-  9 legacy launcher tests, 17 standalone-supervisor tests and all mutation
+  9 legacy launcher tests, 19 standalone-supervisor tests and all mutation
   harnesses.
 - `make build` — PASS.
 - `python3 -m compileall -q tools tests scripts` — PASS.
@@ -134,3 +139,10 @@ validation, signal installation before child spawn, and process-group shutdown.
 Direct tests and precise mutants cover each edge. The complete local gate set was
 rerun before publication. Draft publication does not authorize merge,
 deployment, manifest-hash promotion or shadow activation.
+
+Copilot review `5191028941` on `832f4d11659b8c118ee8e3108680f24c165e8ddf`
+found that `stop_service_process()` returned when the service leader had
+exited, so a SIGTERM-ignoring descendant could survive into the next
+generation. Shutdown now probes and signals the process group independently of
+leader state. Direct descendant-process regressions and two precise mutants
+cover the early-return and omitted-SIGKILL cases. Suite PR #8 was not edited.
