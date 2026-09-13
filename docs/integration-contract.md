@@ -48,14 +48,17 @@ and GitHub App credentials move only through explicitly inherited descriptors.
 The foreground supervisor exposes identity-bound local health/stop/restart
 control, retains anonymous descriptor copies for explicit restart, and leaves a
 crashed service failed until that restart is requested. The service runs in an
-owned process session so explicit stop/restart signals that process group even
-after the leader has exited, reaps a zombie leader while probing, SIGKILLs any
-remaining descendants, and fails closed if the group still exists. Restart
-and stop control wait longer than that bound; a failed shutdown retains the
-active supervisor lock/control boundary, and startup connection failures are
-not reported as stopped while that lock is held. Malformed control commands are
-rejected without shutting the supervisor down. The control socket is private
-from bind and unlinked from bind onward. It neither provisions
+owned process session and inherits a dedicated generation descriptor alongside
+the credential descriptors. Explicit stop/restart keeps that descriptor as a
+race-free generation identity, signals the process group, and reaps the leader
+only after every inheritor has closed it; no numeric PGID is probed after identity
+release. The entrypoint verifies the supervisor's digest of the complete
+normalized profile before registry or state access. Restart and stop control
+wait longer than the shutdown bound; failed normal or exceptional shutdown
+retains the active supervisor lock/control boundary, and startup connection
+failures are not reported as stopped while that lock is held. Malformed control
+commands are rejected without shutting the supervisor down. The control socket
+is private from bind and unlinked from bind onward. It neither provisions
 credentials nor starts an HTTPS tunnel, and it is not installed or active.
 
 ## Service-owned enrollment

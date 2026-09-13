@@ -101,14 +101,21 @@ a tunnel, install a service unit or activate the profile. It closes the incoming
 descriptors after creating verified anonymous copies, rewinds those copies before
 each explicit child start, and closes them plus the socket on every exit path.
 The service starts in its own process session; stop and restart signal that owned
-process group independently of whether the leader has already exited, wait while
-any member remains, reaping an exited leader so a zombie cannot keep the group
-visible, then SIGKILL remaining members. If the group is still present after
-that bound, stop/restart fail closed instead of starting a new generation.
+process group independently of whether the leader has already exited. A distinct
+inherited lifetime descriptor remains open in the service and any fork that also
+retains inherited credentials. Shutdown holds that race-free generation handle,
+sends SIGTERM and then bounded SIGKILL, and reaps the leader only after the
+descriptor reaches EOF; it never probes or signals a numeric PGID after releasing
+that identity. A missing, escaped or undrained generation fails closed instead of
+starting a new one. Before registry or state access, the entrypoint also requires
+the normalized profile digest calculated by the supervisor to match its one
+loaded configuration, so a replaced profile cannot change the advertised tenant.
 The control socket is private from bind under a temporary restrictive umask and
 is unlinked from bind onward, including chmod failure. A failed shutdown keeps
 the original supervisor lock and control socket active so another start cannot
-overlap the surviving group. Stop/restart control waits longer than the maximum
+overlap the surviving group. Unexpected control-loop failure uses the same
+retained cleanup state and cannot unwind either owner until shutdown succeeds.
+Stop/restart control waits longer than the maximum
 group-shutdown bound; connection failure while the lock is held is reported as
 starting/unavailable, never stopped. Non-string control commands are rejected
 without terminating the service.

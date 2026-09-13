@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import select
 import signal
 import socket
 import stat
@@ -31,6 +32,8 @@ MAX_CONTROL_BYTES = 4096
 GROUP_SHUTDOWN_SECONDS = 10
 CONTROL_REQUEST_SECONDS = 2
 SHUTDOWN_CONTROL_SECONDS = GROUP_SHUTDOWN_SECONDS * 2 + CONTROL_REQUEST_SECONDS
+PROFILE_DIGEST_ENV = "REVIEW_CONDUCTOR_EXPECTED_PROFILE_SHA256"
+GENERATION_FD_ENV = "REVIEW_CONDUCTOR_GENERATION_FD"
 
 
 class SupervisorError(core.ContractError):
@@ -65,9 +68,7 @@ def configuration_identity(
     """Bind local control to the exact non-secret tenant/process boundary."""
     paths = config["paths"]
     app = config["github_app"]
-    config_digest = hashlib.sha256(
-        json.dumps(config, separators=(",", ":"), sort_keys=True).encode()
-    ).hexdigest()
+    config_digest = profile_config_digest(config)
     document = {
         "schema": "review-conductor.standalone-supervisor-identity.v1",
         "profile_path": str(profile_path.resolve(strict=True)),
@@ -86,6 +87,13 @@ def configuration_identity(
     }
     encoded = json.dumps(document, separators=(",", ":"), sort_keys=True).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def profile_config_digest(config: dict[str, Any]) -> str:
+    """Return the canonical digest shared with the supervised entrypoint."""
+    return hashlib.sha256(
+        json.dumps(config, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
 
 
 def _source_descriptor(config: dict[str, Any], key: str) -> int:
@@ -133,7 +141,7 @@ def prepare_credentials(
 
 
 def child_environment(
-    config: dict[str, Any], credentials: tuple[int, int]
+    config: dict[str, Any], credentials: tuple[int, int], generation_fd: int
 ) -> dict[str, str]:
     environment = legacy_launcher.clean_environment(config)
     environment["PYTHONUNBUFFERED"] = "1"
@@ -141,6 +149,8 @@ def child_environment(
         ("webhook_secret_fd_env", "github_private_key_fd_env"), credentials
     ):
         environment[config["credentials"][key]] = str(descriptor)
+    environment[PROFILE_DIGEST_ENV] = profile_config_digest(config)
+    environment[GENERATION_FD_ENV] = str(generation_fd)
     for name in (
         config["notifications"]["discord_target_env"],
         config["notifications"]["signal_target_env"],
@@ -152,6 +162,38 @@ def child_environment(
     return environment
 
 
+class ServiceGeneration:
+    """A service leader plus a descriptor retained by credential-bearing forks."""
+
+    def __init__(self, leader: Any, lifetime_fd: int) -> None:
+        self.leader = leader
+        self.lifetime_fd = lifetime_fd
+
+    @property
+    def pid(self) -> int:
+        return self.leader.pid
+
+
+def generation_drained(generation: ServiceGeneration) -> bool:
+    """Return true only after every holder of the generation descriptor exits."""
+    try:
+        readable, _, _ = select.select([generation.lifetime_fd], [], [], 0)
+        if not readable:
+            return False
+        value = os.read(generation.lifetime_fd, 1)
+    except OSError as exc:
+        raise SupervisorError("standalone service generation handle is unavailable") from exc
+    if value:
+        raise SupervisorError("standalone service generation handle was corrupted")
+    return True
+
+
+def _close_generation(generation: ServiceGeneration) -> None:
+    if generation.lifetime_fd >= 0:
+        _close_descriptor(generation.lifetime_fd)
+        generation.lifetime_fd = -1
+
+
 def spawn_service(
     config: dict[str, Any],
     profile_path: Path,
@@ -159,7 +201,7 @@ def spawn_service(
     credentials: tuple[int, int],
     *,
     popen: Callable[..., Any] = subprocess.Popen,
-) -> Any:
+) -> ServiceGeneration:
     for descriptor in credentials:
         try:
             os.lseek(descriptor, 0, os.SEEK_SET)
@@ -175,17 +217,25 @@ def spawn_service(
         "--apply",
         "serve",
     ]
+    lifetime_read, lifetime_write = os.pipe()
+    os.set_blocking(lifetime_read, False)
     try:
-        return popen(
+        leader = popen(
             command,
             cwd=str(ROOT),
-            env=child_environment(config, credentials),
-            pass_fds=credentials,
+            env=child_environment(config, credentials, lifetime_write),
+            pass_fds=(*credentials, lifetime_write),
             stdin=subprocess.DEVNULL,
             start_new_session=True,
         )
-    except OSError as exc:
-        raise SupervisorError("standalone service could not be started") from exc
+    except BaseException as exc:
+        _close_descriptor(lifetime_read)
+        if isinstance(exc, OSError):
+            raise SupervisorError("standalone service could not be started") from exc
+        raise
+    finally:
+        _close_descriptor(lifetime_write)
+    return ServiceGeneration(leader, lifetime_read)
 
 
 def _missing_process_group(exc: BaseException) -> bool:
@@ -194,71 +244,90 @@ def _missing_process_group(exc: BaseException) -> bool:
     )
 
 
-def process_group_exists(
-    pgid: int, *, kill_group: Callable[[int, int], None]
-) -> bool:
+def _reap_leader(generation: ServiceGeneration) -> None:
     try:
-        kill_group(pgid, 0)
-    except OSError as exc:
-        if _missing_process_group(exc):
-            return False
-        raise
-    return True
+        generation.leader.wait(timeout=1)
+    except (ChildProcessError, ProcessLookupError):
+        pass
+    except subprocess.TimeoutExpired as exc:
+        raise SupervisorError(
+            "standalone service generation handle closed before leader exit"
+        ) from exc
+    _close_generation(generation)
 
 
-def _reap_leader(process: Any) -> None:
-    with contextlib.suppress(
-        ChildProcessError, ProcessLookupError, subprocess.TimeoutExpired
-    ):
-        process.wait(timeout=0)
-
-
-def process_group_remaining(
-    process: Any, pgid: int, *, kill_group: Callable[[int, int], None]
-) -> bool:
-    _reap_leader(process)
-    return process_group_exists(pgid, kill_group=kill_group)
+def leader_returncode(generation: ServiceGeneration) -> int | None:
+    """Observe leader exit without reaping while its generation is still open."""
+    if generation.leader.returncode is not None:
+        return generation.leader.returncode
+    if generation_drained(generation):
+        return generation.leader.poll()
+    try:
+        result = os.waitid(
+            os.P_PID,
+            generation.pid,
+            os.WEXITED | os.WNOHANG | os.WNOWAIT,
+        )
+    except ChildProcessError:
+        return generation.leader.returncode
+    if result is None:
+        return None
+    if result.si_code == os.CLD_EXITED:
+        return result.si_status
+    if result.si_code in {os.CLD_KILLED, os.CLD_DUMPED}:
+        return -result.si_status
+    return None
 
 
 def stop_service_process(
-    process: Any,
+    generation: ServiceGeneration,
     *,
     kill_group: Callable[[int, int], None] | None = None,
     timeout: float | None = None,
 ) -> None:
-    """Bound shutdown of the service-owned process group, independent of leader state."""
+    """Bound shutdown while a race-free descriptor owns the service generation."""
     if kill_group is None:
         kill_group = os.killpg
     if timeout is None:
         timeout = GROUP_SHUTDOWN_SECONDS
-    pgid = process.pid
+    if generation_drained(generation):
+        _reap_leader(generation)
+        return
+    pgid = generation.pid
     try:
         kill_group(pgid, signal.SIGTERM)
     except OSError as exc:
-        if not _missing_process_group(exc):
-            raise
+        if _missing_process_group(exc) and generation_drained(generation):
+            _reap_leader(generation)
+            return
+        if _missing_process_group(exc):
+            raise SupervisorError(
+                "standalone service generation escaped its process group"
+            ) from exc
+        raise
     deadline = time.monotonic() + timeout
-    while process_group_remaining(process, pgid, kill_group=kill_group):
+    while not generation_drained(generation):
         if time.monotonic() >= deadline:
             try:
                 kill_group(pgid, signal.SIGKILL)
             except OSError as exc:
-                if _missing_process_group(exc):
+                if _missing_process_group(exc) and generation_drained(generation):
                     break
+                if _missing_process_group(exc):
+                    raise SupervisorError(
+                        "standalone service generation escaped its process group"
+                    ) from exc
                 raise
             kill_deadline = time.monotonic() + timeout
-            while process_group_remaining(process, pgid, kill_group=kill_group):
+            while not generation_drained(generation):
                 if time.monotonic() >= kill_deadline:
                     raise SupervisorError(
-                        "standalone service process group did not terminate"
+                        "standalone service generation did not terminate"
                     )
                 time.sleep(0.05)
             break
         time.sleep(0.05)
-    with contextlib.suppress(
-        ChildProcessError, ProcessLookupError, subprocess.TimeoutExpired
-    ):
-        process.wait(timeout=1)
+    _reap_leader(generation)
 
 
 class Supervisor:
@@ -278,12 +347,12 @@ class Supervisor:
         self.credentials = credentials
         self.identity = identity
         self.popen = popen
-        self.child: Any | None = None
+        self.child: ServiceGeneration | None = None
         self.generation = 0
         self.stopping = False
 
     def start_child(self) -> None:
-        if self.child is not None and self.child.poll() is None:
+        if self.child is not None and leader_returncode(self.child) is None:
             raise SupervisorError("standalone service is already running")
         self.child = spawn_service(
             self.config,
@@ -305,7 +374,7 @@ class Supervisor:
         self.start_child()
 
     def snapshot(self) -> dict[str, Any]:
-        returncode = None if self.child is None else self.child.poll()
+        returncode = None if self.child is None else leader_returncode(self.child)
         if self.stopping:
             status = "stopping"
         elif self.child is None:
@@ -391,6 +460,45 @@ def _handle_control(connection: socket.socket, supervisor: Supervisor) -> bool:
                 {"status": "rejected", "error": "control transport failed"},
             )
     return True
+
+
+def _serve_controls(listener: socket.socket, supervisor: Supervisor) -> None:
+    while True:
+        if supervisor.stopping:
+            try:
+                supervisor.stop_child()
+            except SupervisorError:
+                supervisor.stopping = False
+            else:
+                return
+        try:
+            connection, _ = listener.accept()
+        except TimeoutError:
+            continue
+        with connection:
+            connection.settimeout(CONTROL_REQUEST_SECONDS)
+            if not _handle_control(connection, supervisor):
+                return
+
+
+def _retain_ownership_until_stopped(
+    listener: socket.socket, supervisor: Supervisor
+) -> None:
+    """Never unwind the lock/socket while a service generation remains."""
+    supervisor.stopping = True
+    while supervisor.child is not None:
+        try:
+            supervisor.stop_child()
+        except SupervisorError:
+            supervisor.stopping = False
+            try:
+                _serve_controls(listener, supervisor)
+            except BaseException:
+                # A broken control path cannot release ownership of a surviving
+                # generation. Retry bounded shutdown while retaining the lock.
+                time.sleep(CONTROL_REQUEST_SECONDS)
+        else:
+            return
 
 
 @contextlib.contextmanager
@@ -499,25 +607,9 @@ def run_supervisor(
             # Install handlers before spawning so a startup-time signal cannot
             # leave the service child running without its foreground supervisor.
             supervisor.start_child()
-            while True:
-                if supervisor.stopping:
-                    try:
-                        supervisor.stop_child()
-                    except SupervisorError:
-                        supervisor.stopping = False
-                    else:
-                        break
-                try:
-                    connection, _ = listener.accept()
-                except TimeoutError:
-                    continue
-                with connection:
-                    connection.settimeout(2)
-                    if not _handle_control(connection, supervisor):
-                        break
+            _serve_controls(listener, supervisor)
         finally:
-            supervisor.stopping = True
-            supervisor.stop_child()
+            _retain_ownership_until_stopped(listener, supervisor)
             for signum, handler in previous_handlers.items():
                 signal.signal(signum, handler)
     return 0

@@ -1,16 +1,17 @@
 {
   "schema": "review-conductor.candidate-manifest.v1",
-  "follow_up_of": "d13d13446c45b8595f9e2e947493c97271f9b6d0",
+  "follow_up_of": "335586a6bb5a9b5aa3ebbce7c4f2795f78bbe92e",
   "base_sha": "9acb1ee3300490aa2f31ffd56b3999552834803b",
   "captured_date": "2026-09-13",
   "files": {
     "Makefile": "26c6fb958b85890ece2fb1ec0fd2c2114a5b8437af4ea9c0396c34c2d2c7a7f7",
     "README.md": "c765d1d92a3e99dc5d6418d61e73af2e47f7decad22f489de0b1043a0c7930e7",
-    "SECURITY.md": "ea3703665fa347521bbbf040b7f4166705fdcc84da339eea104eaf8d0b48c294",
-    "docs/integration-contract.md": "3d0ca31169f3f4bf4faf31ce7138df923f490754273fb4688308abacd45888cb",
-    "docs/migration.md": "6b7b37257cd23ad82ea9918cb15b7ead8327ed815bb9cce7f9e46bde79f209a2",
-    "docs/smcbd-pilot-handoff.md": "1d171ae29765298d3cf6b55d58e6de590e8815fbe72ffb8bd8d969a8c4ea95f9",
-    "tests/test_standalone_supervisor.py": "52ca8cd02a0b59956f45efa497e15043c107f95b8aa7901df639a03cfa4e5cf7",
-    "tools/standalone_supervisor.py": "6d8263bde83ef1c373939339c0c2d7667c389b2af4ff4d512e3438f80227f2d4"
+    "SECURITY.md": "05daec24233cf2bd7c73c6bec63b7964812be1df6d177ec9e406657bef1cf95c",
+    "docs/integration-contract.md": "dc71922162c79098d5001a26c1c49d0a1beb5b5c917e40eb77e444b133163d7d",
+    "docs/migration.md": "df995c474d69161c297c6f05aabd7c36ed1a334cc383a3b175bbd39cf1343a07",
+    "docs/smcbd-pilot-handoff.md": "efb7412f0371c8ba21a16080bf856e93b40aac2947f3ea496936d5ea23f55184",
+    "tests/test_standalone_supervisor.py": "7340df7e183407a8bb7a7ab1befd89ed6863ada8d1ed57b9830ed8d9cb369848",
+    "tools/service_entrypoint.py": "6269b76ae2a2b3eaf51038b17a2ae92490922705b7044c2444b044e230d471a5",
+    "tools/standalone_supervisor.py": "8081901073c4bb70b98882180ecda2a36cb7f89470edd3ba07187b6c5176e265"
   }
 }

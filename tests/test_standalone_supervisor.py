@@ -23,6 +23,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 import standalone_supervisor as supervisor
+import service_entrypoint as entrypoint
 
 
 REAL_KILLPG = os.killpg
@@ -129,6 +130,23 @@ class StandaloneSupervisorTests(unittest.TestCase):
         self.registry = self.root / "registry.json"
         self.config = config_fixture(self.root)
 
+    def generation(self, process, *, open_generation=True):
+        lifetime_read, lifetime_write = os.pipe()
+        os.set_blocking(lifetime_read, False)
+        item = supervisor.ServiceGeneration(process, lifetime_read)
+        item.test_lifetime_write = lifetime_write
+        self.addCleanup(lambda: supervisor._close_descriptor(lifetime_read))
+        self.addCleanup(lambda: supervisor._close_descriptor(lifetime_write))
+        if not open_generation:
+            supervisor._close_descriptor(lifetime_write)
+            item.test_lifetime_write = -1
+        return item
+
+    def drain_generation(self, generation):
+        if generation.test_lifetime_write >= 0:
+            supervisor._close_descriptor(generation.test_lifetime_write)
+            generation.test_lifetime_write = -1
+
     def assert_closed(self, descriptors):
         for descriptor in descriptors:
             with self.assertRaises(OSError) as error:
@@ -159,7 +177,15 @@ class StandaloneSupervisorTests(unittest.TestCase):
         calls = []
 
         def popen(command, **kwargs):
-            self.assertEqual(kwargs["pass_fds"], credentials)
+            self.assertEqual(kwargs["pass_fds"][:2], credentials)
+            self.assertEqual(
+                kwargs["env"][supervisor.GENERATION_FD_ENV],
+                str(kwargs["pass_fds"][2]),
+            )
+            self.assertEqual(
+                kwargs["env"][supervisor.PROFILE_DIGEST_ENV],
+                supervisor.profile_config_digest(self.config),
+            )
             for descriptor in credentials:
                 self.assertEqual(os.lseek(descriptor, 0, os.SEEK_CUR), 0)
             rendered = repr(command) + repr(kwargs["env"])
@@ -176,10 +202,12 @@ for descriptor in expected:
 assert len(values[0]) == 1024 * 1024
 assert values[0].startswith(b'synthetic-webhook-')
 assert values[1].startswith(b'-----BEGIN ' + b'PRIVATE KEY-----')
+generation = int(os.environ['REVIEW_CONDUCTOR_GENERATION_FD'])
+os.fstat(generation)
 """
             result = subprocess.run(
                 [sys.executable, "-c", program, *map(str, credentials)],
-                pass_fds=credentials,
+                pass_fds=kwargs["pass_fds"],
                 env=kwargs["env"],
                 capture_output=True,
                 timeout=5,
@@ -196,7 +224,7 @@ assert values[1].startswith(b'-----BEGIN ' + b'PRIVATE KEY-----')
             first = supervisor.spawn_service(
                 self.config, self.profile, self.registry, credentials, popen=popen
             )
-            first.returncode = 7
+            first.leader.returncode = 7
             second = supervisor.spawn_service(
                 self.config, self.profile, self.registry, credentials, popen=popen
             )
@@ -248,7 +276,7 @@ assert values[1].startswith(b'-----BEGIN ' + b'PRIVATE KEY-----')
                 captured.update(command=command, kwargs=kwargs)
                 return FakeProcess()
 
-            supervisor.spawn_service(
+            generation = supervisor.spawn_service(
                 self.config, self.profile, self.registry, credentials, popen=popen
             )
         command = captured["command"]
@@ -265,12 +293,21 @@ assert values[1].startswith(b'-----BEGIN ' + b'PRIVATE KEY-----')
                 "serve",
             ],
         )
-        self.assertEqual(set(captured["kwargs"]["pass_fds"]), set(credentials))
+        self.assertEqual(captured["kwargs"]["pass_fds"][:2], credentials)
+        self.assertEqual(
+            environment[supervisor.GENERATION_FD_ENV],
+            str(captured["kwargs"]["pass_fds"][2]),
+        )
         self.assertIs(captured["kwargs"]["start_new_session"], True)
         self.assertEqual(environment["TEST_WEBHOOK_SECRET_FD"], str(credentials[0]))
         self.assertEqual(environment["TEST_GITHUB_PRIVATE_KEY_FD"], str(credentials[1]))
+        self.assertEqual(
+            environment[supervisor.PROFILE_DIGEST_ENV],
+            supervisor.profile_config_digest(self.config),
+        )
         self.assertNotIn("synthetic-webhook-secret-value", repr(command) + repr(environment))
         self.assertNotIn("synthetic-private-key-value", repr(command) + repr(environment))
+        supervisor.stop_service_process(generation)
 
     def test_configuration_identity_covers_profile_registry_and_isolation_boundary(self):
         baseline = supervisor.configuration_identity(
@@ -306,6 +343,46 @@ assert values[1].startswith(b'-----BEGIN ' + b'PRIVATE KEY-----')
                     supervisor.configuration_identity(config, profile, registry),
                 )
 
+    def test_entrypoint_rejects_profile_change_before_state_or_registry(self):
+        changed = copy.deepcopy(self.config)
+        changed["paths"]["state_root"] += "-replaced"
+        generation_read, generation_write = os.pipe()
+        self.addCleanup(lambda: supervisor._close_descriptor(generation_read))
+        self.addCleanup(lambda: supervisor._close_descriptor(generation_write))
+        environment = {
+            entrypoint.PROFILE_DIGEST_ENV: supervisor.profile_config_digest(
+                self.config
+            ),
+            entrypoint.GENERATION_FD_ENV: str(generation_write),
+        }
+        with patch.dict(os.environ, environment, clear=False), patch.object(
+            entrypoint.userland, "load_config", return_value=changed
+        ), patch.object(entrypoint.profiles, "require_enabled") as enabled, patch.object(
+            entrypoint, "registry_provider"
+        ) as registry:
+            with self.assertRaisesRegex(
+                entrypoint.service.ServiceError,
+                "profile changed after supervisor validation",
+            ):
+                entrypoint.serve(self.profile, self.registry)
+        enabled.assert_not_called()
+        registry.assert_not_called()
+
+    def test_open_generation_status_does_not_reap_leader(self):
+        class ReapingLeader(FakeProcess):
+            def poll(self):
+                self.reaped = True
+                return 7
+
+        leader = ReapingLeader()
+        generation = self.generation(leader)
+        observed = type(
+            "WaitResult", (), {"si_code": os.CLD_EXITED, "si_status": 7}
+        )()
+        with patch.object(supervisor.os, "waitid", return_value=observed):
+            self.assertEqual(supervisor.leader_returncode(generation), 7)
+        self.assertFalse(leader.reaped)
+
     def test_crash_stays_failed_until_explicit_restart(self):
         processes = []
 
@@ -338,32 +415,28 @@ assert values[1].startswith(b'-----BEGIN ' + b'PRIVATE KEY-----')
 
     def test_stop_targets_service_process_group(self):
         process = FakeProcess()
+        generation = self.generation(process)
         signals = []
 
         def kill_group(pid, signum):
-            if signum == 0:
-                if any(sent == signal.SIGTERM for _, sent in signals):
-                    raise ProcessLookupError
-                return
             signals.append((pid, signum))
             process.returncode = -signum
+            self.drain_generation(generation)
 
-        supervisor.stop_service_process(process, kill_group=kill_group)
+        supervisor.stop_service_process(generation, kill_group=kill_group)
         self.assertEqual(signals, [(process.pid, signal.SIGTERM)])
         self.assertEqual(process.returncode, -signal.SIGTERM)
 
     def test_stop_targets_process_group_after_leader_exit(self):
         process = FakeProcess(returncode=9)
+        generation = self.generation(process)
         signals = []
 
         def kill_group(pid, signum):
-            if signum == 0:
-                if any(sent == signal.SIGTERM for _, sent in signals):
-                    raise ProcessLookupError
-                return
             signals.append((pid, signum))
+            self.drain_generation(generation)
 
-        supervisor.stop_service_process(process, kill_group=kill_group)
+        supervisor.stop_service_process(generation, kill_group=kill_group)
         self.assertEqual(signals, [(process.pid, signal.SIGTERM)])
 
     def test_exited_leader_does_not_leave_sigterm_ignoring_descendant(self):
@@ -381,10 +454,12 @@ os.close(ready)
 os._exit(0)
 """
         ready_read, ready_write = os.pipe()
+        lifetime_read, lifetime_write = os.pipe()
+        os.set_blocking(lifetime_read, False)
         try:
             proc = subprocess.Popen(
                 [sys.executable, "-c", program, str(ready_write)],
-                pass_fds=(ready_write,),
+                pass_fds=(ready_write, lifetime_write),
                 start_new_session=True,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
@@ -392,10 +467,16 @@ os._exit(0)
             )
         finally:
             os.close(ready_write)
+            os.close(lifetime_write)
+        generation = supervisor.ServiceGeneration(proc, lifetime_read)
 
         def cleanup_group():
+            if generation.lifetime_fd < 0:
+                return
             with contextlib.suppress(ProcessLookupError, OSError):
-                REAL_KILLPG(proc.pid, signal.SIGKILL)
+                if not supervisor.generation_drained(generation):
+                    REAL_KILLPG(proc.pid, signal.SIGKILL)
+            supervisor._close_generation(generation)
 
         self.addCleanup(cleanup_group)
         try:
@@ -404,9 +485,12 @@ os._exit(0)
             self.assertEqual(os.read(ready_read, 1), b"1")
         finally:
             os.close(ready_read)
-        proc.wait(timeout=5)
-        self.assertIsNotNone(proc.poll())
         deadline = time.monotonic() + 2
+        while supervisor.leader_returncode(generation) is None:
+            if time.monotonic() >= deadline:
+                self.fail("service leader did not exit")
+            time.sleep(0.01)
+        self.assertIsNone(proc.returncode)
         while True:
             try:
                 REAL_KILLPG(proc.pid, 0)
@@ -416,27 +500,26 @@ os._exit(0)
                     self.fail("descendant never appeared in the service process group")
                 time.sleep(0.01)
         with patch.object(supervisor.os, "killpg", REAL_KILLPG):
-            supervisor.stop_service_process(proc, timeout=1)
+            supervisor.stop_service_process(generation, timeout=1)
+        self.assertIsNotNone(proc.returncode)
         with self.assertRaises(ProcessLookupError):
             REAL_KILLPG(proc.pid, 0)
 
-    def test_unreaped_leader_is_reaped_before_group_probe_completes(self):
+    def test_drained_generation_reaps_without_numeric_group_signal(self):
         process = FakeProcess(returncode=0)
+        generation = self.generation(process, open_generation=False)
         signals = []
 
         def kill_group(_pid, signum):
-            if signum == 0:
-                if process.reaped:
-                    raise ProcessLookupError
-                return
             signals.append(signum)
 
-        supervisor.stop_service_process(process, kill_group=kill_group, timeout=0.2)
-        self.assertEqual(signals, [signal.SIGTERM])
+        supervisor.stop_service_process(generation, kill_group=kill_group, timeout=0.2)
+        self.assertEqual(signals, [])
         self.assertTrue(process.reaped)
 
     def test_surviving_process_group_fails_closed_before_restart(self):
         process = FakeProcess()
+        generation = self.generation(process)
         spawned = []
 
         def kill_group(_pid, _signum):
@@ -446,7 +529,7 @@ os._exit(0)
             supervisor.SupervisorError, "did not terminate"
         ):
             supervisor.stop_service_process(
-                process, kill_group=kill_group, timeout=0.15
+                generation, kill_group=kill_group, timeout=0.15
             )
         item = supervisor.Supervisor(
             self.config,
@@ -456,7 +539,7 @@ os._exit(0)
             "expected",
             popen=lambda *_args, **_kwargs: spawned.append(True) or FakeProcess(),
         )
-        item.child = process
+        item.child = generation
         with patch.object(supervisor, "GROUP_SHUTDOWN_SECONDS", 0.12), patch.object(
             supervisor.os, "killpg", kill_group
         ):
@@ -465,7 +548,7 @@ os._exit(0)
             ):
                 item.restart_child()
         self.assertEqual(spawned, [])
-        self.assertIs(item.child, process)
+        self.assertIs(item.child, generation)
         self.assertEqual(item.generation, 0)
 
     def test_failed_stop_keeps_control_socket_and_lock_until_retry(self):
@@ -476,8 +559,9 @@ os._exit(0)
             attempts.append(item.pid)
             if len(attempts) == 1:
                 raise supervisor.SupervisorError("synthetic surviving process group")
-            item.returncode = -signal.SIGKILL
-            item.reaped = True
+            item.leader.returncode = -signal.SIGKILL
+            item.leader.reaped = True
+            supervisor._close_generation(item)
 
         result = []
         with source_credentials(), patch.object(
@@ -519,6 +603,63 @@ os._exit(0)
         self.assertEqual(result, [0])
         self.assertGreaterEqual(len(attempts), 2)
 
+    def test_unexpected_loop_failure_retains_ownership_until_cleanup_succeeds(self):
+        process = FakeProcess()
+        recovery_waiting = threading.Event()
+        allow_cleanup = threading.Event()
+        control_calls = []
+
+        def serve_controls(_listener, _supervisor):
+            control_calls.append(True)
+            if len(control_calls) == 1:
+                raise RuntimeError("synthetic control loop failure")
+            recovery_waiting.set()
+            self.assertTrue(allow_cleanup.wait(5))
+
+        def stop_process(generation):
+            if not allow_cleanup.is_set():
+                raise supervisor.SupervisorError("synthetic surviving generation")
+            generation.leader.returncode = -signal.SIGKILL
+            generation.leader.reaped = True
+            supervisor._close_generation(generation)
+
+        failures = []
+        with source_credentials(), patch.object(
+            supervisor, "_serve_controls", side_effect=serve_controls
+        ), patch.object(supervisor, "stop_service_process", side_effect=stop_process):
+            thread = threading.Thread(
+                target=lambda: self._capture_failure(
+                    failures,
+                    lambda: supervisor.run_supervisor(
+                        self.config,
+                        self.profile,
+                        self.registry,
+                        popen=lambda *_args, **_kwargs: process,
+                        install_signals=False,
+                    ),
+                )
+            )
+            thread.start()
+            self.assertTrue(recovery_waiting.wait(5))
+            lock_path, socket_path = supervisor.supervisor_paths(self.config)
+            self.assertTrue(socket_path.exists())
+            with self.assertRaisesRegex(supervisor.SupervisorError, "already active"):
+                with supervisor.supervisor_lock(lock_path):
+                    self.fail("exceptional cleanup released the supervisor lock")
+            allow_cleanup.set()
+            thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(failures), 1)
+        self.assertIsInstance(failures[0], RuntimeError)
+        self.assertFalse(socket_path.exists())
+
+    @staticmethod
+    def _capture_failure(failures, operation):
+        try:
+            operation()
+        except BaseException as exc:
+            failures.append(exc)
+
     def test_control_rejects_wrong_identity_before_restart_or_stop(self):
         with tempfile.TemporaryFile("w+b") as webhook, tempfile.TemporaryFile("w+b") as key:
             webhook.write(b"x")
@@ -534,7 +675,8 @@ os._exit(0)
                 "expected",
                 popen=lambda *_args, **_kwargs: FakeProcess(),
             )
-            item.child = process
+            generation = self.generation(process, open_generation=False)
+            item.child = generation
             left, right = socket.socketpair()
             with left, right:
                 right.sendall(b'{"command":"restart","identity":"wrong"}\n')
@@ -542,14 +684,15 @@ os._exit(0)
                 response = json.loads(right.recv(4096))
             self.assertEqual(response["status"], "rejected")
             self.assertEqual(item.generation, 0)
-            self.assertIs(item.child, process)
+            self.assertIs(item.child, generation)
 
     def test_control_rejects_non_string_command_without_stopping(self):
         process = FakeProcess()
         item = supervisor.Supervisor(
             self.config, self.profile, self.registry, (3, 4), "expected"
         )
-        item.child = process
+        generation = self.generation(process)
+        item.child = generation
         left, right = socket.socketpair()
         with left, right:
             right.sendall(b'{"command":["stop"],"identity":"expected"}\n')
@@ -557,7 +700,7 @@ os._exit(0)
             response = json.loads(right.recv(4096))
         self.assertEqual(response["status"], "rejected")
         self.assertFalse(item.stopping)
-        self.assertIs(item.child, process)
+        self.assertIs(item.child, generation)
         self.assertFalse(process.terminated)
 
     def test_fragmented_health_control_request_is_read_to_its_bound(self):
@@ -565,7 +708,7 @@ os._exit(0)
         item = supervisor.Supervisor(
             self.config, self.profile, self.registry, (3, 4), "expected"
         )
-        item.child = process
+        item.child = self.generation(process)
         left, right = socket.socketpair()
         result = []
         with left, right:
@@ -592,7 +735,7 @@ os._exit(0)
         item = supervisor.Supervisor(
             self.config, self.profile, self.registry, (3, 4), "expected"
         )
-        item.child = process
+        item.child = self.generation(process)
         self.assertTrue(supervisor._handle_control(BrokenConnection(), item))
         self.assertFalse(item.stopping)
         self.assertFalse(process.terminated)
@@ -874,7 +1017,17 @@ os._exit(0)
 class MutationTests(unittest.TestCase):
     MUTANTS = (
         (
+            '            pass_fds=(*credentials, lifetime_write),\n',
+            '            pass_fds=(lifetime_write,),\n',
+            'test_spawn_argv_and_environment_contain_only_paths_and_descriptor_numbers',
+        ),
+        (
+            '            pass_fds=(*credentials, lifetime_write),\n',
             '            pass_fds=credentials,\n',
+            'test_spawn_argv_and_environment_contain_only_paths_and_descriptor_numbers',
+        ),
+        (
+            '    environment[PROFILE_DIGEST_ENV] = profile_config_digest(config)\n',
             '',
             'test_spawn_argv_and_environment_contain_only_paths_and_descriptor_numbers',
         ),
@@ -915,7 +1068,7 @@ class MutationTests(unittest.TestCase):
         ),
         (
             '        kill_group(pgid, signal.SIGTERM)\n',
-            '        if process.poll() is not None:\n            return\n        kill_group(pgid, signal.SIGTERM)\n',
+            '        if generation.leader.poll() is not None:\n            return\n        kill_group(pgid, signal.SIGTERM)\n',
             'test_exited_leader_does_not_leave_sigterm_ignoring_descendant',
         ),
         (
@@ -924,12 +1077,12 @@ class MutationTests(unittest.TestCase):
             'test_exited_leader_does_not_leave_sigterm_ignoring_descendant',
         ),
         (
-            '    _reap_leader(process)\n',
-            '',
-            'test_unreaped_leader_is_reaped_before_group_probe_completes',
+            '    if generation_drained(generation):\n        return generation.leader.poll()\n',
+            '    return generation.leader.poll()\n',
+            'test_open_generation_status_does_not_reap_leader',
         ),
         (
-            '                    raise SupervisorError(\n                        "standalone service process group did not terminate"\n                    )\n',
+            '                    raise SupervisorError(\n                        "standalone service generation did not terminate"\n                    )\n',
             '                    break\n',
             'test_surviving_process_group_fails_closed_before_restart',
         ),
@@ -949,9 +1102,20 @@ class MutationTests(unittest.TestCase):
             'test_chmod_failure_unlinks_bound_control_socket',
         ),
         (
-            '        elif request["command"] == "stop":\n            supervisor.stop_child()\n            supervisor.stopping = True\n',
-            '        elif request["command"] == "stop":\n            supervisor.stopping = True\n',
-            'test_failed_stop_keeps_control_socket_and_lock_until_retry',
+            '    if timeout is None:\n        timeout = GROUP_SHUTDOWN_SECONDS\n    if generation_drained(generation):\n        _reap_leader(generation)\n        return\n',
+            '    if timeout is None:\n        timeout = GROUP_SHUTDOWN_SECONDS\n',
+            'test_drained_generation_reaps_without_numeric_group_signal',
+        ),
+        (
+            '            _retain_ownership_until_stopped(listener, supervisor)\n',
+            '            supervisor.stop_child()\n',
+            'test_unexpected_loop_failure_retains_ownership_until_cleanup_succeeds',
+        ),
+        (
+            'tools/service_entrypoint.py',
+            '    if not hmac.compare_digest(actual, expected):\n        raise service.ServiceError("service profile changed after supervisor validation")\n',
+            '',
+            'test_entrypoint_rejects_profile_change_before_state_or_registry',
         ),
         (
             '        if supervisor_lock_is_held(lock_path):\n            raise SupervisorError(\n                "standalone supervisor is starting or control is unavailable"\n            )\n',
@@ -1001,12 +1165,17 @@ class MutationTests(unittest.TestCase):
     )
 
     def test_precise_standalone_supervisor_mutants(self):
-        for anchor, replacement, test_name in self.MUTANTS:
+        for mutant in self.MUTANTS:
+            if len(mutant) == 3:
+                source_name = "tools/standalone_supervisor.py"
+                anchor, replacement, test_name = mutant
+            else:
+                source_name, anchor, replacement, test_name = mutant
             with self.subTest(test_name=test_name), tempfile.TemporaryDirectory() as temp:
                 destination = Path(temp)
                 for name in ("tools", "tests", "contracts", "examples"):
                     shutil.copytree(ROOT / name, destination / name)
-                source = destination / "tools/standalone_supervisor.py"
+                source = destination / source_name
                 text = source.read_text()
                 self.assertEqual(text.count(anchor), 1)
                 source.write_text(text.replace(anchor, replacement, 1))

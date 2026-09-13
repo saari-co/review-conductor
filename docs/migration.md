@@ -16,7 +16,8 @@
 - Independent offline manifest contract, tests, zipapp build, and CI.
 - A native standalone foreground supervisor now invokes the registry-aware
   entrypoint with inherited webhook/App descriptors, an allowlisted child
-  environment, an exact SMCBD config/state identity and fail-closed
+  environment, an inherited generation-lifetime descriptor, an entrypoint-verified
+  exact SMCBD config/state identity and fail-closed
   health/start/stop/restart behavior. It is source-only, uninstalled and never
   starts a tunnel.
 - `provenance.json` is a versioned extraction/provenance ledger: it records

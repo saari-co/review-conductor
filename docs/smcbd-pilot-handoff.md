@@ -115,13 +115,14 @@ supplying only the non-secret profile and registry paths plus fixed lifecycle
 verbs as arguments. It binds local health/stop/restart control to the complete
 validated profile, registry path, tenant roots and loopback port; a crashed
 service remains failed pending explicit restart. Explicit stop/restart also
-signals the owned service process group independently of leader exit, waits
-while the group exists, reaps an exited leader during that probe, SIGKILLs any
-remaining descendants, and fails closed if the group still exists. Restart
+holds an inherited generation descriptor while signaling the owned service
+process group independently of leader exit, then reaps only after every
+credential-bearing inheritor closes that descriptor. The entrypoint verifies
+the supervisor's normalized-profile digest before registry or state access. Restart
 and stop control wait longer than that shutdown bound. A failed shutdown
-retains the supervisor lock/control boundary; startup connection failure while
-that lock is held is not reported as stopped. The Unix socket is private from
-bind, not only after chmod.
+retains the supervisor lock/control boundary even after an unexpected loop
+failure; startup connection failure while that lock is held is not reported as
+stopped. The Unix socket is private from bind, not only after chmod.
 This is synthetic qualification, not an installed supervisor or activation.
 Secret values must never be entered in chat,
 command arguments, environment values, Git, logs, proof, PR comments or Actions

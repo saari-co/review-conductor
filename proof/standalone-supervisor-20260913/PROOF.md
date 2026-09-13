@@ -32,18 +32,24 @@ state/checkout/proof roots, and loopback host/port. Identity mismatch is rejecte
 before lifecycle mutation. The service is not automatically restarted after a
 crash: health reports `failed` until an explicit restart. Startup failure,
 normal stop and exceptional exit remove the socket, close descriptors and bound
-termination of the service-owned process group independently of leader state:
-SIGTERM the group, wait while any member remains, SIGKILL the group if it is
-still present, reaping a zombie leader so it cannot keep the group visible.
-If the group remains after the SIGKILL bound, stop/restart fail closed.
-The original supervisor retains its lock and control socket after that failure;
-another `start` cannot overlap the surviving generation. The socket is mode 0600
-from bind under a temporary restrictive umask. Startup connection failures are
-not reported as stopped while the lock is held.
+termination of the service-owned process group independently of leader state.
+Each generation inherits a distinct lifetime descriptor alongside its credential
+descriptors. The supervisor retains its read end, observes leader exit without
+reaping while the generation remains open, and signals the numeric PGID only
+while a credential-bearing holder keeps that identity allocated. Descriptor EOF
+precedes leader reap, and no numeric group probe or signal follows identity
+release. Missing, escaped or undrained generations fail closed.
+
+The entrypoint compares the supervisor's canonical normalized-profile digest to
+its one loaded configuration before registry or state access. Normal and
+unexpected control-loop exits use the same retained cleanup state: the original
+supervisor keeps its lock and control socket until its generation is gone. The
+socket is mode 0600 from bind under a temporary restrictive umask. Startup
+connection failures are not reported as stopped while the lock is held.
 
 ## Direct tests and mutants
 
-The focused suite passed 26 tests. It exercised:
+The focused suite passed 28 direct tests. It exercised:
 
 - maximum-size descriptor transport through a real inherited `/dev/fd`
   consumer before any service reader;
@@ -75,34 +81,45 @@ The focused suite passed 26 tests. It exercised:
 - startup `ENOENT`/`ECONNREFUSED` classification while the supervisor lock is held;
 - health-based lifecycle readiness instead of socket-path existence;
 - a readiness pipe proving the descendant installed `SIG_IGN` before shutdown.
+- a race-free generation descriptor retained through leader exit and closed only
+  after credential-bearing descendants exit, with no numeric group signal after
+  generation identity release;
+- non-reaping leader status while a generation remains open;
+- exact normalized-profile verification before registry or state access; and
+- retained lock/control ownership when unexpected loop failure and shutdown
+  failure occur together.
 
-Twenty-five disposable-copy mutants were killed by one named test each:
+Twenty-nine disposable-copy mutants were killed by one named test each:
 
-1. omit `pass_fds`;
-2. omit registry path from the control identity;
-3. claim automatic restart;
-4. bypass control identity comparison;
-5. omit control-socket cleanup;
-6. omit descriptor rewind before restart.
-7. follow a symlinked supervisor lock.
-8. omit the complete validated-profile digest from control identity;
-9. leak a source descriptor on partial acquisition;
-10. let a disconnected control client escape the request boundary;
-11. misreport a control timeout as a stopped supervisor;
-12. accept an invalid control response status;
-13. accept a response for a foreign control identity;
-14. spawn the child before installing stop-signal handlers.
-15. launch the service in the supervisor's process session;
-16. return from shutdown when the service leader has already exited;
-17. omit SIGKILL of a process group that ignored SIGTERM.
-18. omit reaping the leader while probing the process group;
-19. return from shutdown while the process group still exists;
-20. use the short control timeout for stop/restart;
-21. membership-test a non-string control command;
-22. register socket unlink only after chmod.
-23. create the control socket under the caller's permissive umask;
-24. report stopping before the old process group is confirmed gone;
-25. report stopped after connection failure while the supervisor lock is held.
+1. omit credential descriptors from `pass_fds`;
+2. omit the generation descriptor from `pass_fds`;
+3. omit the expected profile digest from the child environment;
+4. launch the service in the supervisor's process session;
+5. omit registry path from the control identity;
+6. claim automatic restart;
+7. bypass control identity comparison;
+8. omit control-socket cleanup;
+9. create the control socket under the caller's permissive umask;
+10. omit credential-descriptor rewind before restart;
+11. return from shutdown when the service leader has already exited;
+12. omit SIGKILL of a generation that ignored SIGTERM;
+13. reap the leader while its generation handle remains open;
+14. return while the generation remains open after SIGKILL;
+15. use the short control timeout for stop/restart;
+16. membership-test a non-string control command;
+17. register socket unlink only after chmod;
+18. signal a numeric process group after generation identity release;
+19. unwind ownership directly after an exceptional cleanup failure;
+20. skip the entrypoint's normalized-profile digest comparison;
+21. report stopped after connection failure while the supervisor lock is held;
+22. follow a symlinked supervisor lock;
+23. omit the complete validated-profile digest from control identity;
+24. leak a source descriptor on partial acquisition;
+25. let a disconnected control client escape the request boundary;
+26. misreport a control timeout as a stopped supervisor;
+27. accept an invalid control response status;
+28. accept a response for a foreign control identity; and
+29. spawn the child before installing stop-signal handlers.
 
 Each mutant ran with a bounded timeout and required nonzero status, `Ran 1 test`
 and the intended `FAIL` or `ERROR` name.
@@ -112,7 +129,7 @@ and the intended `FAIL` or `ERROR` name.
 Locally exercised interpreter: CPython 3.14.6 on macOS.
 
 - `make check` — PASS, including all legacy suites, 72 service-runtime tests,
-  9 legacy launcher tests, 26 standalone-supervisor tests and all mutation
+  9 legacy launcher tests, 28 standalone-supervisor tests and all mutation
   harnesses.
 - `make build` — PASS.
 - `python3 -m compileall -q tools tests scripts` — PASS.
@@ -184,3 +201,11 @@ bind, retention of lock/control ownership after failed shutdown, deterministic
 descendant readiness, health-based lifecycle readiness, and startup connection
 classification while locked. This bounded engineering pass repairs those
 invariants and deliberately does not request another Copilot review.
+
+Copilot review `5191848326` on `335586a6bb5a9b5aa3ebbce7c4f2795f78bbe92e`
+identified three activation-boundary issues: numeric PGID reuse after leader
+reap, profile replacement between supervisor identity and child load, and lock /
+socket release when an unexpected loop failure coincides with failed cleanup.
+The generation-lifetime descriptor, entrypoint profile-digest gate and retained
+exceptional-cleanup loop repair those exact invariants. No additional Copilot
+review is requested by this repair task.
