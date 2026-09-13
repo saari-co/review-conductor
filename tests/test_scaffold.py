@@ -31,7 +31,7 @@ class ScaffoldTests(unittest.TestCase):
 
     def test_weakened_or_ambiguous_policy_fails_closed(self):
         candidates = []
-        for key, value in [("quiet_seconds", 0), ("quiet_seconds", True),
+        for key, value in [("clawsweeper_requires_ready", False), ("clawsweeper_requires_ready", 1),
                            ("scope", "P0"), ("rails", ["clawsweeper", "openclaw"]),
                            ("rails", ["openclaw"])]:
             item = copy.deepcopy(self.value);item["review"][key] = value;candidates.append(item)

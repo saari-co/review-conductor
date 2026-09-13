@@ -1,4 +1,4 @@
-# Repository manifest and service boundary v1
+# Repository manifest and service boundary v2
 
 ## Repository-owned requirements
 
@@ -7,9 +7,9 @@ A target may commit `.review-conductor.json` using
 The examples are proposals only; no target repository has been changed/enrolled.
 
 The manifest contains only repository name, default branch, CI workflow name/path,
-quiet period, comprehensive scope, ordered required rails, and human-only merge.
-V1 requires at least 600 seconds quiet time and both comprehensive rails. The
-unchanged Blocks v1 pilot remains a legacy fixture, not silently upgraded policy.
+readiness-gated ClawSweeper dispatch, comprehensive scope, ordered required rails,
+and human-only merge. V2 removes the fixed quiet period: every exact draft head
+runs CI then OpenClaw; ready status enables ClawSweeper only after both clear.
 Unknown keys fail closed. There are no shell commands, adapter paths, URLs,
 credential selectors, reviewer identity overrides, or install/state roots.
 
@@ -25,8 +25,8 @@ credential selectors, reviewer identity overrides, or install/state roots.
 4. A PR changing its manifest is reviewed under the previously approved policy.
    Policy promotion is a separate owner-authorized action; it invalidates affected
    in-flight evidence. Missing/mismatched/unapproved policy blocks admission.
-5. Observe genuine exact-head CI after draft deferral and the quiet interval,
-   then comprehensive OpenClaw, then comprehensive ClawSweeper. A missing or
+5. Observe genuine exact-head CI, then comprehensive OpenClaw. Dispatch
+   comprehensive ClawSweeper only while that exact head is ready. A missing or
    skipped rail is not PASS; no result authorizes merge.
 
 `tools/trusted_admission.py` implements the inert contract. The source-only

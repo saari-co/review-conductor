@@ -1,5 +1,5 @@
 {
-  "schema": "review-conductor.target.v1",
+  "schema": "review-conductor.target.v2",
   "repository": "dinkuskit/blocks",
   "default_branch": "main",
   "ci": {
@@ -7,7 +7,7 @@
     "workflow_path": ".github/workflows/ci.yml"
   },
   "review": {
-    "quiet_seconds": 600,
+    "clawsweeper_requires_ready": true,
     "scope": "comprehensive",
     "rails": [
       "openclaw",

@@ -17,7 +17,7 @@ work, not a new service fork.
 
 | Owner | Responsibility |
 | --- | --- |
-| Target repository | CI workflow identity, default branch, quiet period and required rails |
+| Target repository | CI workflow identity, default branch, readiness gate and required rails |
 | Conductor service | Exact tuple/epoch state, admission, adapter sequencing, bounded repair routing, audit evidence |
 | Service enrollment registry | Numeric repo identity, App installation, approved policy SHA/hash, authoritative reviewer actors, credential references and isolation domains |
 | GitHub Actions | Deterministic CI |

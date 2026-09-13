@@ -195,7 +195,7 @@ def require_policy_matches_profile(policy: admission.AdmittedPolicy, config: dic
         "default_branch": config.get("default_branch"),
         "ci.workflow_name": ci.get("workflow_name"),
         "ci.workflow_path": ci.get("workflow_path"),
-        "review.quiet_seconds": review_policy.get("quiet_seconds"),
+        "review.clawsweeper_requires_ready": review_policy.get("clawsweeper_requires_ready"),
         "merge_policy": config.get("merge_policy"),
     }
     admitted = {
@@ -203,12 +203,12 @@ def require_policy_matches_profile(policy: admission.AdmittedPolicy, config: dic
         "default_branch": manifest["default_branch"],
         "ci.workflow_name": manifest["ci"]["workflow_name"],
         "ci.workflow_path": manifest["ci"]["workflow_path"],
-        "review.quiet_seconds": manifest["review"]["quiet_seconds"],
+        "review.clawsweeper_requires_ready": manifest["review"]["clawsweeper_requires_ready"],
         "merge_policy": manifest["merge_policy"],
     }
     if (
         policy.default_branch != admitted["default_branch"]
-        or policy.quiet_seconds != admitted["review.quiet_seconds"]
+        or policy.clawsweeper_requires_ready != admitted["review.clawsweeper_requires_ready"]
     ):
         raise ServiceError("admitted policy fields contradict its manifest bytes")
     for key, value in admitted.items():
@@ -220,7 +220,7 @@ def profile_policy_digest(core_config: dict[str, Any], service_config: dict[str,
     """Digest of every profile field that governs what the admitted policy reviews.
 
     Covers the engine fields the policy pins (repository, default branch, CI
-    workflow, quiet period, merge policy) and the adapter authority fields that
+    workflow, ClawSweeper readiness gate, merge policy) and the adapter authority fields that
     select the review producers and their destinations (ClawSweeper workflow
     id/name/path/ref/publish, adapter contract/artifact prefix, OpenClaw
     operator/transport/worktree shelf and effective Spark target/executable
@@ -269,7 +269,7 @@ def profile_policy_digest(core_config: dict[str, Any], service_config: dict[str,
             },
             "spark_target": spark_target,
             "spark_executables": spark_executables,
-            "quiet_seconds": review_policy.get("quiet_seconds"),
+            "clawsweeper_requires_ready": review_policy.get("clawsweeper_requires_ready"),
             "merge_policy": core_config.get("merge_policy"),
         },
         sort_keys=True, separators=(",", ":"),

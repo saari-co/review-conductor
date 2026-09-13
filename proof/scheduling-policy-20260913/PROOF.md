@@ -1,0 +1,28 @@
+# Scheduling policy v2 proof
+
+- Base: `c6df9bb1368766253fed35c243585142ffd5b392`
+- Branch: `openclaw/review-conductor-pr5-scheduling`
+- Captured: 2026-09-13 America/New_York
+- Activation: not performed
+
+## Qualified behavior
+
+- Every accepted exact draft or ready head runs CI then OpenClaw without a fixed quiet period.
+- A clean OpenClaw result on a draft head waits without dispatching ClawSweeper.
+- `ready_for_review` dispatches ClawSweeper for the already-cleared exact revision without changing its review epoch.
+- Returning to draft obsoletes a not-yet-dispatched ClawSweeper action while preserving exact-head CI/OpenClaw clearance.
+- New base/head tuples supersede prior work; duplicate events remain idempotent.
+- Closed heads receive cleanup-only projection and never cold-create rail checks.
+- The service and maintenance CLI share an exclusive tenant operation lock, preventing notification reconciliation while the sender is active.
+
+## Verification
+
+- `make check`: PASS
+- `make build`: PASS
+- `python3 -m py_compile tools/*.py`: PASS
+- `git diff --check`: PASS
+- Provenance verification: PASS
+
+## Limits
+
+This is source qualification only. No registry, credentials, service, HTTPS endpoint, webhook, reviewer producer, check cutover, deployment, or merge was activated. The target repositories still require a separately reviewed v2 manifest promotion before this scheduler can admit them.

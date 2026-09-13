@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -21,6 +23,23 @@ import trusted_admission as admission
 
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY_MODE = 0o600
+
+
+@contextmanager
+def exclusive_service_lock(config: dict, registry_path: Path):
+    lock_path = registry_path.parent / f".service-operation-{config['github_app']['repository_id']}.lock"
+    try:
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    except OSError as exc:
+        raise service.ServiceError("service enrollment registry is unavailable") from exc
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise service.ServiceError("service or maintenance operation is already active") from exc
+        yield
+    finally:
+        os.close(descriptor)
 
 
 def forbidden_registry_roots(config: dict) -> tuple[Path, ...]:
@@ -217,9 +236,11 @@ class ServiceStopped(service.ServiceError):
 
 def serve(profile_path: Path, registry_path: Path) -> None:
     """Hold a restrictive process umask for the complete threaded lifecycle."""
+    config = userland.load_config(profile_path)
     previous_umask = os.umask(0o077)
     try:
-        _serve_with_restrictive_umask(profile_path, registry_path)
+        with exclusive_service_lock(config, registry_path):
+            _serve_with_restrictive_umask(profile_path, registry_path)
     finally:
         os.umask(previous_umask)
 
@@ -295,6 +316,21 @@ def _worker_loop(config, provide_registry, client, notifier, stop, failure, get_
 
 
 def run_maintenance(
+    profile_path: Path, registry_path: Path, command: str, pr_number: int, *,
+    apply: bool, channel: str | None = None, disposition: str | None = None,
+    confirmation: str | None = None,
+) -> dict:
+    config = userland.load_config(profile_path)
+    profiles.require_enabled(config)
+    registry_provider(registry_path, config)()
+    with exclusive_service_lock(config, registry_path):
+        return _run_maintenance_unlocked(
+            profile_path, registry_path, command, pr_number, apply=apply,
+            channel=channel, disposition=disposition, confirmation=confirmation,
+        )
+
+
+def _run_maintenance_unlocked(
     profile_path: Path,
     registry_path: Path,
     command: str,

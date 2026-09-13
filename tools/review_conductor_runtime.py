@@ -833,14 +833,15 @@ def reconcile_superseded_projection(
     client: GitHubAppClient | Any,
     *,
     dry_run: bool,
+    conclusion: str = "skipped",
 ) -> dict[str, Any]:
     item = {
         "pr_number": row["pr_number"],
         "base_sha": row["base_sha"],
         "head_sha": row["head_sha"],
         "review_epoch": row["review_epoch"],
-        "visible_state": "superseded",
-        "checks": {name: "skipped" for name in CHECK_NAMES},
+        "visible_state": "closed" if conclusion == "cancelled" else "superseded",
+        "checks": {name: conclusion for name in CHECK_NAMES},
         "ready_label": False,
         "merge_authorized": False,
     }
@@ -866,7 +867,7 @@ def reconcile_superseded_projection(
                 name,
                 row["head_sha"],
                 projection_external_id(row, name),
-                "skipped",
+                conclusion,
             )
         elif row[create_state_column] == "creating":
             raise RuntimeError(
@@ -912,12 +913,30 @@ def reconcile_projection(
                     connection, stale_projection, client, dry_run=dry_run
                 )
             )
+        closed = connection.execute(
+            """
+            SELECT projections.* FROM projections
+            JOIN heads USING (repository, pr_number, base_sha, head_sha, review_epoch)
+            WHERE heads.repository=? AND heads.is_current=1
+              AND heads.state IN ('closed','closed_merged')
+              AND COALESCE(projections.last_projected_state, '') != 'superseded'
+            ORDER BY heads.pr_number
+            """,
+            (core_config["repository"],),
+        ).fetchall()
+        for closed_projection in closed:
+            projected.append(
+                reconcile_superseded_projection(
+                    connection, closed_projection, client, dry_run=dry_run,
+                    conclusion="cancelled",
+                )
+            )
         query = "SELECT * FROM heads WHERE repository = ? AND is_current = 1"
         params: list[Any] = [core_config["repository"]]
         if pr_number is not None:
             query += " AND pr_number = ?"
             params.append(pr_number)
-        query += " ORDER BY pr_number"
+        query += " AND state NOT IN ('closed','closed_merged') ORDER BY pr_number"
         rows = connection.execute(query, params).fetchall()
         for row in rows:
             projection = ensure_projection_row(connection, row)

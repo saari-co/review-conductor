@@ -56,15 +56,13 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "quiet_seconds",
+        "clawsweeper_requires_ready",
         "scope",
         "rails"
       ],
       "properties": {
-        "quiet_seconds": {
-          "type": "integer",
-          "minimum": 600,
-          "maximum": 86400
+        "clawsweeper_requires_ready": {
+          "const": true
         },
         "scope": {
           "const": "comprehensive"

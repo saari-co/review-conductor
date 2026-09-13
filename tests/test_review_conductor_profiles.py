@@ -155,24 +155,57 @@ class ProfilesTest(unittest.TestCase):
         with self.assertRaises(core.ContractError):runtime.recover_abandoned_actions(blocks)
         self.assertEqual(self.state(config)['state'],'openclaw_queued')
 
-    def test_draft_quiet_period_and_ready_epoch(self):
+    def test_draft_runs_openclaw_and_ready_enables_clawsweeper_without_new_epoch(self):
         config=self.config();p=self.payload(legacy.pr_payload(7));p['pull_request']['draft']=True
         self.ingest(config,'pull_request','draft',p)
         receipt=self.ingest(config,'workflow_run','draft-ci',self.payload(legacy.ci_payload(7,701)))
-        self.assertEqual(receipt['result'],'ignored')
+        self.assertEqual(receipt['result'],'accepted')
+        action=legacy.action(config,7,'openclaw.enqueue');legacy.mark_dispatched(config,action['action_id'])
+        runtime.bridge_openclaw(config,self.terminal(config,action))
+        self.assertEqual(self.state(config)['state'],'openclaw_clean_draft')
+        epoch=self.state(config)['review_epoch']
         p['action']='ready_for_review';p['pull_request'].update(draft=False,updated_at='2026-08-29T20:12:00Z')
         self.ingest(config,'pull_request','ready',p)
-        ci=self.payload(legacy.ci_payload(7,702));ci['workflow_run'].update(created_at='2026-08-29T20:12:01Z',updated_at='2026-08-29T20:21:59Z')
-        self.assertEqual(self.ingest(config,'workflow_run','early-ci',ci)['result'],'ignored')
-        ci['workflow_run'].update(id=703,updated_at='2026-08-29T20:22:00Z')
-        self.assertEqual(self.ingest(config,'workflow_run','quiet-ci',ci)['result'],'accepted')
-        old=legacy.action(config,7,'openclaw.enqueue')
+        self.assertEqual(self.state(config)['state'],'clawsweeper_queued')
+        self.assertEqual(self.state(config)['review_epoch'],epoch)
+        old=legacy.action(config,7,'clawsweeper.dispatch')
         p['action']='converted_to_draft';p['pull_request'].update(draft=True,updated_at='2026-08-29T20:23:00Z')
         self.ingest(config,'pull_request','draft-again',p)
-        self.assertGreater(self.state(config)['review_epoch'],old['review_epoch'])
+        self.assertEqual(self.state(config)['review_epoch'],old['review_epoch'])
         conn=core.open_database(Path(config['paths']['state_root']))
         self.assertEqual(conn.execute('SELECT status FROM actions WHERE action_id=?',(old['action_id'],)).fetchone()[0],'obsolete');conn.close()
+        self.assertEqual(self.state(config)['state'],'openclaw_clean_draft')
         self.assertEqual(self.ingest(config,'pull_request','stale-ready',{**p,'action':'ready_for_review','pull_request':{**p['pull_request'],'draft':False}})['result'],'stale')
+
+    def test_clawsweeper_finishing_after_return_to_draft_cannot_clear_merge(self):
+        config=self.config();self.enqueue(config)
+        openclaw=legacy.action(config,7,'openclaw.enqueue');legacy.mark_dispatched(config,openclaw['action_id'])
+        runtime.bridge_openclaw(config,self.terminal(config,openclaw))
+        clawsweeper=legacy.action(config,7,'clawsweeper.dispatch');legacy.mark_dispatched(config,clawsweeper['action_id'])
+        connection=core.open_database(Path(config['paths']['state_root']),REPO)
+        try:
+            core.process_internal_event(connection,core.load_config(Path(config['core_config'])),{
+                'schema':core.INTERNAL_EVENT_SCHEMA,'event_id':'clawsweeper:801:started','type':'clawsweeper.started',
+                'repository':REPO,'pr_number':7,'base_sha':BASE,'head_sha':HEAD,
+                'review_epoch':clawsweeper['review_epoch'],'workflow_run_id':'801',
+            })
+            connection.commit()
+        finally:connection.close()
+        p=self.payload(legacy.pr_payload(7));p['action']='converted_to_draft';p['pull_request'].update(draft=True,updated_at='2026-08-29T20:23:00Z')
+        self.ingest(config,'pull_request','draft-while-clawsweeper-runs',p)
+        connection=core.open_database(Path(config['paths']['state_root']),REPO)
+        try:
+            core.process_internal_event(connection,core.load_config(Path(config['core_config'])),{
+                'schema':core.INTERNAL_EVENT_SCHEMA,'event_id':'clawsweeper:801:clean','type':'clawsweeper.terminal',
+                'repository':REPO,'pr_number':7,'base_sha':BASE,'head_sha':HEAD,
+                'review_epoch':clawsweeper['review_epoch'],'workflow_run_id':'801','result':'clean',
+                'finding_count':0,'review_scope':'comprehensive','reviewer_actor':'fixture-suite-clawsweeper',
+                'proof_ref':'proof/clawsweeper/801/PROOF.md',
+            })
+            connection.commit()
+        finally:connection.close()
+        self.assertEqual(self.state(config)['state'],'openclaw_clean_draft')
+        self.assertFalse(core.state_projection(self.state(config))['merge_authorized'])
 
     def test_cross_repo_stale_epoch_head_base_actor_and_p0_artifacts_fail_closed(self):
         config=self.config();action=self.enqueue(config)

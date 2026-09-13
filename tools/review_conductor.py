@@ -204,9 +204,9 @@ def load_config(path: Path) -> dict[str, Any]:
         policy = require_object(config["review_policy"], "review_policy")
         if re.fullmatch(r"[A-Za-z0-9_.-]+\.ya?ml", clawsweeper["workflow_id"]) is None or clawsweeper["workflow_path"] != f".github/workflows/{clawsweeper['workflow_id']}":
             raise ContractError("profile ClawSweeper workflow must be one exact workflow file")
-        require_exact_keys(policy, {"enabled", "require_ready", "quiet_seconds", "comprehensive", "reviewers"}, set(), "review_policy")
-        if type(policy["enabled"]) is not bool or policy["require_ready"] is not True or policy["comprehensive"] is not True or policy["quiet_seconds"] != 600:
-            raise ContractError("generalized profiles require ready, comprehensive review and a 600-second quiet period")
+        require_exact_keys(policy, {"enabled", "clawsweeper_requires_ready", "comprehensive", "reviewers"}, set(), "review_policy")
+        if type(policy["enabled"]) is not bool or policy["clawsweeper_requires_ready"] is not True or policy["comprehensive"] is not True:
+            raise ContractError("generalized profiles require comprehensive review and ready state before ClawSweeper")
         require_exact_keys(require_object(policy["reviewers"], "reviewers"), {"openclaw", "clawsweeper"}, set(), "reviewers")
         for actor in policy["reviewers"].values():
             if actor is not None or policy["enabled"]:
@@ -875,8 +875,32 @@ def process_pull_request(
     if (previous is not None and previous["state"] in {"closed", "closed_merged"}
         and original_action not in {"reopened", "closed"}):
         raise ContractError("only a reopened event can reopen a terminal PR")
-    if original_action in {"ready_for_review", "converted_to_draft"}:
-        event = {**event, "action": "reopened"}
+    if original_action in {"ready_for_review", "converted_to_draft"} and previous is not None:
+        identity = {k: event[k] for k in ("repository", "pr_number", "base_sha", "head_sha")}
+        if previous["base_sha"] != event["base_sha"] or previous["head_sha"] != event["head_sha"]:
+            return _process_pull_request(connection, config, event_id, event, payload)
+        is_draft = original_action == "converted_to_draft"
+        connection.execute(
+            "UPDATE heads SET is_draft=?, source_updated_at=?, updated_at=? WHERE repository=? AND pr_number=? AND base_sha=? AND head_sha=? AND is_current=1",
+            (int(is_draft), event["source_updated_at"], utc_now(), *identity.values()),
+        )
+        action_id = None
+        created = False
+        state = previous["state"]
+        if is_draft and state == "clawsweeper_queued":
+            connection.execute(
+                "UPDATE actions SET status='obsolete', last_error='pull request returned to draft', updated_at=? WHERE repository=? AND pr_number=? AND base_sha=? AND head_sha=? AND review_epoch=? AND kind='clawsweeper.dispatch' AND status IN ('pending','failed','dispatching')",
+                (utc_now(), *identity.values(), previous["review_epoch"]),
+            )
+            state = "openclaw_clean_draft"
+            update_exact_head(connection, identity, state=state, rail="openclaw", blocker="ClawSweeper waits for ready-for-review state")
+        elif not is_draft and state == "openclaw_clean_draft":
+            payload_action = clawsweeper_action_payload(config, event["pr_number"], event["base_sha"], event["head_sha"], int(previous["review_epoch"]))
+            action_id, created = insert_action(connection, kind="clawsweeper.dispatch", payload=payload_action, review_epoch=int(previous["review_epoch"]), **identity)
+            state = "clawsweeper_queued"
+            update_exact_head(connection, identity, state=state, rail="clawsweeper", blocker=None)
+        insert_event(connection, event_id=event_id, kind=f"pull_request.{original_action}", stale=False, payload=payload, **identity)
+        return {"result": "accepted", "state": state, "review_epoch": previous["review_epoch"], "action_id": action_id, "action_created": created, "merge_dispatched": False}
     elif previous is not None and bool(previous["is_draft"]) != event["is_draft"] and original_action != "closed":
         event = {**event, "action": "reopened"}
     result = _process_pull_request(connection, config, event_id, event, payload)
@@ -1166,11 +1190,7 @@ def process_workflow_run(
         }
     policy = config.get("review_policy")
     if policy:
-        deadline = dt.datetime.fromisoformat(row["source_updated_at"].replace("Z", "+00:00")) + dt.timedelta(seconds=policy["quiet_seconds"])
-        completed = require_github_timestamp(payload["workflow_run"].get("updated_at"), "CI completion timestamp")
-        if row["is_draft"] or dt.datetime.fromisoformat(completed.replace("Z", "+00:00")) < deadline or dt.datetime.fromisoformat(utc_now().replace("Z", "+00:00")) < deadline:
-            insert_event(connection, event_id=event_id, kind="ci.completed", stale=True, payload=payload, **identity)
-            return {"result": "ignored", "reason": "draft or quiet-period CI is not eligible", "review_invoked": False, "merge_dispatched": False}
+        require_github_timestamp(payload["workflow_run"].get("updated_at"), "CI completion timestamp")
     conclusion = event["conclusion"]
     action_id = None
     created = False
@@ -1480,7 +1500,10 @@ def process_internal_event(connection: sqlite3.Connection, config: dict[str, Any
             raise ContractError("OpenClaw terminal does not match the exact queued action request_id")
         if row["review_request_id"] and row["review_request_id"] != event["request_id"]:
             raise ContractError("OpenClaw terminal request_id does not match the running request")
-        if event["result"] == "clean":
+        if event["result"] == "clean" and bool(row["is_draft"]):
+            next_state = "openclaw_clean_draft"
+            update_exact_head(connection, identity, state=next_state, rail="openclaw", review_request_id=event["request_id"], reviewer_actor=event["reviewer_actor"], blocker="ClawSweeper waits for ready-for-review state")
+        elif event["result"] == "clean":
             review_epoch = int(row["review_epoch"])
             payload = clawsweeper_action_payload(
                 config,
@@ -1527,7 +1550,18 @@ def process_internal_event(connection: sqlite3.Connection, config: dict[str, Any
             raise ContractError("ClawSweeper terminal does not match a dispatched exact-tuple action")
         if row["review_request_id"] and row["review_request_id"] != str(event["workflow_run_id"]):
             raise ContractError("ClawSweeper terminal workflow_run_id does not match the running request")
-        if event["result"] == "clean":
+        if event["result"] == "clean" and bool(row["is_draft"]):
+            next_state = "openclaw_clean_draft"
+            update_exact_head(
+                connection,
+                identity,
+                state=next_state,
+                rail="openclaw",
+                review_request_id=None,
+                reviewer_actor=event["reviewer_actor"],
+                blocker="ClawSweeper waits for ready-for-review state",
+            )
+        elif event["result"] == "clean":
             next_state = "ready_for_human_merge"
             update_exact_head(connection, identity, state=next_state, rail="clawsweeper", review_request_id=str(event["workflow_run_id"]), reviewer_actor=event["reviewer_actor"], blocker="human merge authority required")
         elif event["result"] == "findings":
@@ -2056,6 +2090,8 @@ def state_projection(row: dict[str, Any]) -> dict[str, Any]:
         openclaw, clawsweeper = "in_progress", "queued"
     elif state == "openclaw_failed":
         openclaw, clawsweeper = "failure", "skipped"
+    elif state == "openclaw_clean_draft":
+        openclaw, clawsweeper = "success", "skipped"
     elif state == "clawsweeper_queued":
         openclaw, clawsweeper = "success", "queued"
     elif state == "clawsweeper_running":

@@ -2,7 +2,7 @@
 import json
 import re
 
-SCHEMA = "review-conductor.target.v1"
+SCHEMA = "review-conductor.target.v2"
 MAX_BYTES = 16384
 
 def unique_object(pairs):
@@ -42,10 +42,10 @@ def validate_manifest(raw):
         raise ValueError("invalid CI workflow name")
     if not isinstance(ci["workflow_path"], str) or not re.fullmatch(r"\.github/workflows/[A-Za-z0-9_-][A-Za-z0-9_.-]*\.ya?ml", ci["workflow_path"]):
         raise ValueError("invalid CI workflow path")
-    exact(value["review"], ["quiet_seconds", "scope", "rails"], "review")
+    exact(value["review"], ["clawsweeper_requires_ready", "scope", "rails"], "review")
     review = value["review"]
-    if type(review["quiet_seconds"]) is not int or not 600 <= review["quiet_seconds"] <= 86400:
-        raise ValueError("quiet period must be 600..86400 seconds")
+    if review["clawsweeper_requires_ready"] is not True:
+        raise ValueError("ClawSweeper must require ready-for-review state")
     if review["scope"] != "comprehensive" or review["rails"] != ["openclaw", "clawsweeper"]:
         raise ValueError("ordered comprehensive review rails required")
     return value

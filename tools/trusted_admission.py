@@ -167,7 +167,7 @@ class AdmittedPolicy:
     repository_id: int
     commit: str
     sha256: str
-    quiet_seconds: int
+    clawsweeper_requires_ready: bool
     default_branch: str
     manifest_bytes: bytes
 
@@ -188,12 +188,12 @@ class AdmittedPolicy:
             raise AdmissionError("policy manifest bytes are not a valid manifest") from exc
         if manifest["repository"] != self.repository:
             _fail("policy manifest bytes name a different repository")
-        if type(self.quiet_seconds) is not int or not 600 <= self.quiet_seconds <= 86400:
-            _fail("policy quiet_seconds is outside the v1 contract")
+        if self.clawsweeper_requires_ready is not True:
+            _fail("policy must require ready state before ClawSweeper")
         if not isinstance(self.default_branch, str) or not self.default_branch:
             _fail("policy default_branch is required")
-        if self.quiet_seconds != manifest["review"]["quiet_seconds"]:
-            _fail("policy quiet_seconds contradicts the approved manifest bytes")
+        if self.clawsweeper_requires_ready != manifest["review"]["clawsweeper_requires_ready"]:
+            _fail("policy readiness rule contradicts the approved manifest bytes")
         if self.default_branch != manifest["default_branch"]:
             _fail("policy default_branch contradicts the approved manifest bytes")
 
@@ -239,7 +239,8 @@ def load_approved_policy(enrollment, commit, read_policy):
     if manifest["repository"] != enrollment.repository:
         _fail("approved policy names a different repository")
     return AdmittedPolicy(enrollment.repository, enrollment.repository_id, commit, digest,
-                          manifest["review"]["quiet_seconds"], manifest["default_branch"], raw)
+                          manifest["review"]["clawsweeper_requires_ready"],
+                          manifest["default_branch"], raw)
 
 
 @dataclass(frozen=True)

@@ -7,8 +7,8 @@
       "source_path": "tools/review_conductor.py",
       "destination_path": "tools/review_conductor.py",
       "source_sha256": "3915b5d15b9226b29c9e1fe6b74af71a08bb787c68e2e6bd8b63fef86924eda4",
-      "destination_sha256": "7a1a37a1d52c6ec92b7fc0ba8d0c5d5e7d39149483c04f54fc431ab8ef98af42",
-      "adaptation": "standalone admission hook plus a distinct recoverable pre-transport authority denial, optional per-command authority callback and isolated per-subprocess environment for multi-step OpenClaw dispatch; legacy callers remain unchanged"
+      "destination_sha256": "fa8416673015c5a27e50f8a9fd699931f19b5d6d89d628951e3e0fcff3390f64",
+      "adaptation": "standalone admission hook, head-state scheduling with immediate CI-to-OpenClaw processing and readiness-gated ClawSweeper dispatch, a distinct recoverable pre-transport authority denial, optional per-command authority callback and isolated per-subprocess environment for multi-step OpenClaw dispatch; legacy callers remain unchanged"
     },
     {
       "source_path": "tools/review_conductor_profiles.py",
@@ -21,8 +21,8 @@
       "source_path": "tools/review_conductor_runtime.py",
       "destination_path": "tools/review_conductor_runtime.py",
       "source_sha256": "22fff3925db126de0fc27e9c61be03cd710d24d9140342ff8367e9831e683d40",
-      "destination_sha256": "e91a9e9f1a8613a3df7b06cac24aee62cb000578bad32667ee3babc193311c6a",
-      "adaptation": "standalone policy-read/check adapter with profile-selected least privilege, immutable App and ClawSweeper maps, synchronized installation-token caching, unfenced policy-fetch token minting, injected signer/ingestor seams, header-aware transient and rate-limit classification plus two-/three-element artifact-response normalization, exact repository/PR/base/head/epoch fences before each current mutating GitHub or OpenClaw operation, recoverable pre-request authority denial and an allowlisted per-subprocess OpenClaw environment that never mutates the threaded service process environment"
+      "destination_sha256": "4088fdcc1feac8f1cdd8088ed68deb82ef35818db8f79b98f1e76e6163b9c149",
+      "adaptation": "standalone policy-read/check adapter with profile-selected least privilege, immutable App and ClawSweeper maps, synchronized installation-token caching, unfenced policy-fetch token minting, injected signer/ingestor seams, header-aware transient and rate-limit classification plus two-/three-element artifact-response normalization, exact repository/PR/base/head/epoch fences before each current mutating GitHub or OpenClaw operation, closed-head projection cleanup, recoverable pre-request authority denial and an allowlisted per-subprocess OpenClaw environment that never mutates the threaded service process environment"
     },
     {
       "source_path": "tools/review_conductor_userland.py",
@@ -63,8 +63,8 @@
       "source_path": "contracts/review-conductor/openclaw-smcbd-suite.json",
       "destination_path": "contracts/review-conductor/openclaw-smcbd-suite.json",
       "source_sha256": "7459a2be7e3348f2f81d231509d36e8573d81c62a3dbb9b01a2c3f3f897c1b48",
-      "destination_sha256": "7459a2be7e3348f2f81d231509d36e8573d81c62a3dbb9b01a2c3f3f897c1b48",
-      "adaptation": "byte-identical"
+      "destination_sha256": "07eec462a6cba49e92bef0f2fd06b4da10a9d5b0ebaa563d929aa9e1e6657ada",
+      "adaptation": "inactive SMCBD candidate migrated to head-state scheduling: CI and OpenClaw on every head, ClawSweeper gated on ready state, no fixed quiet period"
     },
     {
       "source_path": "tonight-lab/tests/test_review_conductor.py",
@@ -84,8 +84,8 @@
       "source_path": "tonight-lab/tests/test_review_conductor_profiles.py",
       "destination_path": "tests/test_review_conductor_profiles.py",
       "source_sha256": "b166648b7b0139b718d82ced0911d670475e0885d0aba20a7eb26f257f527462",
-      "destination_sha256": "bafad178ef7e5e4c0adb5c58f5a6141d0607fa1fa5131053cfaccab3877a6c88",
-      "adaptation": "test root and archived lane location; standalone SMCBD candidate App/installation/Contents-read pins remain inactive and regression checked"
+      "destination_sha256": "99db0d9f6d679114ba46bdae33490285687b61bd25bd6a10e34378e47cf74f84",
+      "adaptation": "test root and archived lane location; standalone SMCBD candidate App/installation/Contents-read pins remain inactive; head-state scheduling, draft/ready transitions, and in-flight ClawSweeper draft demotion are regression checked"
     },
     {
       "source_path": "tonight-lab/tests/test_review_conductor_userland.py",

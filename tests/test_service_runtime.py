@@ -429,12 +429,13 @@ class AdmissionIngressTests(unittest.TestCase):
         finally:
             connection.close()
         ready = self.fx.payload()
-        ready["action"] = "ready_for_review"
+        ready["action"] = "synchronize"
+        ready["pull_request"]["head"]["sha"] = "e" * 40
         ready["pull_request"]["updated_at"] = "2026-08-30T20:11:00Z"
-        receipt = self.fx.ingest("ready", ready, registry=promoted_registry)
-        self.assertEqual((receipt["result"], receipt["review_epoch"]), ("accepted", 1))
+        receipt = self.fx.ingest("new-head", ready, registry=promoted_registry)
+        self.assertEqual((receipt["result"], receipt["review_epoch"]), ("accepted", 0))
         self.assertEqual([(row["review_epoch"], row["policy_sha256"]) for row in self.fx.binding_rows()],
-                         [(0, hashlib.sha256(promoted[:-1]).hexdigest()), (1, hashlib.sha256(promoted).hexdigest())])
+                         [(0, hashlib.sha256(promoted[:-1]).hexdigest()), (0, hashlib.sha256(promoted).hexdigest())])
         service.require_current_bindings(self.fx.app_config(), promoted_registry)
 
     def test_registry_file_requires_same_user_mode_0600(self):
@@ -560,11 +561,12 @@ class AdmissionIngressTests(unittest.TestCase):
         finally:
             connection.close()
         ready = self.fx.payload()
-        ready["action"] = "ready_for_review"
+        ready["action"] = "synchronize"
+        ready["pull_request"]["head"]["sha"] = "e" * 40
         ready["pull_request"]["updated_at"] = "2026-08-30T20:11:00Z"
         self.assertEqual(self.fx.ingest("readmit", ready, registry=rotated_registry)["result"], "accepted")
         self.assertEqual([(row["review_epoch"], row["reviewer_openclaw"]) for row in self.fx.binding_rows()],
-                         [(0, REVIEWERS["openclaw"]), (1, "rotated-openclaw")])
+                         [(0, REVIEWERS["openclaw"]), (0, "rotated-openclaw")])
         service.require_current_bindings(self.fx.app_config(), rotated_registry)
 
     def test_profile_change_after_admission_invalidates_existing_bindings(self):
@@ -577,7 +579,7 @@ class AdmissionIngressTests(unittest.TestCase):
         # approves the same policy commit/hash: every policy-governed field change
         # blocks projection of the old binding.
         edits = {
-            "quiet_seconds": lambda c: c["review_policy"].__setitem__("quiet_seconds", 600),
+            "clawsweeper_requires_ready": lambda c: c["review_policy"].__setitem__("clawsweeper_requires_ready", False),
             "default_branch": lambda c: c.__setitem__("default_branch", "release"),
             "workflow_name": lambda c: c["ci"].__setitem__("workflow_name", "Other pipeline"),
             "workflow_path": lambda c: c["ci"].__setitem__("workflow_path", ".github/workflows/other.yml"),
@@ -595,11 +597,11 @@ class AdmissionIngressTests(unittest.TestCase):
         for label, edit in edits.items():
             changed = json.loads(original)
             edit(changed)
-            if label == "quiet_seconds":
+            if label == "clawsweeper_requires_ready":
                 # The engine pins 600 for generalized profiles; prove the digest itself
                 # is sensitive instead.
                 variant = json.loads(original)
-                variant["review_policy"]["quiet_seconds"] = 900
+                variant["review_policy"]["clawsweeper_requires_ready"] = False
                 self.assertNotEqual(service.profile_policy_digest(variant, self.fx.app_config()), digest)
                 continue
             self.fx.config_path.write_text(json.dumps(changed) + "\n")
@@ -2230,7 +2232,6 @@ class AdmissionIngressTests(unittest.TestCase):
     def test_admitted_policy_must_match_the_engine_profile(self):
         manifest = json.loads(self.fx.policy)
         variants = {
-            "quiet_seconds": lambda m: m["review"].__setitem__("quiet_seconds", 900),
             "default_branch": lambda m: m.__setitem__("default_branch", "release"),
             "workflow_name": lambda m: m["ci"].__setitem__("workflow_name", "Other pipeline"),
             "workflow_path": lambda m: m["ci"].__setitem__("workflow_path", ".github/workflows/other.yml"),
@@ -2412,6 +2413,14 @@ class EntrypointTests(unittest.TestCase):
 
         self.assertEqual(current_mask["value"], 0o022)
         self.assertEqual(transitions, [(0o022, 0o077), (0o077, 0o022)])
+
+    def test_service_and_maintenance_are_mutually_exclusive(self):
+        config = userland.load_config(self.profile)
+        registry = self.root / "registry.json"
+        with entrypoint.exclusive_service_lock(config, registry):
+            with self.assertRaises(service.ServiceError):
+                with entrypoint.exclusive_service_lock(config, registry):
+                    self.fail("a concurrent maintenance lock must not be acquired")
 
     def test_shipped_candidate_profile_is_refused_before_registry_or_credentials(self):
         missing_registry = self.root / "never-created.json"
