@@ -1,6 +1,6 @@
 {
   "schema": "review-conductor.candidate-manifest.v1",
-  "follow_up_of": "5f3fb5bf2515834d4e5f9e310b7d67d9f59a9c50",
+  "follow_up_of": "c0a36110ece21298471e41304385e35a8329d6a4",
   "base_sha": "9acb1ee3300490aa2f31ffd56b3999552834803b",
   "captured_date": "2026-09-13",
   "files": {
@@ -11,10 +11,10 @@
     "docs/migration.md": "df995c474d69161c297c6f05aabd7c36ed1a334cc383a3b175bbd39cf1343a07",
     "docs/provenance.json": "c45df6e125396c5a9b4e6bfcceba60dc478d7cb9f9a7a96bc697701e0b95c2b9",
     "docs/smcbd-pilot-handoff.md": "2006ba0840b0cea34c13b36dc26e20f047fee62fad9647bfbbd09316649d91de",
-    "tests/test_standalone_supervisor.py": "8d22ef40bc294eff28853b330f83b01024b19989a9702a5d4b6eda49186e2770",
+    "tests/test_standalone_supervisor.py": "3f11e86a86688fadedb657497e3bdda107b625641b438b2115af8ac6e28f117b",
     "tools/review_conductor.py": "55ead91af7d9ff9e0c22fc361fa6744e6ebff167dbae27ad80e4a8a81f3c9790",
     "tools/review_conductor_userland.py": "8466b98518083cbc6e884fd77747fbaa5bb74e7ec792aed591cd09594cc4b95a",
     "tools/service_entrypoint.py": "f16edf009734bca31ef37e0d7e63ed96d92281f1982a57099de43b0d9b0b95c0",
-    "tools/standalone_supervisor.py": "fc602f018b32ab379270eda287a5768b64715c86da653270804a9f0aabfcc32c"
+    "tools/standalone_supervisor.py": "580f0e0d4701b3220c337dbc2e45310f247200c27aa15785ae5d4aa7b61c6327"
   }
 }

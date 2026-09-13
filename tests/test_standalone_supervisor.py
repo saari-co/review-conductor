@@ -697,6 +697,22 @@ os._exit(0)
         self.assertIs(item.child, generation)
         self.assertEqual(item.generation, 0)
 
+    def test_group_signal_errors_use_fail_closed_supervisor_contract(self):
+        for failed_signal in (signal.SIGTERM, signal.SIGKILL):
+            with self.subTest(failed_signal=failed_signal):
+                generation = self.generation(FakeProcess())
+
+                def kill_group(_pid, signum):
+                    if signum == failed_signal:
+                        raise PermissionError(errno.EPERM, "synthetic signal denial")
+
+                with self.assertRaisesRegex(
+                    supervisor.SupervisorError, "could not be signaled"
+                ):
+                    supervisor.stop_service_process(
+                        generation, kill_group=kill_group, timeout=0
+                    )
+
     def test_failed_stop_keeps_control_socket_and_lock_until_retry(self):
         process = FakeProcess()
         attempts = []
@@ -1279,6 +1295,16 @@ class MutationTests(unittest.TestCase):
             '                kill_group(pgid, signal.SIGKILL)\n',
             '                pass\n',
             'test_exited_leader_does_not_leave_sigterm_ignoring_descendant',
+        ),
+        (
+            '        raise SupervisorError(\n            "standalone service process group could not be signaled"\n        ) from exc\n    deadline = time.monotonic() + timeout\n',
+            '        raise\n    deadline = time.monotonic() + timeout\n',
+            'test_group_signal_errors_use_fail_closed_supervisor_contract',
+        ),
+        (
+            '                raise SupervisorError(\n                    "standalone service process group could not be signaled"\n                ) from exc\n            kill_deadline = time.monotonic() + timeout\n',
+            '                raise\n            kill_deadline = time.monotonic() + timeout\n',
+            'test_group_signal_errors_use_fail_closed_supervisor_contract',
         ),
         (
             '    if not leader_exited(generation):\n        return None\n',

@@ -344,7 +344,9 @@ def stop_service_process(
             raise SupervisorError(
                 "standalone service generation escaped its process group"
             ) from exc
-        raise
+        raise SupervisorError(
+            "standalone service process group could not be signaled"
+        ) from exc
     deadline = time.monotonic() + timeout
     while not generation_drained(generation):
         if time.monotonic() >= deadline:
@@ -357,7 +359,9 @@ def stop_service_process(
                     raise SupervisorError(
                         "standalone service generation escaped its process group"
                     ) from exc
-                raise
+                raise SupervisorError(
+                    "standalone service process group could not be signaled"
+                ) from exc
             kill_deadline = time.monotonic() + timeout
             while not generation_drained(generation):
                 if time.monotonic() >= kill_deadline:
