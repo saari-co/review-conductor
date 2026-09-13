@@ -33,13 +33,16 @@ before lifecycle mutation. The service is not automatically restarted after a
 crash: health reports `failed` until an explicit restart. Startup failure,
 normal stop and exceptional exit remove the socket, close descriptors and bound
 termination of the service-owned process group independently of leader state.
-Each generation inherits a distinct lifetime descriptor alongside its credential
-descriptors. The supervisor retains its read end, observes leader exit without
-reaping while the generation remains open when the host exposes `waitid`, and
-otherwise defers that status until the generation drains. It signals the numeric PGID only
-while a credential-bearing holder keeps that identity allocated. Descriptor EOF
-precedes leader reap, and no numeric group probe or signal follows identity
-release. Missing, escaped or undrained generations fail closed.
+Each generation inherits distinct leader and lifetime descriptors alongside its
+credential descriptors. The entrypoint makes the leader descriptor
+close-on-exec, so the supervisor observes leader exit without reaping on every
+supported host, including macOS without `waitid`. Every direct adapter command
+uses the shared generation-bound runner, which preserves the generation
+descriptor and selector through `close_fds`. The supervisor signals the numeric
+PGID only while the unreaped leader and generation descriptor retain that
+identity. Generation EOF precedes leader reap, and no numeric group probe or
+signal follows identity release. Missing, escaped or undrained generations fail
+closed.
 
 The entrypoint compares the supervisor's canonical normalized-profile digest to
 its one loaded configuration before registry or state access. Normal and
@@ -50,7 +53,7 @@ connection failures are not reported as stopped while the lock is held.
 
 ## Direct tests and mutants
 
-The focused suite passed 30 direct tests. It exercised:
+The focused suite passed 32 direct tests. It exercised:
 
 - maximum-size descriptor transport through a real inherited `/dev/fd`
   consumer before any service reader;
@@ -91,8 +94,12 @@ The focused suite passed 30 direct tests. It exercised:
 - exact normalized-profile verification before registry or state access; and
 - retained lock/control ownership when unexpected loop failure and shutdown
   failure occur together.
+- portable crash reporting through a close-on-exec leader descriptor without
+  reaping the process-group leader; and
+- real adapter subprocess inheritance of the generation descriptor through an
+  otherwise allowlisted environment and default `close_fds`.
 
-Thirty-one disposable-copy mutants were killed by one named test each:
+Thirty-five disposable-copy mutants were killed by one named test each:
 
 1. omit credential descriptors from `pass_fds`;
 2. omit the generation descriptor from `pass_fds`;
@@ -126,6 +133,10 @@ Thirty-one disposable-copy mutants were killed by one named test each:
 30. reap the leader on a host without non-reaping `waitid` support while its
     generation remains open; and
 31. abort startup when a status probe briefly acquires the just-created lock.
+32. omit the leader descriptor from `pass_fds`;
+33. let adapter execs inherit the leader-only descriptor;
+34. ignore leader-descriptor EOF on a host without `waitid`; and
+35. omit the generation descriptor from the shared adapter-command boundary.
 
 Each mutant ran with a bounded timeout and required nonzero status, `Ran 1 test`
 and the intended `FAIL` or `ERROR` name.
@@ -135,7 +146,7 @@ and the intended `FAIL` or `ERROR` name.
 Locally exercised interpreter: CPython 3.14.6 on macOS.
 
 - `make check` — PASS, including all legacy suites, 72 service-runtime tests,
-  9 legacy launcher tests, 30 standalone-supervisor tests and all mutation
+  9 legacy launcher tests, 32 standalone-supervisor tests and all mutation
   harnesses.
 - `make build` — PASS.
 - `python3 -m compileall -q tools tests scripts` — PASS.
@@ -215,3 +226,11 @@ socket release when an unexpected loop failure coincides with failed cleanup.
 The generation-lifetime descriptor, entrypoint profile-digest gate and retained
 exceptional-cleanup loop repair those exact invariants. No additional Copilot
 review is requested by this repair task.
+
+Copilot review `5192283782` on `c7bd1a3140acde9a146b459af8754b76c0ae54c9`
+found that macOS could report an exited leader as running while descendants
+held the generation descriptor, and that direct adapter subprocesses using
+`close_fds` could escape generation drainage. A separate leader-only
+close-on-exec descriptor now reports exit without reaping on every supported
+host. All active adapter subprocess boundaries use one generation-preserving
+runner, with direct tests and precise mutants for both invariants.

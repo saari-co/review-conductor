@@ -648,7 +648,8 @@ def collect_openclaw_terminals(
             request_id,
         ]
         try:
-            result = runner(
+            result = core.run_generation_bound(
+                runner,
                 command,
                 cwd=config["source_root"],
                 text=True,
@@ -1346,7 +1347,8 @@ def hydrate_exact_pr_head(
 
     def git(*arguments: str, timeout: int = 20) -> subprocess.CompletedProcess[str]:
         try:
-            result = runner(
+            result = core.run_generation_bound(
+                runner,
                 checkout_git_command(checkout, *arguments),
                 cwd="/",
                 env=checkout_git_environment(),
@@ -1836,7 +1838,8 @@ class OpenClawNotifier:
 
     def send(self, channel: str, message: str) -> None:
         try:
-            result = self.runner(
+            result = core.run_generation_bound(
+                self.runner,
                 self.command(channel, message),
                 text=True,
                 stdout=subprocess.PIPE,

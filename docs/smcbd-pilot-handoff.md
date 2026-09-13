@@ -115,9 +115,12 @@ supplying only the non-secret profile and registry paths plus fixed lifecycle
 verbs as arguments. It binds local health/stop/restart control to the complete
 validated profile, registry path, tenant roots and loopback port; a crashed
 service remains failed pending explicit restart. Explicit stop/restart also
-holds an inherited generation descriptor while signaling the owned service
-process group independently of leader exit, then reaps only after every
-credential-bearing inheritor closes that descriptor. The entrypoint verifies
+holds inherited leader and generation descriptors while signaling the owned
+service process group independently of leader exit, then reaps only after every
+generation holder closes its descriptor. The close-on-exec leader descriptor
+reports crashes without reaping on every supported host, and the shared adapter
+command boundary preserves the generation descriptor through `close_fds`. The
+entrypoint verifies
 the supervisor's normalized-profile digest before registry or state access. Restart
 and stop control wait longer than that shutdown bound. A failed shutdown
 retains the supervisor lock/control boundary even after an unexpected loop

@@ -23,6 +23,7 @@ INTERNAL_EVENT_SCHEMA = "smoky.review-conductor.event.v1"
 STATUS_SCHEMA = "smoky.review-conductor.status.v1"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
+GENERATION_FD_ENV = "REVIEW_CONDUCTOR_GENERATION_FD"
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 CLASSIFICATIONS = {
     "required_fix",
@@ -46,6 +47,53 @@ INTERNAL_EVENT_FIELDS = {
         set(),
     ),
 }
+
+
+def generation_pass_fds(
+    environment: dict[str, str] | os._Environ[str] | None = None,
+) -> tuple[int, ...]:
+    """Keep a supervised generation alive across every direct adapter subprocess."""
+    source = os.environ if environment is None else environment
+    raw = source.get(GENERATION_FD_ENV)
+    if raw is None:
+        return ()
+    if not raw.isascii() or not raw.isdigit() or int(raw) < 3:
+        raise ContractError("service generation descriptor is unavailable")
+    descriptor = int(raw)
+    try:
+        os.fstat(descriptor)
+    except OSError as exc:
+        raise ContractError("service generation descriptor is unavailable") from exc
+    return (descriptor,)
+
+
+def preserve_generation_environment(
+    child: dict[str, str],
+    source: dict[str, str] | os._Environ[str] | None = None,
+) -> dict[str, str]:
+    """Copy only the generation selector into an otherwise allowlisted environment."""
+    source_environment = os.environ if source is None else source
+    descriptors = generation_pass_fds(source_environment)
+    if not descriptors:
+        return child
+    preserved = dict(child)
+    preserved[GENERATION_FD_ENV] = str(descriptors[0])
+    return preserved
+
+
+def run_generation_bound(
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+    command: list[str],
+    **kwargs: Any,
+) -> subprocess.CompletedProcess[str]:
+    """Run one adapter command without letting close_fds escape supervision."""
+    inherited = generation_pass_fds()
+    if kwargs.get("env") is not None:
+        kwargs["env"] = preserve_generation_environment(kwargs["env"])
+    kwargs["pass_fds"] = inherited
+    return runner(command, **kwargs)
+
+
 TERMINAL_RESULTS = {"clean", "findings", "failed", "human_gate"}
 
 
@@ -1740,7 +1788,8 @@ def run_command(
     environment: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     try:
-        result = subprocess.run(
+        result = run_generation_bound(
+            subprocess.run,
             command,
             text=True,
             stdout=subprocess.PIPE,

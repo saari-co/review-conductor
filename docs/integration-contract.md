@@ -48,11 +48,15 @@ and GitHub App credentials move only through explicitly inherited descriptors.
 The foreground supervisor exposes identity-bound local health/stop/restart
 control, retains anonymous descriptor copies for explicit restart, and leaves a
 crashed service failed until that restart is requested. The service runs in an
-owned process session and inherits a dedicated generation descriptor alongside
-the credential descriptors. Explicit stop/restart keeps that descriptor as a
-race-free generation identity, signals the process group, and reaps the leader
-only after every inheritor has closed it; no numeric PGID is probed after identity
-release. The entrypoint verifies the supervisor's digest of the complete
+owned process session and inherits dedicated leader and generation descriptors
+alongside the credential descriptors. The entrypoint makes the leader descriptor
+close-on-exec, while every direct adapter command uses one authoritative wrapper
+that explicitly preserves the generation descriptor and selector through
+`close_fds`. Explicit stop/restart keeps the unreaped leader and generation
+descriptor as race-free identities, signals the process group, and reaps the
+leader only after every inheritor has closed the generation descriptor; no
+numeric PGID is probed after identity release. The entrypoint verifies the
+supervisor's digest of the complete
 normalized profile before registry or state access. Restart and stop control
 wait longer than the shutdown bound; failed normal or exceptional shutdown
 retains the active supervisor lock/control boundary, and startup connection

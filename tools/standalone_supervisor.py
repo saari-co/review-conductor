@@ -34,6 +34,7 @@ CONTROL_REQUEST_SECONDS = 2
 SHUTDOWN_CONTROL_SECONDS = GROUP_SHUTDOWN_SECONDS * 2 + CONTROL_REQUEST_SECONDS
 PROFILE_DIGEST_ENV = "REVIEW_CONDUCTOR_EXPECTED_PROFILE_SHA256"
 GENERATION_FD_ENV = "REVIEW_CONDUCTOR_GENERATION_FD"
+LEADER_FD_ENV = "REVIEW_CONDUCTOR_LEADER_FD"
 
 
 class SupervisorError(core.ContractError):
@@ -141,7 +142,10 @@ def prepare_credentials(
 
 
 def child_environment(
-    config: dict[str, Any], credentials: tuple[int, int], generation_fd: int
+    config: dict[str, Any],
+    credentials: tuple[int, int],
+    generation_fd: int,
+    leader_fd: int,
 ) -> dict[str, str]:
     environment = legacy_launcher.clean_environment(config)
     environment["PYTHONUNBUFFERED"] = "1"
@@ -151,6 +155,7 @@ def child_environment(
         environment[config["credentials"][key]] = str(descriptor)
     environment[PROFILE_DIGEST_ENV] = profile_config_digest(config)
     environment[GENERATION_FD_ENV] = str(generation_fd)
+    environment[LEADER_FD_ENV] = str(leader_fd)
     for name in (
         config["notifications"]["discord_target_env"],
         config["notifications"]["signal_target_env"],
@@ -165,9 +170,10 @@ def child_environment(
 class ServiceGeneration:
     """A service leader plus a descriptor retained by credential-bearing forks."""
 
-    def __init__(self, leader: Any, lifetime_fd: int) -> None:
+    def __init__(self, leader: Any, lifetime_fd: int, leader_fd: int) -> None:
         self.leader = leader
         self.lifetime_fd = lifetime_fd
+        self.leader_fd = leader_fd
 
     @property
     def pid(self) -> int:
@@ -188,10 +194,29 @@ def generation_drained(generation: ServiceGeneration) -> bool:
     return True
 
 
+def leader_exited(generation: ServiceGeneration) -> bool:
+    """Observe leader exit portably without reaping its process-group identity."""
+    if generation.leader.returncode is not None:
+        return True
+    try:
+        readable, _, _ = select.select([generation.leader_fd], [], [], 0)
+        if not readable:
+            return False
+        value = os.read(generation.leader_fd, 1)
+    except OSError as exc:
+        raise SupervisorError("standalone service leader handle is unavailable") from exc
+    if value:
+        raise SupervisorError("standalone service leader handle was corrupted")
+    return True
+
+
 def _close_generation(generation: ServiceGeneration) -> None:
     if generation.lifetime_fd >= 0:
         _close_descriptor(generation.lifetime_fd)
         generation.lifetime_fd = -1
+    if generation.leader_fd >= 0:
+        _close_descriptor(generation.leader_fd)
+        generation.leader_fd = -1
 
 
 def spawn_service(
@@ -218,24 +243,30 @@ def spawn_service(
         "serve",
     ]
     lifetime_read, lifetime_write = os.pipe()
+    leader_read, leader_write = os.pipe()
     os.set_blocking(lifetime_read, False)
+    os.set_blocking(leader_read, False)
     try:
         leader = popen(
             command,
             cwd=str(ROOT),
-            env=child_environment(config, credentials, lifetime_write),
-            pass_fds=(*credentials, lifetime_write),
+            env=child_environment(
+                config, credentials, lifetime_write, leader_write
+            ),
+            pass_fds=(*credentials, lifetime_write, leader_write),
             stdin=subprocess.DEVNULL,
             start_new_session=True,
         )
     except BaseException as exc:
         _close_descriptor(lifetime_read)
+        _close_descriptor(leader_read)
         if isinstance(exc, OSError):
             raise SupervisorError("standalone service could not be started") from exc
         raise
     finally:
         _close_descriptor(lifetime_write)
-    return ServiceGeneration(leader, lifetime_read)
+        _close_descriptor(leader_write)
+    return ServiceGeneration(leader, lifetime_read, leader_read)
 
 
 def _missing_process_group(exc: BaseException) -> bool:
@@ -260,13 +291,12 @@ def leader_returncode(generation: ServiceGeneration) -> int | None:
     """Observe leader exit without reaping while its generation is still open."""
     if generation.leader.returncode is not None:
         return generation.leader.returncode
-    if generation_drained(generation):
-        return generation.leader.poll()
+    if not leader_exited(generation):
+        return None
     waitid = getattr(os, "waitid", None)
     if waitid is None:
-        # Darwin's Python does not expose waitid(). Reaping with poll()/waitpid()
-        # while descendants retain the generation handle would permit PID/PGID
-        # reuse before shutdown, so defer the status until the generation drains.
+        # The leader handle already proves exit. Preserve the unreaped leader so
+        # its numeric process-group identity cannot be reused before shutdown.
         return None
     try:
         result = waitid(
@@ -358,7 +388,7 @@ class Supervisor:
         self.stopping = False
 
     def start_child(self) -> None:
-        if self.child is not None and leader_returncode(self.child) is None:
+        if self.child is not None:
             raise SupervisorError("standalone service is already running")
         self.child = spawn_service(
             self.config,
@@ -381,14 +411,15 @@ class Supervisor:
 
     def snapshot(self) -> dict[str, Any]:
         returncode = None if self.child is None else leader_returncode(self.child)
+        exited = self.child is not None and leader_exited(self.child)
         if self.stopping:
             status = "stopping"
         elif self.child is None:
             status = "failed"
-        elif returncode is None:
-            status = "running"
-        else:
+        elif exited:
             status = "failed"
+        else:
+            status = "running"
         return {
             "schema": "review-conductor.standalone-supervisor-health.v1",
             "status": status,
@@ -400,6 +431,7 @@ class Supervisor:
             "supervisor_pid": os.getpid(),
             "service_pid": None if self.child is None else self.child.pid,
             "service_returncode": returncode,
+            "service_leader_exited": exited,
             "generation": self.generation,
             "automatic_restart": False,
         }

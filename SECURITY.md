@@ -101,13 +101,17 @@ a tunnel, install a service unit or activate the profile. It closes the incoming
 descriptors after creating verified anonymous copies, rewinds those copies before
 each explicit child start, and closes them plus the socket on every exit path.
 The service starts in its own process session; stop and restart signal that owned
-process group independently of whether the leader has already exited. A distinct
-inherited lifetime descriptor remains open in the service and any fork that also
-retains inherited credentials. Shutdown holds that race-free generation handle,
-sends SIGTERM and then bounded SIGKILL, and reaps the leader only after the
-descriptor reaches EOF; it never probes or signals a numeric PGID after releasing
-that identity. A missing, escaped or undrained generation fails closed instead of
-starting a new one. Before registry or state access, the entrypoint also requires
+process group independently of whether the leader has already exited. Distinct
+inherited descriptors track the leader and the complete service generation. The
+leader descriptor is made close-on-exec by the entrypoint, so every supported
+host can report leader exit without reaping and releasing its process-group
+identity. Every direct adapter subprocess is launched through the generation
+boundary with the generation descriptor explicitly preserved despite
+`close_fds`. Shutdown sends SIGTERM and then bounded SIGKILL, and reaps the
+leader only after the generation descriptor reaches EOF; it never probes or
+signals a numeric PGID after releasing that identity. A missing, escaped or
+undrained generation fails closed instead of starting a new one. Before registry
+or state access, the entrypoint also requires
 the normalized profile digest calculated by the supervisor to match its one
 loaded configuration, so a replaced profile cannot change the advertised tenant.
 The control socket is private from bind under a temporary restrictive umask and

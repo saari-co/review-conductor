@@ -1,17 +1,20 @@
 {
   "schema": "review-conductor.candidate-manifest.v1",
-  "follow_up_of": "335586a6bb5a9b5aa3ebbce7c4f2795f78bbe92e",
+  "follow_up_of": "c7bd1a3140acde9a146b459af8754b76c0ae54c9",
   "base_sha": "9acb1ee3300490aa2f31ffd56b3999552834803b",
   "captured_date": "2026-09-13",
   "files": {
     "Makefile": "26c6fb958b85890ece2fb1ec0fd2c2114a5b8437af4ea9c0396c34c2d2c7a7f7",
     "README.md": "c765d1d92a3e99dc5d6418d61e73af2e47f7decad22f489de0b1043a0c7930e7",
-    "SECURITY.md": "05daec24233cf2bd7c73c6bec63b7964812be1df6d177ec9e406657bef1cf95c",
-    "docs/integration-contract.md": "dc71922162c79098d5001a26c1c49d0a1beb5b5c917e40eb77e444b133163d7d",
+    "SECURITY.md": "cffdeb83e3f56bb24a66d09666bf6432f7a66c96c9ab1b2ce8c381501bffe7ec",
+    "docs/integration-contract.md": "97d1f90eb74239be14fa99406ce0aafaf7e7d7f4331c167b03df28b5598f0fd0",
     "docs/migration.md": "df995c474d69161c297c6f05aabd7c36ed1a334cc383a3b175bbd39cf1343a07",
-    "docs/smcbd-pilot-handoff.md": "efb7412f0371c8ba21a16080bf856e93b40aac2947f3ea496936d5ea23f55184",
-    "tests/test_standalone_supervisor.py": "1b0a3974e6d7185a8a36c566ebc3dac71e968f736e6726bc8d3ae0f7205f0320",
-    "tools/service_entrypoint.py": "6269b76ae2a2b3eaf51038b17a2ae92490922705b7044c2444b044e230d471a5",
-    "tools/standalone_supervisor.py": "64233ce69dd2c90185e10b161c03456c44464137965cfc0bfbbf81325839dfd3"
+    "docs/provenance.json": "c45df6e125396c5a9b4e6bfcceba60dc478d7cb9f9a7a96bc697701e0b95c2b9",
+    "docs/smcbd-pilot-handoff.md": "d18084bbea922f85c3b989815502fe436bf5bcbb1b21948fcfe77a8b957ea15d",
+    "tests/test_standalone_supervisor.py": "fe8f56fb1a0dc2454575f0fc1fdab7ae15add8f97964c522788ec71053760787",
+    "tools/review_conductor.py": "55ead91af7d9ff9e0c22fc361fa6744e6ebff167dbae27ad80e4a8a81f3c9790",
+    "tools/review_conductor_userland.py": "8466b98518083cbc6e884fd77747fbaa5bb74e7ec792aed591cd09594cc4b95a",
+    "tools/service_entrypoint.py": "f16edf009734bca31ef37e0d7e63ed96d92281f1982a57099de43b0d9b0b95c0",
+    "tools/standalone_supervisor.py": "9b854eff413ff61c330e9f59ef460857ec5469f2946c81f43a2d2a53ead220dd"
   }
 }

@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 REGISTRY_MODE = 0o600
 PROFILE_DIGEST_ENV = "REVIEW_CONDUCTOR_EXPECTED_PROFILE_SHA256"
 GENERATION_FD_ENV = "REVIEW_CONDUCTOR_GENERATION_FD"
+LEADER_FD_ENV = "REVIEW_CONDUCTOR_LEADER_FD"
 
 
 def profile_config_digest(config: dict) -> str:
@@ -39,8 +40,9 @@ def load_supervised_profile(profile_path: Path) -> dict:
     """Load exactly the profile configuration approved by the supervisor."""
     expected = os.environ.get(PROFILE_DIGEST_ENV)
     generation_raw = os.environ.get(GENERATION_FD_ENV)
+    leader_raw = os.environ.get(LEADER_FD_ENV)
     config = userland.load_config(profile_path)
-    if expected is None and generation_raw is None:
+    if expected is None and generation_raw is None and leader_raw is None:
         # Direct source qualification and maintenance callers have no supervisor
         # identity to compare. The standalone supervisor always supplies both.
         return config
@@ -62,6 +64,19 @@ def load_supervised_profile(profile_path: Path) -> dict:
         os.fstat(int(generation_raw))
     except OSError as exc:
         raise service.ServiceError("service generation descriptor is unavailable") from exc
+    if (
+        leader_raw is None
+        or not leader_raw.isascii()
+        or not leader_raw.isdigit()
+        or int(leader_raw) < 3
+    ):
+        raise service.ServiceError("service leader descriptor is unavailable")
+    try:
+        leader_fd = int(leader_raw)
+        os.fstat(leader_fd)
+        os.set_inheritable(leader_fd, False)
+    except OSError as exc:
+        raise service.ServiceError("service leader descriptor is unavailable") from exc
     actual = profile_config_digest(config)
     if not hmac.compare_digest(actual, expected):
         raise service.ServiceError("service profile changed after supervisor validation")
