@@ -282,6 +282,7 @@ def open_database(state_root: Path, repository: str | None = None) -> sqlite3.Co
           base_sha TEXT NOT NULL,
           head_sha TEXT NOT NULL,
           source_updated_at TEXT NOT NULL,
+          head_started_at TEXT NOT NULL,
           is_current INTEGER NOT NULL CHECK (is_current IN (0, 1)),
           state TEXT NOT NULL,
           author TEXT NOT NULL,
@@ -379,6 +380,13 @@ def open_database(state_root: Path, repository: str | None = None) -> sqlite3.Co
     if "source_updated_at" not in head_columns:
         connection.execute(
             "ALTER TABLE heads ADD COLUMN source_updated_at TEXT NOT NULL DEFAULT ''"
+        )
+    if "head_started_at" not in head_columns:
+        connection.execute(
+            "ALTER TABLE heads ADD COLUMN head_started_at TEXT NOT NULL DEFAULT ''"
+        )
+        connection.execute(
+            "UPDATE heads SET head_started_at = source_updated_at WHERE head_started_at = ''"
         )
     if "review_epoch" not in head_columns:
         connection.execute(
@@ -728,13 +736,14 @@ def begin_new_head(
     now = utc_now()
     connection.execute(
         """
-        INSERT INTO heads(repository, pr_number, base_sha, head_sha, source_updated_at, is_current, state, author,
+        INSERT INTO heads(repository, pr_number, base_sha, head_sha, source_updated_at, head_started_at, is_current, state, author,
                           mutation_owner, repair_cycle, review_epoch, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, 1, 'ci_running', ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, 1, 'ci_running', ?, ?, ?, ?, ?, ?)
         ON CONFLICT(repository, pr_number, base_sha, head_sha) DO UPDATE SET
           is_current = 1,
           state = 'ci_running',
           source_updated_at = excluded.source_updated_at,
+          head_started_at = excluded.head_started_at,
           author = excluded.author,
           mutation_owner = excluded.mutation_owner,
           repair_cycle = excluded.repair_cycle,
@@ -752,6 +761,7 @@ def begin_new_head(
             pr_number,
             base_sha,
             head_sha,
+            source_updated_at,
             source_updated_at,
             author,
             mutation_owner,
@@ -878,7 +888,13 @@ def process_pull_request(
     if original_action in {"ready_for_review", "converted_to_draft"} and previous is not None:
         identity = {k: event[k] for k in ("repository", "pr_number", "base_sha", "head_sha")}
         if previous["base_sha"] != event["base_sha"] or previous["head_sha"] != event["head_sha"]:
-            return _process_pull_request(connection, config, event_id, event, payload)
+            result = _process_pull_request(connection, config, event_id, event, payload)
+            if result["result"] in {"accepted", "duplicate"}:
+                connection.execute(
+                    "UPDATE heads SET is_draft=? WHERE repository=? AND pr_number=? AND base_sha=? AND head_sha=? AND is_current=1",
+                    (int(event["is_draft"]), *identity.values()),
+                )
+            return result
         is_draft = original_action == "converted_to_draft"
         connection.execute(
             "UPDATE heads SET is_draft=?, source_updated_at=?, updated_at=? WHERE repository=? AND pr_number=? AND base_sha=? AND head_sha=? AND is_current=1",
@@ -897,6 +913,23 @@ def process_pull_request(
         elif not is_draft and state == "openclaw_clean_draft":
             payload_action = clawsweeper_action_payload(config, event["pr_number"], event["base_sha"], event["head_sha"], int(previous["review_epoch"]))
             action_id, created = insert_action(connection, kind="clawsweeper.dispatch", payload=payload_action, review_epoch=int(previous["review_epoch"]), **identity)
+            if not created:
+                resumed = connection.execute(
+                    """
+                    UPDATE actions
+                    SET status='pending', last_error=NULL, claim_owner=NULL,
+                        claimed_at=NULL, lease_expires_at=NULL, updated_at=?
+                    WHERE action_id=? AND status='obsolete'
+                      AND last_error='pull request returned to draft'
+                    """,
+                    (utc_now(), action_id),
+                ).rowcount
+                if resumed != 1:
+                    action = connection.execute(
+                        "SELECT status FROM actions WHERE action_id=?", (action_id,)
+                    ).fetchone()
+                    if action is None or action["status"] not in {"pending", "dispatching", "dispatched"}:
+                        raise ContractError("ClawSweeper action cannot be resumed safely")
             state = "clawsweeper_queued"
             update_exact_head(connection, identity, state=state, rail="clawsweeper", blocker=None)
         insert_event(connection, event_id=event_id, kind=f"pull_request.{original_action}", stale=False, payload=payload, **identity)
@@ -1027,14 +1060,14 @@ def _process_pull_request(
             connection.execute(
                 """
                 UPDATE heads
-                SET state = 'ci_running', source_updated_at = ?, review_epoch = ?,
+                SET state = 'ci_running', source_updated_at = ?, head_started_at = ?, review_epoch = ?,
                     ci_conclusion = NULL, rail = NULL, review_request_id = NULL,
                     reviewer_actor = NULL, repair_owner = NULL, blocker = NULL,
                     updated_at = ?
                 WHERE repository = ? AND pr_number = ? AND base_sha = ? AND head_sha = ?
                   AND is_current = 1
                 """,
-                (event["source_updated_at"], next_epoch, utc_now(), *identity.values()),
+                (event["source_updated_at"], event["source_updated_at"], next_epoch, utc_now(), *identity.values()),
             )
             insert_event(
                 connection,
@@ -1172,7 +1205,7 @@ def process_workflow_run(
             "review_invoked": False,
             "merge_dispatched": False,
         }
-    if event["source_created_at"] <= row["source_updated_at"]:
+    if event["source_created_at"] <= row["head_started_at"]:
         insert_event(
             connection,
             event_id=event_id,
@@ -1439,6 +1472,15 @@ def continue_after_adjudication(
     rail: str,
 ) -> tuple[str, str | None, bool]:
     if rail == "openclaw":
+        if bool(row["is_draft"]):
+            update_exact_head(
+                connection,
+                identity,
+                state="openclaw_clean_draft",
+                rail="openclaw",
+                blocker="ClawSweeper waits for ready-for-review state",
+            )
+            return "openclaw_clean_draft", None, False
         review_epoch = int(row["review_epoch"])
         payload = clawsweeper_action_payload(
             config,
@@ -1456,6 +1498,15 @@ def continue_after_adjudication(
         )
         update_exact_head(connection, identity, state="clawsweeper_queued", rail="clawsweeper", blocker=None)
         return "clawsweeper_queued", action_id, created
+    if bool(row["is_draft"]):
+        update_exact_head(
+            connection,
+            identity,
+            state="openclaw_clean_draft",
+            rail="openclaw",
+            blocker="ClawSweeper waits for ready-for-review state",
+        )
+        return "openclaw_clean_draft", None, False
     update_exact_head(connection, identity, state="ready_for_human_merge", blocker="human merge authority required")
     return "ready_for_human_merge", None, False
 

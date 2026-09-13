@@ -873,6 +873,8 @@ def reconcile_superseded_projection(
             raise RuntimeError(
                 f"superseded {name} creation outcome is uncertain and requires reconciliation"
             )
+    if conclusion == "cancelled" and bool(row["ready_label_applied"]):
+        client.remove_ready_label(row["pr_number"])
     now = core.utc_now()
     connection.execute(
         """
@@ -913,17 +915,19 @@ def reconcile_projection(
                     connection, stale_projection, client, dry_run=dry_run
                 )
             )
-        closed = connection.execute(
-            """
+        closed_query = """
             SELECT projections.* FROM projections
             JOIN heads USING (repository, pr_number, base_sha, head_sha, review_epoch)
             WHERE heads.repository=? AND heads.is_current=1
               AND heads.state IN ('closed','closed_merged')
               AND COALESCE(projections.last_projected_state, '') != 'superseded'
-            ORDER BY heads.pr_number
-            """,
-            (core_config["repository"],),
-        ).fetchall()
+        """
+        closed_params: list[Any] = [core_config["repository"]]
+        if pr_number is not None:
+            closed_query += " AND heads.pr_number=?"
+            closed_params.append(pr_number)
+        closed_query += " ORDER BY heads.pr_number"
+        closed = connection.execute(closed_query, closed_params).fetchall()
         for closed_projection in closed:
             projected.append(
                 reconcile_superseded_projection(

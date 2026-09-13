@@ -176,6 +176,40 @@ class ProfilesTest(unittest.TestCase):
         self.assertEqual(conn.execute('SELECT status FROM actions WHERE action_id=?',(old['action_id'],)).fetchone()[0],'obsolete');conn.close()
         self.assertEqual(self.state(config)['state'],'openclaw_clean_draft')
         self.assertEqual(self.ingest(config,'pull_request','stale-ready',{**p,'action':'ready_for_review','pull_request':{**p['pull_request'],'draft':False}})['result'],'stale')
+        p['action']='ready_for_review';p['pull_request'].update(draft=False,updated_at='2026-08-29T20:24:00Z')
+        self.ingest(config,'pull_request','ready-again',p)
+        conn=core.open_database(Path(config['paths']['state_root']))
+        self.assertEqual(conn.execute('SELECT status FROM actions WHERE action_id=?',(old['action_id'],)).fetchone()[0],'pending');conn.close()
+        self.assertEqual(self.state(config)['state'],'clawsweeper_queued')
+
+    def test_status_transition_preserves_inflight_ci_and_first_draft_value(self):
+        config=self.config();p=self.payload(legacy.pr_payload(7));p['pull_request']['draft']=True
+        self.ingest(config,'pull_request','draft-open',p)
+        ci=self.payload(legacy.ci_payload(7,701))
+        p['action']='ready_for_review';p['pull_request'].update(draft=False,updated_at='2026-08-29T20:05:00Z')
+        self.ingest(config,'pull_request','ready-before-ci-finishes',p)
+        self.assertEqual(self.ingest(config,'workflow_run','inflight-ci',ci)['result'],'accepted')
+        self.assertEqual(self.state(config)['state'],'openclaw_queued')
+
+        next_head='9'*40
+        p=self.payload(legacy.pr_payload(7,next_head));p['action']='converted_to_draft'
+        p['pull_request'].update(draft=True,updated_at='2026-08-29T20:30:00Z')
+        self.ingest(config,'pull_request','first-event-draft-new-head',p)
+        self.assertTrue(self.state(config)['is_draft'])
+
+    def test_clean_adjudication_while_draft_never_dispatches_clawsweeper(self):
+        config=self.config();action=self.enqueue(config)
+        runtime.bridge_openclaw(config,self.terminal(config,action,review_clean=False,review_finding_count=1))
+        p=self.payload(legacy.pr_payload(7));p['action']='converted_to_draft';p['pull_request'].update(draft=True,updated_at='2026-08-29T20:23:00Z')
+        self.ingest(config,'pull_request','draft-during-adjudication',p)
+        event={'schema':core.INTERNAL_EVENT_SCHEMA,'event_id':'clean-adjudication-draft','type':'adjudication.completed','repository':REPO,'pr_number':7,'base_sha':BASE,'head_sha':HEAD,'review_epoch':action['review_epoch'],'request_id':json.loads(action['payload_json'])['queue_request_id'],'rail':'openclaw','classifications':['reject_false_positive'],'reviewer_actor':'fixture-suite-openclaw','proof_ref':'fixture-proof'}
+        outcome=core.ingest_internal_event(config_path=Path(config['core_config']),state_root=Path(config['paths']['state_root']),event_payload=event)
+        self.assertEqual(outcome['state'],'openclaw_clean_draft')
+        conn=core.open_database(Path(config['paths']['state_root']))
+        self.assertIsNone(conn.execute("SELECT 1 FROM actions WHERE kind='clawsweeper.dispatch'").fetchone());conn.close()
+
+    def test_closed_projection_filter_removes_only_target_ready_label(self):
+        adapters.test_closed_projection_filter_removes_only_target_ready_label(self.root)
 
     def test_clawsweeper_finishing_after_return_to_draft_cannot_clear_merge(self):
         config=self.config();self.enqueue(config)

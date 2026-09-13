@@ -3,8 +3,8 @@
   "base_sha": "c6df9bb1368766253fed35c243585142ffd5b392",
   "captured_date": "2026-09-13",
   "files": {
-    "tools/review_conductor.py": "fa8416673015c5a27e50f8a9fd699931f19b5d6d89d628951e3e0fcff3390f64",
-    "tools/review_conductor_runtime.py": "4088fdcc1feac8f1cdd8088ed68deb82ef35818db8f79b98f1e76e6163b9c149",
+    "tools/review_conductor.py": "0c03da5cb795f93d52d69659526d7152cfe844a31719b07aea2cd57d6a08f0e5",
+    "tools/review_conductor_runtime.py": "9d80c8135d21a7d057b51dc6245413fa3958bf511a33a6a6169d6ce87c014e01",
     "tools/service_entrypoint.py": "5e61c82cdc1319435616540a2d0fab3327ee20878060fb8e91a8afe0537e16f7",
     "tools/service_runtime.py": "4dfcce62c03a3618c5d89a6494123252faf3746b797299023702b9cd3efcf763",
     "tools/target_manifest.py": "23a09e5a7e9fa01532479bb0fdc00b507139cbff70403eeb4c8bc3d4e0f0aa4c",

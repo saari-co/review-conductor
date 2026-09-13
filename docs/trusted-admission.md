@@ -123,7 +123,8 @@ SQLite binding persistence. Only the accepted `pull_request` delivery that
 established a head binds it; `workflow_run` deliveries and closed/duplicate
 pull-request deliveries never create bindings. One exact tuple keeps exactly one
 binding, so a promoted policy applies only to a newly admitted head or review
-epoch (for example `ready_for_review` or `reopened`), and the binding table
+epoch (for example a new head or `reopened`). A same-head `ready_for_review`
+transition preserves the existing epoch and binding, and the binding table
 refuses a conflicting rebinding outright. Before binding, the admitted manifest
 must agree with the engine profile's repository, default branch, CI workflow,
 readiness-gated ClawSweeper policy and merge policy. Each binding records the App, installation,

@@ -73,6 +73,9 @@ class ScaffoldTests(unittest.TestCase):
             self.assertEqual(main(["validate-manifest", "oversized.json"]), 2)
 
     def test_examples_and_nonactivating_cli(self):
+        schema = json.loads((ROOT / "contracts/target-manifest.schema.json").read_text())
+        self.assertEqual(schema["title"], "Review Conductor repository requirements v2")
+        self.assertEqual(schema["properties"]["schema"]["const"], "review-conductor.target.v2")
         for path in sorted((ROOT / "examples").glob("*.json")):
             self.assertEqual(validate_manifest(path.read_bytes())["merge_policy"], "human_only")
             result = subprocess.run([sys.executable, str(ROOT / "bin/review-conductor"),

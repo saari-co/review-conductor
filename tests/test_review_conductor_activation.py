@@ -1002,6 +1002,37 @@ def test_projection_terminalizes_superseded_heads_and_epochs(root: Path) -> None
         connection.close()
 
 
+def test_closed_projection_filter_removes_only_target_ready_label(root: Path) -> None:
+    _, config = fixture_config(root / "closed-filter")
+    github = FakeGitHub(label_present=True)
+    for pr, head in ((61, "6" * 40), (62, "7" * 40)):
+        assert ingress(config, "pull_request", f"open-{pr}", pr_payload(pr, head))[0] == 202
+        runtime.reconcile_projection(config, github, pr_number=pr)
+        connection = core.open_database(Path(config["paths"]["state_root"]))
+        try:
+            connection.execute(
+                "UPDATE projections SET ready_label_applied=1 WHERE pr_number=?", (pr,)
+            )
+            connection.execute(
+                "UPDATE heads SET state='closed' WHERE pr_number=? AND is_current=1", (pr,)
+            )
+            connection.commit()
+        finally:
+            connection.close()
+    github.calls.clear()
+    runtime.reconcile_projection(config, github, pr_number=61)
+    removals = [call for call in github.calls if call[0] == "remove_label"]
+    assert removals == [("remove_label", 61, runtime.READY_LABEL)]
+    connection = core.open_database(Path(config["paths"]["state_root"]))
+    try:
+        rows = connection.execute(
+            "SELECT pr_number, ready_label_applied FROM projections WHERE pr_number IN (61,62) ORDER BY pr_number"
+        ).fetchall()
+        assert [(row["pr_number"], row["ready_label_applied"]) for row in rows] == [(61, 0), (62, 1)]
+    finally:
+        connection.close()
+
+
 def test_v1_config_upgrade_and_failed_projection_compatibility(root: Path) -> None:
     legacy = json.loads(CORE_CONFIG.read_text(encoding="utf-8"))
     legacy["openclaw"].pop("transport")

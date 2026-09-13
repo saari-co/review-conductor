@@ -598,8 +598,8 @@ class AdmissionIngressTests(unittest.TestCase):
             changed = json.loads(original)
             edit(changed)
             if label == "clawsweeper_requires_ready":
-                # The engine pins 600 for generalized profiles; prove the digest itself
-                # is sensitive instead.
+                # The engine requires readiness-gated ClawSweeper dispatch; prove
+                # the digest itself is sensitive to an invalid profile value.
                 variant = json.loads(original)
                 variant["review_policy"]["clawsweeper_requires_ready"] = False
                 self.assertNotEqual(service.profile_policy_digest(variant, self.fx.app_config()), digest)
@@ -3244,6 +3244,34 @@ MUTANTS = [
         "    except (core.ContractError, OSError) as exc:\n",
         "EntrypointTests.test_maintenance_sqlite_failure_is_a_controlled_service_error",
     ),
+    (
+        "invalidate in-flight CI on a same-head status transition",
+        "tools/review_conductor.py",
+        '    if event["source_created_at"] <= row["head_started_at"]:\n',
+        '    if event["source_created_at"] <= row["source_updated_at"]:\n',
+        "test_review_conductor_profiles.ProfilesTest.test_status_transition_preserves_inflight_ci_and_first_draft_value",
+    ),
+    (
+        "leave a draft-obsoleted ClawSweeper action inert after returning ready",
+        "tools/review_conductor.py",
+        "                    SET status='pending', last_error=NULL, claim_owner=NULL,\n",
+        "                    SET status='obsolete', last_error=NULL, claim_owner=NULL,\n",
+        "test_review_conductor_profiles.ProfilesTest.test_draft_runs_openclaw_and_ready_enables_clawsweeper_without_new_epoch",
+    ),
+    (
+        "dispatch ClawSweeper after clean OpenClaw adjudication while draft",
+        "tools/review_conductor.py",
+        '    if rail == "openclaw":\n        if bool(row["is_draft"]):\n',
+        '    if rail == "openclaw":\n        if False:\n',
+        "test_review_conductor_profiles.ProfilesTest.test_clean_adjudication_while_draft_never_dispatches_clawsweeper",
+    ),
+    (
+        "retain a ready label when closing a projected pull request",
+        "tools/review_conductor_runtime.py",
+        '    if conclusion == "cancelled" and bool(row["ready_label_applied"]):\n        client.remove_ready_label(row["pr_number"])\n',
+        '    if False:\n        client.remove_ready_label(row["pr_number"])\n',
+        "test_review_conductor_profiles.ProfilesTest.test_closed_projection_filter_removes_only_target_ready_label",
+    ),
 ]
 
 
@@ -3262,8 +3290,9 @@ class MutationTests(unittest.TestCase):
                     self.assertEqual(source.count(old), 1, f"mutant anchor drifted: {label}")
                     target.write_text(source.replace(old, new))
                     try:
+                        target_id = test_id if test_id.startswith("test_") else f"test_service_runtime.{test_id}"
                         completed = subprocess.run(
-                            [sys.executable, "-m", "unittest", "-q", f"test_service_runtime.{test_id}"],
+                            [sys.executable, "-m", "unittest", "-q", target_id],
                             cwd=copy_root / "tests", capture_output=True, text=True, timeout=180,
                             env={"PATH": "/usr/bin:/bin", "HOME": temp, "PYTHONDONTWRITEBYTECODE": "1"},
                         )

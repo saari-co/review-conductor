@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/saari-co/review-conductor/blob/main/contracts/target-manifest.schema.json",
-  "title": "Review Conductor repository requirements v1",
+  "title": "Review Conductor repository requirements v2",
   "$comment": "Wire format is UTF-8 JSON, at most 16384 bytes, no duplicate keys. Validation does not enroll a target.",
   "type": "object",
   "additionalProperties": false,
@@ -15,7 +15,7 @@
   ],
   "properties": {
     "schema": {
-      "const": "review-conductor.target.v1"
+      "const": "review-conductor.target.v2"
     },
     "repository": {
       "type": "string",
