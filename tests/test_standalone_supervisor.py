@@ -379,9 +379,26 @@ os.fstat(generation)
         observed = type(
             "WaitResult", (), {"si_code": os.CLD_EXITED, "si_status": 7}
         )()
-        with patch.object(supervisor.os, "waitid", return_value=observed):
+        with patch.object(
+            supervisor.os, "waitid", return_value=observed, create=True
+        ):
             self.assertEqual(supervisor.leader_returncode(generation), 7)
         self.assertFalse(leader.reaped)
+
+    def test_status_without_waitid_defers_reap_until_generation_drains(self):
+        class ReapingLeader(FakeProcess):
+            def poll(self):
+                self.reaped = True
+                return 7
+
+        leader = ReapingLeader()
+        generation = self.generation(leader)
+        with patch.object(supervisor.os, "waitid", None, create=True):
+            self.assertIsNone(supervisor.leader_returncode(generation))
+        self.assertFalse(leader.reaped)
+        self.drain_generation(generation)
+        self.assertEqual(supervisor.leader_returncode(generation), 7)
+        self.assertTrue(leader.reaped)
 
     def test_crash_stays_failed_until_explicit_restart(self):
         processes = []
@@ -1080,6 +1097,11 @@ class MutationTests(unittest.TestCase):
             '    if generation_drained(generation):\n        return generation.leader.poll()\n',
             '    return generation.leader.poll()\n',
             'test_open_generation_status_does_not_reap_leader',
+        ),
+        (
+            '    if waitid is None:\n        # Darwin\'s Python does not expose waitid(). Reaping with poll()/waitpid()\n        # while descendants retain the generation handle would permit PID/PGID\n        # reuse before shutdown, so defer the status until the generation drains.\n        return None\n',
+            '    if waitid is None:\n        return generation.leader.poll()\n',
+            'test_status_without_waitid_defers_reap_until_generation_drains',
         ),
         (
             '                    raise SupervisorError(\n                        "standalone service generation did not terminate"\n                    )\n',

@@ -262,8 +262,14 @@ def leader_returncode(generation: ServiceGeneration) -> int | None:
         return generation.leader.returncode
     if generation_drained(generation):
         return generation.leader.poll()
+    waitid = getattr(os, "waitid", None)
+    if waitid is None:
+        # Darwin's Python does not expose waitid(). Reaping with poll()/waitpid()
+        # while descendants retain the generation handle would permit PID/PGID
+        # reuse before shutdown, so defer the status until the generation drains.
+        return None
     try:
-        result = os.waitid(
+        result = waitid(
             os.P_PID,
             generation.pid,
             os.WEXITED | os.WNOHANG | os.WNOWAIT,

@@ -35,7 +35,8 @@ normal stop and exceptional exit remove the socket, close descriptors and bound
 termination of the service-owned process group independently of leader state.
 Each generation inherits a distinct lifetime descriptor alongside its credential
 descriptors. The supervisor retains its read end, observes leader exit without
-reaping while the generation remains open, and signals the numeric PGID only
+reaping while the generation remains open when the host exposes `waitid`, and
+otherwise defers that status until the generation drains. It signals the numeric PGID only
 while a credential-bearing holder keeps that identity allocated. Descriptor EOF
 precedes leader reap, and no numeric group probe or signal follows identity
 release. Missing, escaped or undrained generations fail closed.
@@ -49,7 +50,7 @@ connection failures are not reported as stopped while the lock is held.
 
 ## Direct tests and mutants
 
-The focused suite passed 28 direct tests. It exercised:
+The focused suite passed 29 direct tests. It exercised:
 
 - maximum-size descriptor transport through a real inherited `/dev/fd`
   consumer before any service reader;
@@ -84,12 +85,13 @@ The focused suite passed 28 direct tests. It exercised:
 - a race-free generation descriptor retained through leader exit and closed only
   after credential-bearing descendants exit, with no numeric group signal after
   generation identity release;
-- non-reaping leader status while a generation remains open;
+- non-reaping leader status while a generation remains open, including the
+  portable no-`waitid` fallback used by hosted macOS;
 - exact normalized-profile verification before registry or state access; and
 - retained lock/control ownership when unexpected loop failure and shutdown
   failure occur together.
 
-Twenty-nine disposable-copy mutants were killed by one named test each:
+Thirty disposable-copy mutants were killed by one named test each:
 
 1. omit credential descriptors from `pass_fds`;
 2. omit the generation descriptor from `pass_fds`;
@@ -119,7 +121,9 @@ Twenty-nine disposable-copy mutants were killed by one named test each:
 26. misreport a control timeout as a stopped supervisor;
 27. accept an invalid control response status;
 28. accept a response for a foreign control identity; and
-29. spawn the child before installing stop-signal handlers.
+29. spawn the child before installing stop-signal handlers; and
+30. reap the leader on a host without non-reaping `waitid` support while its
+    generation remains open.
 
 Each mutant ran with a bounded timeout and required nonzero status, `Ran 1 test`
 and the intended `FAIL` or `ERROR` name.
@@ -129,7 +133,7 @@ and the intended `FAIL` or `ERROR` name.
 Locally exercised interpreter: CPython 3.14.6 on macOS.
 
 - `make check` — PASS, including all legacy suites, 72 service-runtime tests,
-  9 legacy launcher tests, 28 standalone-supervisor tests and all mutation
+  9 legacy launcher tests, 29 standalone-supervisor tests and all mutation
   harnesses.
 - `make build` — PASS.
 - `python3 -m compileall -q tools tests scripts` — PASS.
