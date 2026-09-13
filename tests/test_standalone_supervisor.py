@@ -113,6 +113,9 @@ class StandaloneSupervisorTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
+        killpg = patch.object(supervisor.os, "killpg", side_effect=ProcessLookupError)
+        killpg.start()
+        self.addCleanup(killpg.stop)
         self.root = Path(self.temporary.name)
         self.profile = self.root / "profile.json"
         self.profile.write_text("{}")
@@ -130,6 +133,8 @@ class StandaloneSupervisorTests(unittest.TestCase):
 
         def popen(command, **kwargs):
             self.assertEqual(kwargs["pass_fds"], credentials)
+            for descriptor in credentials:
+                self.assertEqual(os.lseek(descriptor, 0, os.SEEK_CUR), 0)
             rendered = repr(command) + repr(kwargs["env"])
             self.assertNotIn(WEBHOOK[:80].decode(), rendered)
             self.assertNotIn(PRIVATE_KEY.decode(), rendered)
@@ -153,6 +158,8 @@ assert values[1].startswith(b'-----BEGIN ' + b'PRIVATE KEY-----')
                 timeout=5,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
+            for descriptor in credentials:
+                os.lseek(descriptor, 1, os.SEEK_SET)
             process = FakeProcess()
             calls.append(process)
             return process
@@ -232,6 +239,7 @@ assert values[1].startswith(b'-----BEGIN ' + b'PRIVATE KEY-----')
             ],
         )
         self.assertEqual(set(captured["kwargs"]["pass_fds"]), set(credentials))
+        self.assertIs(captured["kwargs"]["start_new_session"], True)
         self.assertEqual(environment["TEST_WEBHOOK_SECRET_FD"], str(credentials[0]))
         self.assertEqual(environment["TEST_GITHUB_PRIVATE_KEY_FD"], str(credentials[1]))
         self.assertNotIn("synthetic-webhook-secret-value", repr(command) + repr(environment))
@@ -300,6 +308,18 @@ assert values[1].startswith(b'-----BEGIN ' + b'PRIVATE KEY-----')
             self.assertEqual(item.snapshot()["generation"], 2)
             self.assertEqual(len(processes), 2)
             item.stop_child()
+
+    def test_stop_targets_service_process_group(self):
+        process = FakeProcess()
+        signals = []
+
+        def kill_group(pid, signum):
+            signals.append((pid, signum))
+            process.returncode = -signum
+
+        supervisor.stop_service_process(process, kill_group=kill_group)
+        self.assertEqual(signals, [(process.pid, signal.SIGTERM)])
+        self.assertEqual(process.returncode, -signal.SIGTERM)
 
     def test_control_rejects_wrong_identity_before_restart_or_stop(self):
         process = FakeProcess()
@@ -541,6 +561,11 @@ class MutationTests(unittest.TestCase):
             'test_spawn_argv_and_environment_contain_only_paths_and_descriptor_numbers',
         ),
         (
+            '            start_new_session=True,\n',
+            '',
+            'test_spawn_argv_and_environment_contain_only_paths_and_descriptor_numbers',
+        ),
+        (
             '        "registry_path": str(require_registry_path(registry_path)),\n',
             '',
             'test_configuration_identity_covers_profile_registry_and_isolation_boundary',
@@ -564,6 +589,11 @@ class MutationTests(unittest.TestCase):
             '            os.lseek(descriptor, 0, os.SEEK_SET)\n',
             '            pass\n',
             'test_descriptor_transport_rewinds_for_restart_without_secret_exposure',
+        ),
+        (
+            '        kill_group(process.pid, signal.SIGTERM)\n',
+            '        process.terminate()\n',
+            'test_stop_targets_service_process_group',
         ),
         (
             '            os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,\n',

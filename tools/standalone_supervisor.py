@@ -177,9 +177,33 @@ def spawn_service(
             env=child_environment(config, credentials),
             pass_fds=credentials,
             stdin=subprocess.DEVNULL,
+            start_new_session=True,
         )
     except OSError as exc:
         raise SupervisorError("standalone service could not be started") from exc
+
+
+def stop_service_process(
+    process: Any, *, kill_group: Callable[[int, int], None] | None = None
+) -> None:
+    """Bound shutdown of the service-owned process group and reap its leader."""
+    if process.poll() is not None:
+        return
+    if kill_group is None:
+        kill_group = os.killpg
+    try:
+        kill_group(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        # Test doubles and an exit racing the signal may have no visible group.
+        process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        try:
+            kill_group(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            process.kill()
+        process.wait(timeout=10)
 
 
 class Supervisor:
@@ -217,7 +241,7 @@ class Supervisor:
 
     def stop_child(self) -> None:
         if self.child is not None:
-            legacy_launcher.stop_child(self.child)
+            stop_service_process(self.child)
 
     def restart_child(self) -> None:
         self.stop_child()

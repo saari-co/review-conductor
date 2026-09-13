@@ -32,11 +32,11 @@ state/checkout/proof roots, and loopback host/port. Identity mismatch is rejecte
 before lifecycle mutation. The service is not automatically restarted after a
 crash: health reports `failed` until an explicit restart. Startup failure,
 normal stop and exceptional exit remove the socket, close descriptors and bound
-child termination through terminate/kill/reap.
+termination of the service-owned process group through terminate/kill/reap.
 
 ## Direct tests and mutants
 
-The focused suite passed 16 tests. It exercised:
+The focused suite passed 17 tests. It exercised:
 
 - maximum-size descriptor transport through a real inherited `/dev/fd`
   consumer before any service reader;
@@ -52,10 +52,11 @@ The focused suite passed 16 tests. It exercised:
 - cleanup when acquisition fails after only the first source descriptor;
 - full validated-profile identity changes, including credential selectors and
   enrollment state;
-- control timeout/failure classification and response-identity verification;
+- control timeout/failure classification and response-status/identity verification;
 - signal-handler installation before child spawn and restoration after failure.
+- isolated process-session creation and process-group shutdown on stop/restart.
 
-Thirteen disposable-copy mutants were killed by one named test each:
+Sixteen disposable-copy mutants were killed by one named test each:
 
 1. omit `pass_fds`;
 2. omit registry path from the control identity;
@@ -68,8 +69,11 @@ Thirteen disposable-copy mutants were killed by one named test each:
 9. leak a source descriptor on partial acquisition;
 10. let a disconnected control client escape the request boundary;
 11. misreport a control timeout as a stopped supervisor;
-12. accept a response for a foreign control identity;
-13. spawn the child before installing stop-signal handlers.
+12. accept an invalid control response status;
+13. accept a response for a foreign control identity;
+14. spawn the child before installing stop-signal handlers.
+15. launch the service in the supervisor's process session;
+16. signal only the service leader instead of its owned process group.
 
 Each mutant ran with a bounded timeout and required nonzero status, `Ran 1 test`
 and the intended `FAIL` or `ERROR` name.
@@ -79,7 +83,7 @@ and the intended `FAIL` or `ERROR` name.
 Locally exercised interpreter: CPython 3.14.6 on macOS.
 
 - `make check` — PASS, including all legacy suites, 72 service-runtime tests,
-  9 legacy launcher tests, 16 standalone-supervisor tests and all mutation
+  9 legacy launcher tests, 17 standalone-supervisor tests and all mutation
   harnesses.
 - `make build` — PASS.
 - `python3 -m compileall -q tools tests scripts` — PASS.
@@ -123,10 +127,10 @@ shadow activation each remain separate explicit authorizations.
 
 Owner approval was subsequently granted to publish this source slice for review
 and begin the separate target-repository scheduling-v2 change. Exact-head review
-removed one duplicated README inventory row and hardened six fail-closed edges:
-complete validated-profile identity, partial source-descriptor cleanup,
-control-client failure containment, timeout classification, response identity,
-and signal installation before child spawn. Direct tests and precise mutants
-cover each edge. The complete local gate set was rerun before publication. Draft
-publication does not authorize merge, deployment, manifest-hash promotion or
-shadow activation.
+removed one duplicated README inventory row and hardened the fail-closed
+lifecycle: complete validated-profile identity, partial source-descriptor
+cleanup, control-client failure containment, timeout classification, response
+validation, signal installation before child spawn, and process-group shutdown.
+Direct tests and precise mutants cover each edge. The complete local gate set was
+rerun before publication. Draft publication does not authorize merge,
+deployment, manifest-hash promotion or shadow activation.

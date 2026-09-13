@@ -47,7 +47,9 @@ only the profile and external-registry paths plus fixed command words; webhook
 and GitHub App credentials move only through explicitly inherited descriptors.
 The foreground supervisor exposes identity-bound local health/stop/restart
 control, retains anonymous descriptor copies for explicit restart, and leaves a
-crashed service failed until that restart is requested. It neither provisions
+crashed service failed until that restart is requested. The service runs in an
+owned process session so explicit stop/restart bounds its adapter subprocesses
+with the service generation. It neither provisions
 credentials nor starts an HTTPS tunnel, and it is not installed or active.
 
 ## Service-owned enrollment
