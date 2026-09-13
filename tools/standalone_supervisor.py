@@ -531,10 +531,17 @@ def supervisor_lock(lock_path: Path):
         ):
             raise SupervisorError("standalone supervisor lock is not a private regular file")
         os.fchmod(descriptor, 0o600)
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise SupervisorError("standalone supervisor is already active") from exc
+        deadline = time.monotonic() + CONTROL_REQUEST_SECONDS
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as exc:
+                if time.monotonic() >= deadline:
+                    raise SupervisorError(
+                        "standalone supervisor is already active"
+                    ) from exc
+                time.sleep(0.01)
         yield
     finally:
         os.close(descriptor)

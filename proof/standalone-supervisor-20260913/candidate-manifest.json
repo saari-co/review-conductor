@@ -10,8 +10,8 @@
     "docs/integration-contract.md": "dc71922162c79098d5001a26c1c49d0a1beb5b5c917e40eb77e444b133163d7d",
     "docs/migration.md": "df995c474d69161c297c6f05aabd7c36ed1a334cc383a3b175bbd39cf1343a07",
     "docs/smcbd-pilot-handoff.md": "efb7412f0371c8ba21a16080bf856e93b40aac2947f3ea496936d5ea23f55184",
-    "tests/test_standalone_supervisor.py": "4991880835630c2fff2bdd5c144e4bb657780b6960775b4778b7fbe289bb2c2e",
+    "tests/test_standalone_supervisor.py": "1b0a3974e6d7185a8a36c566ebc3dac71e968f736e6726bc8d3ae0f7205f0320",
     "tools/service_entrypoint.py": "6269b76ae2a2b3eaf51038b17a2ae92490922705b7044c2444b044e230d471a5",
-    "tools/standalone_supervisor.py": "dfe6567dae8dc1924e3a24290d521c438a5321b7d9a762bb07dd4dd4540aa7d5"
+    "tools/standalone_supervisor.py": "64233ce69dd2c90185e10b161c03456c44464137965cfc0bfbbf81325839dfd3"
   }
 }

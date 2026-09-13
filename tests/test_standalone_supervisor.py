@@ -460,9 +460,12 @@ os.fstat(generation)
         program = """
 import os, signal, sys, time
 ready = int(sys.argv[1])
+parent = os.getpid()
 child = os.fork()
 if child == 0:
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    while os.getppid() == parent:
+        time.sleep(0.001)
     os.write(ready, b'1')
     os.close(ready)
     time.sleep(60)
@@ -503,10 +506,6 @@ os._exit(0)
         finally:
             os.close(ready_read)
         deadline = time.monotonic() + 2
-        while supervisor.leader_returncode(generation) is None:
-            if time.monotonic() >= deadline:
-                self.fail("service leader did not exit")
-            time.sleep(0.01)
         self.assertIsNone(proc.returncode)
         while True:
             try:
@@ -619,6 +618,24 @@ os._exit(0)
         self.assertFalse(thread.is_alive())
         self.assertEqual(result, [0])
         self.assertGreaterEqual(len(attempts), 2)
+
+    def test_supervisor_lock_retries_transient_startup_probe(self):
+        lock_path = supervisor.supervisor_paths(self.config)[0]
+        lock_path.parent.mkdir(mode=0o700)
+        attempts = [BlockingIOError(), None]
+
+        def flock(_descriptor, _operation):
+            result = attempts.pop(0)
+            if result is not None:
+                raise result
+
+        with patch.object(supervisor.fcntl, "flock", side_effect=flock), patch.object(
+            supervisor.time, "sleep"
+        ) as sleep:
+            with supervisor.supervisor_lock(lock_path):
+                pass
+        self.assertEqual(attempts, [])
+        sleep.assert_called_once_with(0.01)
 
     def test_unexpected_loop_failure_retains_ownership_until_cleanup_succeeds(self):
         process = FakeProcess()
@@ -1102,6 +1119,11 @@ class MutationTests(unittest.TestCase):
             '    if waitid is None:\n        # Darwin\'s Python does not expose waitid(). Reaping with poll()/waitpid()\n        # while descendants retain the generation handle would permit PID/PGID\n        # reuse before shutdown, so defer the status until the generation drains.\n        return None\n',
             '    if waitid is None:\n        return generation.leader.poll()\n',
             'test_status_without_waitid_defers_reap_until_generation_drains',
+        ),
+        (
+            '            except BlockingIOError as exc:\n                if time.monotonic() >= deadline:\n                    raise SupervisorError(\n                        "standalone supervisor is already active"\n                    ) from exc\n                time.sleep(0.01)\n',
+            '            except BlockingIOError as exc:\n                raise SupervisorError(\n                    "standalone supervisor is already active"\n                ) from exc\n',
+            'test_supervisor_lock_retries_transient_startup_probe',
         ),
         (
             '                    raise SupervisorError(\n                        "standalone service generation did not terminate"\n                    )\n',

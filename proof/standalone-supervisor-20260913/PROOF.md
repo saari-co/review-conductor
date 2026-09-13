@@ -50,7 +50,7 @@ connection failures are not reported as stopped while the lock is held.
 
 ## Direct tests and mutants
 
-The focused suite passed 29 direct tests. It exercised:
+The focused suite passed 30 direct tests. It exercised:
 
 - maximum-size descriptor transport through a real inherited `/dev/fd`
   consumer before any service reader;
@@ -80,6 +80,7 @@ The focused suite passed 29 direct tests. It exercised:
 - retained control/lock ownership and a rejected stop response when shutdown
   fails, followed by a successful retry without generation overlap;
 - startup `ENOENT`/`ECONNREFUSED` classification while the supervisor lock is held;
+- bounded retry when a startup-status probe briefly wins the lock race;
 - health-based lifecycle readiness instead of socket-path existence;
 - a readiness pipe proving the descendant installed `SIG_IGN` before shutdown.
 - a race-free generation descriptor retained through leader exit and closed only
@@ -91,7 +92,7 @@ The focused suite passed 29 direct tests. It exercised:
 - retained lock/control ownership when unexpected loop failure and shutdown
   failure occur together.
 
-Thirty disposable-copy mutants were killed by one named test each:
+Thirty-one disposable-copy mutants were killed by one named test each:
 
 1. omit credential descriptors from `pass_fds`;
 2. omit the generation descriptor from `pass_fds`;
@@ -123,7 +124,8 @@ Thirty disposable-copy mutants were killed by one named test each:
 28. accept a response for a foreign control identity; and
 29. spawn the child before installing stop-signal handlers; and
 30. reap the leader on a host without non-reaping `waitid` support while its
-    generation remains open.
+    generation remains open; and
+31. abort startup when a status probe briefly acquires the just-created lock.
 
 Each mutant ran with a bounded timeout and required nonzero status, `Ran 1 test`
 and the intended `FAIL` or `ERROR` name.
@@ -133,7 +135,7 @@ and the intended `FAIL` or `ERROR` name.
 Locally exercised interpreter: CPython 3.14.6 on macOS.
 
 - `make check` — PASS, including all legacy suites, 72 service-runtime tests,
-  9 legacy launcher tests, 29 standalone-supervisor tests and all mutation
+  9 legacy launcher tests, 30 standalone-supervisor tests and all mutation
   harnesses.
 - `make build` — PASS.
 - `python3 -m compileall -q tools tests scripts` — PASS.
