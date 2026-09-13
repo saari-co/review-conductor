@@ -25,6 +25,7 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
 GENERATION_FD_ENV = "REVIEW_CONDUCTOR_GENERATION_FD"
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+OPENCLAW_EXACT_TUPLE_CONTRACT = "review-conductor-openclaw-v1"
 CLASSIFICATIONS = {
     "required_fix",
     "reject_false_positive",
@@ -151,6 +152,24 @@ def require_positive_int(value: Any, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ContractError(f"{label} must be a positive integer")
     return value
+
+
+def require_non_negative_int(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ContractError(f"{label} must be a non-negative integer")
+    return value
+
+
+def bound_openclaw_queue_epoch(action: sqlite3.Row, payload: dict[str, Any]) -> int:
+    persisted = require_non_negative_int(action["review_epoch"], "OpenClaw action review_epoch")
+    payload_epoch = require_non_negative_int(
+        payload.get("review_epoch"), "OpenClaw payload review_epoch"
+    )
+    if payload_epoch != persisted:
+        raise ContractError(
+            "OpenClaw payload review_epoch does not match the persisted action identity"
+        )
+    return persisted
 
 
 def require_github_timestamp(value: Any, label: str) -> str:
@@ -1816,6 +1835,7 @@ def command_preview(
     if action["kind"] == "openclaw.enqueue":
         if source_checkout is None or not source_checkout.is_absolute():
             raise ContractError("OpenClaw dispatch requires an absolute --source-checkout")
+        review_epoch = bound_openclaw_queue_epoch(action, payload)
         smoky = command_environment.get("SMOKY_REVIEW_CONDUCTOR_SMOKY", str(Path(__file__).resolve().parents[1] / "bin" / "smoky"))
         materialize = [
             smoky, "lane", "run", "spark-openclaw-materialize-worktree",
@@ -1828,6 +1848,8 @@ def command_preview(
             "--queue-request-id", payload["queue_request_id"], "--operator-id", payload["operator_id"],
             "--mode", "branch", "--base", payload["base_sha"], "--remote-worktree", payload["remote_worktree"],
             "--pr-url", payload["pr_url"],
+            "--exact-tuple-contract", OPENCLAW_EXACT_TUPLE_CONTRACT,
+            "--review-epoch", str(review_epoch),
         ]
         return [materialize, queue]
     if action["kind"] == "clawsweeper.dispatch":

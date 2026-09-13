@@ -8,6 +8,7 @@ import hmac
 import importlib.util
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -261,6 +262,116 @@ def create_fake_adapters(temp: Path) -> tuple[Path, Path, Path]:
     )
     fake_gh.chmod(0o755)
     return fake_smoky, fake_gh, log
+
+
+def queue_openclaw_action(temp: Path, state: Path, pr: int, head: str, *, run_id: int) -> dict:
+    github_event(temp, state, "pull_request", f"delivery-{state.name}-pr-{pr}", pr_payload(pr, head))
+    github_event(
+        temp,
+        state,
+        "workflow_run",
+        f"delivery-{state.name}-ci-{pr}",
+        workflow_payload(pr, head, "success", run_id),
+    )
+    current = status(state, pr)
+    actions = [item for item in current["actions"] if item["kind"] == "openclaw.enqueue"]
+    assert len(actions) == 1
+    return actions[0]
+
+
+def expected_openclaw_commands(smoky: str, checkout: Path, action: dict, epoch: int) -> list[list[str]]:
+    payload = action["payload"]
+    materialize = [
+        smoky,
+        "lane",
+        "run",
+        "spark-openclaw-materialize-worktree",
+        "--repo",
+        str(checkout),
+        "--ref",
+        payload["head_sha"],
+        "--base",
+        payload["base_sha"],
+        "--remote-worktree",
+        payload["remote_worktree"],
+        "--pr-url",
+        payload["pr_url"],
+        "--transport",
+        payload["transport"],
+    ]
+    queue = [
+        smoky,
+        "lane",
+        "run",
+        "spark-openclaw-autoreview",
+        "--queue",
+        "--queue-request-id",
+        payload["queue_request_id"],
+        "--operator-id",
+        payload["operator_id"],
+        "--mode",
+        "branch",
+        "--base",
+        payload["base_sha"],
+        "--remote-worktree",
+        payload["remote_worktree"],
+        "--pr-url",
+        payload["pr_url"],
+        "--exact-tuple-contract",
+        "review-conductor-openclaw-v1",
+        "--review-epoch",
+        str(epoch),
+    ]
+    return [materialize, queue]
+
+
+def overwrite_action_payload(state: Path, action_id: str, **overrides: object) -> None:
+    database = state / "review-conductor.sqlite3"
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT payload_json FROM actions WHERE action_id = ?", (action_id,)
+        ).fetchone()
+        payload = json.loads(row[0])
+        payload.update(overrides)
+        connection.execute(
+            "UPDATE actions SET payload_json = ? WHERE action_id = ?",
+            (json.dumps(payload, sort_keys=True, separators=(",", ":")), action_id),
+        )
+
+
+def plan_openclaw(
+    state: Path,
+    action_id: str,
+    checkout: Path,
+    *,
+    smoky: Path,
+    log: Path,
+    head: str,
+    expected: int = 0,
+    apply: bool = False,
+) -> dict:
+    args = [
+        "dispatch-action",
+        "--config",
+        str(CONFIG),
+        "--state-root",
+        str(state),
+        "--action-id",
+        action_id,
+        "--source-checkout",
+        str(checkout),
+    ]
+    if apply:
+        args.append("--apply")
+    return run(
+        *args,
+        env={
+            "SMOKY_REVIEW_CONDUCTOR_SMOKY": str(smoky),
+            "FAKE_ADAPTER_LOG": str(log),
+            "FAKE_HEAD": head,
+        },
+        expected=expected,
+    )
 
 
 def dispatch_openclaw(temp: Path, state: Path, pr: int, head: str) -> str:
@@ -1099,19 +1210,221 @@ def test_openclaw_clean_dispatches_clawsweeper_and_never_merge(temp: Path) -> No
     assert all(item["kind"] != "merge" for item in final["actions"])
 
 
+def test_openclaw_queue_command_binds_exact_tuple_contract(temp: Path) -> None:
+    state = temp / "state-exact-contract"
+    head = "c" * 40
+    action = queue_openclaw_action(temp, state, 201, head, run_id=9201)
+    assert action["review_epoch"] == 0
+    assert action["payload"]["review_epoch"] == 0
+    adapter_root = temp / "exact-contract-adapters"
+    adapter_root.mkdir()
+    fake_smoky, _, log = create_fake_adapters(adapter_root)
+    checkout = temp / "exact-contract-checkout"
+    checkout.mkdir()
+    planned = plan_openclaw(
+        state, action["action_id"], checkout, smoky=fake_smoky, log=log, head=head
+    )
+    assert planned["result"] == "planned"
+    expected = expected_openclaw_commands(str(fake_smoky), checkout, action, 0)
+    assert planned["commands"] == expected
+    materialize, queue = planned["commands"]
+    assert materialize == expected[0]
+    assert queue == expected[1]
+    assert queue.count("--exact-tuple-contract") == 1
+    assert queue.count("review-conductor-openclaw-v1") == 1
+    assert queue.count("--review-epoch") == 1
+    assert queue.count("0") == 1
+    assert "--exact-tuple-contract" not in materialize
+    assert "--review-epoch" not in materialize
+    assert "review_scope" not in queue
+    assert "reviewer_actor" not in queue
+    assert "native_max_priority" not in queue
+    assert "comprehensive" not in queue
+    assert "spark-openclaw" not in queue
+    assert "P3" not in queue
+    assert not log.exists()
+
+    dispatched = plan_openclaw(
+        state, action["action_id"], checkout, smoky=fake_smoky, log=log, head=head, apply=True
+    )
+    assert dispatched["result"] == "dispatched"
+    again = plan_openclaw(
+        state, action["action_id"], checkout, smoky=fake_smoky, log=log, head=head, apply=True
+    )
+    assert again["result"] == "already_dispatched"
+    calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert len(calls) == 2
+    assert calls[0] == materialize[1:]
+    assert calls[1] == queue[1:]
+
+    github_event(
+        temp,
+        state,
+        "pull_request",
+        "delivery-exact-contract-close",
+        pr_payload(201, head, "closed", updated_at="2026-08-27T00:07:02Z"),
+    )
+    github_event(
+        temp,
+        state,
+        "pull_request",
+        "delivery-exact-contract-reopen",
+        pr_payload(201, head, "reopened", updated_at="2026-08-27T00:07:03Z"),
+    )
+    github_event(
+        temp,
+        state,
+        "workflow_run",
+        "delivery-exact-contract-ci-1",
+        workflow_payload(201, head, "success", 9202, created_at="2026-08-27T00:07:04Z"),
+    )
+    reopened = status(state, 201)
+    openclaw_actions = [
+        item for item in reopened["actions"] if item["kind"] == "openclaw.enqueue"
+    ]
+    assert [item["review_epoch"] for item in openclaw_actions] == [0, 1]
+    pending = openclaw_actions[1]
+    assert pending["status"] == "pending"
+    assert pending["payload"]["review_epoch"] == 1
+    reopened_checkout = temp / "exact-contract-checkout-epoch-1"
+    reopened_checkout.mkdir()
+    reopened_planned = plan_openclaw(
+        state,
+        pending["action_id"],
+        reopened_checkout,
+        smoky=fake_smoky,
+        log=log,
+        head=head,
+    )
+    assert reopened_planned["result"] == "planned"
+    reopened_expected = expected_openclaw_commands(
+        str(fake_smoky), reopened_checkout, pending, 1
+    )
+    assert reopened_planned["commands"] == reopened_expected
+    reopened_queue = reopened_planned["commands"][1]
+    assert reopened_queue.count("--exact-tuple-contract") == 1
+    assert reopened_queue.count("review-conductor-openclaw-v1") == 1
+    assert reopened_queue.count("--review-epoch") == 1
+    assert reopened_queue[-2:] == ["--review-epoch", "1"]
+    assert log.read_text(encoding="utf-8").count("\n") == 2
+
+
+def test_openclaw_queue_rejects_unbound_payload_review_epoch(temp: Path) -> None:
+    cases = (
+        ("negative", -1),
+        ("bool", True),
+        ("string", "0"),
+        ("mismatched", 1),
+    )
+    for label, value in cases:
+        state = temp / f"state-unbound-epoch-{label}"
+        head = "d" * 40
+        action = queue_openclaw_action(temp, state, 202, head, run_id=9302)
+        overwrite_action_payload(state, action["action_id"], review_epoch=value)
+        adapter_root = temp / f"unbound-epoch-{label}"
+        adapter_root.mkdir()
+        fake_smoky, _, log = create_fake_adapters(adapter_root)
+        checkout = temp / f"unbound-epoch-checkout-{label}"
+        checkout.mkdir()
+        planned = plan_openclaw(
+            state,
+            action["action_id"],
+            checkout,
+            smoky=fake_smoky,
+            log=log,
+            head=head,
+            expected=2,
+        )
+        assert "review_epoch" in planned["stderr"]
+        assert not log.exists()
+        applied = plan_openclaw(
+            state,
+            action["action_id"],
+            checkout,
+            smoky=fake_smoky,
+            log=log,
+            head=head,
+            expected=2,
+            apply=True,
+        )
+        assert "review_epoch" in applied["stderr"]
+        assert not log.exists()
+        current = status(state, 202)
+        assert current["actions"][0]["status"] == "pending"
+
+
+def test_precise_openclaw_exact_contract_mutants() -> None:
+    source = (ROOT / "tools" / "review_conductor.py").read_text(encoding="utf-8")
+    mutants = (
+        (
+            "omit exact-tuple-contract flag",
+            '            "--exact-tuple-contract", OPENCLAW_EXACT_TUPLE_CONTRACT,\n            "--review-epoch", str(review_epoch),\n',
+            '            "--review-epoch", str(review_epoch),\n',
+            "test_openclaw_queue_command_binds_exact_tuple_contract",
+        ),
+        (
+            "omit review-epoch flag",
+            '            "--exact-tuple-contract", OPENCLAW_EXACT_TUPLE_CONTRACT,\n            "--review-epoch", str(review_epoch),\n',
+            '            "--exact-tuple-contract", OPENCLAW_EXACT_TUPLE_CONTRACT,\n',
+            "test_openclaw_queue_command_binds_exact_tuple_contract",
+        ),
+        (
+            "source epoch only from payload",
+            "        review_epoch = bound_openclaw_queue_epoch(action, payload)\n",
+            '        review_epoch = payload["review_epoch"]\n',
+            "test_openclaw_queue_rejects_unbound_payload_review_epoch",
+        ),
+    )
+    for label, old, new, test_name in mutants:
+        assert source.count(old) == 1, f"mutant anchor drifted: {label}"
+        with tempfile.TemporaryDirectory(prefix="review-conductor-mutant-") as temp_name:
+            copy_root = Path(temp_name) / "copy"
+            for name in ("tools", "tests", "contracts"):
+                shutil.copytree(ROOT / name, copy_root / name)
+            target = copy_root / "tools" / "review_conductor.py"
+            target.write_text(source.replace(old, new, 1), encoding="utf-8")
+            completed = subprocess.run(
+                [sys.executable, str(copy_root / "tests" / "test_review_conductor.py"), test_name],
+                cwd=copy_root,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env={
+                    "PATH": "/usr/bin:/bin",
+                    "HOME": temp_name,
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                },
+            )
+        assert completed.returncode != 0, f"mutant survived: {label}\n{completed.stderr}"
+        assert "AssertionError" in completed.stderr or "assert " in completed.stderr, (
+            f"mutant did not fail its intended assertion: {label}\n{completed.stderr}"
+        )
+
+
 def main() -> int:
-    test_official_hmac_vector()
+    selected = {argument for argument in sys.argv[1:] if not argument.startswith("-")}
+    named = {
+        "test_official_hmac_vector": lambda _temp: test_official_hmac_vector(),
+        "test_ci_gate_dedupe_and_openclaw_dispatch": test_ci_gate_dedupe_and_openclaw_dispatch,
+        "test_default_branch_scope_and_atomic_dispatch_claim": test_default_branch_scope_and_atomic_dispatch_claim,
+        "test_old_head_terminal_is_historical_only": test_old_head_terminal_is_historical_only,
+        "test_closed_pr_obsoletes_pending_review_and_ignores_late_ci": test_closed_pr_obsoletes_pending_review_and_ignores_late_ci,
+        "test_closure_during_openclaw_dispatch_blocks_queue_and_retry": test_closure_during_openclaw_dispatch_blocks_queue_and_retry,
+        "test_same_tuple_reopen_freshness_and_action_epochs": test_same_tuple_reopen_freshness_and_action_epochs,
+        "test_legacy_database_migrates_review_epoch": test_legacy_database_migrates_review_epoch,
+        "test_repair_owner_and_two_cycle_governor": test_repair_owner_and_two_cycle_governor,
+        "test_openclaw_clean_dispatches_clawsweeper_and_never_merge": test_openclaw_clean_dispatches_clawsweeper_and_never_merge,
+        "test_openclaw_queue_command_binds_exact_tuple_contract": test_openclaw_queue_command_binds_exact_tuple_contract,
+        "test_openclaw_queue_rejects_unbound_payload_review_epoch": test_openclaw_queue_rejects_unbound_payload_review_epoch,
+        "test_precise_openclaw_exact_contract_mutants": lambda _temp: test_precise_openclaw_exact_contract_mutants(),
+    }
+    if selected - set(named):
+        raise SystemExit(f"unknown review conductor tests: {sorted(selected - set(named))}")
+    names = [name for name in named if not selected or name in selected]
     with tempfile.TemporaryDirectory(prefix="review-conductor-test-") as temp_name:
         temp = Path(temp_name)
-        test_ci_gate_dedupe_and_openclaw_dispatch(temp)
-        test_default_branch_scope_and_atomic_dispatch_claim(temp)
-        test_old_head_terminal_is_historical_only(temp)
-        test_closed_pr_obsoletes_pending_review_and_ignores_late_ci(temp)
-        test_closure_during_openclaw_dispatch_blocks_queue_and_retry(temp)
-        test_same_tuple_reopen_freshness_and_action_epochs(temp)
-        test_legacy_database_migrates_review_epoch(temp)
-        test_repair_owner_and_two_cycle_governor(temp)
-        test_openclaw_clean_dispatches_clawsweeper_and_never_merge(temp)
+        for name in names:
+            named[name](temp)
     print("review conductor integration tests passed")
     return 0
 

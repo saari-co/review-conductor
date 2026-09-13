@@ -31,6 +31,16 @@ is not an executable adapter or proof of an installed Spark producer. Regression
 fixtures preserve public/non-secret deployment metadata but are not runtime
 configuration. The build excludes all historical profiles and legacy launchers.
 
+OpenClaw `command_preview` now includes the source-owned exact-tuple contract
+selector and the persisted review epoch on every queue command. Generalized
+`review_policy` consumers in `collect_openclaw_terminals` require Spark status
+`native_max_priority=P3`, `applied_max_priority=P3`, and
+`exact_tuple_qualified is True` before any terminal artifact write; legacy
+profiles without `review_policy` stay compatible. That is a Conductor adapter
+command and evidence-consumer dependency only. It does not attach, pin,
+publish, install, or activate the x-api transport or a spark-dgx applied-P3
+attestation source.
+
 ## Not completed / prerequisites for migration
 
 1. Trusted enrollment, approved base-policy loading and policy-hash binding now
@@ -44,7 +54,10 @@ configuration. The build excludes all historical profiles and legacy launchers.
    Gateway plugin; however, OpenClaw dispatch still executes the configured
    `spark.smoky_path` transport for the configured Spark target. The copied
    compatibility modules still describe the existing pilot and tests inject
-   transports. They are not a portable activated service yet.
+   transports. They are not a portable activated service yet. The queue command
+   now names the source-qualified exact-tuple contract flags; x-api attachment
+   and source pin, plus spark-dgx applied-P3 attestation source/install, remain
+   separate unpublished work.
 3. Implement/version the general authenticated client surface and event outbox.
    GitHub webhook ingress exists; no Gateway plugin, external scheduler or
    webhook registration is added. The live OpenClaw dispatch path retains the
