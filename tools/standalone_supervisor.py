@@ -30,7 +30,7 @@ SUPERVISOR_LOCK_NAME = ".standalone-supervisor.lock"
 MAX_CONTROL_BYTES = 4096
 GROUP_SHUTDOWN_SECONDS = 10
 CONTROL_REQUEST_SECONDS = 2
-RESTART_CONTROL_SECONDS = GROUP_SHUTDOWN_SECONDS * 2 + CONTROL_REQUEST_SECONDS
+SHUTDOWN_CONTROL_SECONDS = GROUP_SHUTDOWN_SECONDS * 2 + CONTROL_REQUEST_SECONDS
 
 
 class SupervisorError(core.ContractError):
@@ -297,6 +297,7 @@ class Supervisor:
     def stop_child(self) -> None:
         if self.child is not None:
             stop_service_process(self.child)
+            self.child = None
 
     def restart_child(self) -> None:
         self.stop_child()
@@ -374,6 +375,7 @@ def _handle_control(connection: socket.socket, supervisor: Supervisor) -> bool:
         if request["command"] == "restart":
             supervisor.restart_child()
         elif request["command"] == "stop":
+            supervisor.stop_child()
             supervisor.stopping = True
             _send_response(connection, supervisor.snapshot())
             return False
@@ -424,6 +426,36 @@ def supervisor_lock(lock_path: Path):
         os.close(descriptor)
 
 
+def supervisor_lock_is_held(lock_path: Path) -> bool:
+    """Distinguish an inactive supervisor from one not yet accepting control."""
+    try:
+        descriptor = os.open(
+            lock_path,
+            os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise SupervisorError("standalone supervisor lock is unavailable") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise SupervisorError("standalone supervisor lock is not a private regular file")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(descriptor)
+
+
 def run_supervisor(
     config: dict[str, Any],
     profile_path: Path,
@@ -441,7 +473,11 @@ def run_supervisor(
         stack.callback(listener.close)
         try:
             socket_path.unlink(missing_ok=True)
-            listener.bind(str(socket_path))
+            previous_umask = os.umask(0o177)
+            try:
+                listener.bind(str(socket_path))
+            finally:
+                os.umask(previous_umask)
             stack.callback(socket_path.unlink, missing_ok=True)
             os.chmod(socket_path, 0o600)
             listener.listen(4)
@@ -463,7 +499,14 @@ def run_supervisor(
             # Install handlers before spawning so a startup-time signal cannot
             # leave the service child running without its foreground supervisor.
             supervisor.start_child()
-            while not supervisor.stopping:
+            while True:
+                if supervisor.stopping:
+                    try:
+                        supervisor.stop_child()
+                    except SupervisorError:
+                        supervisor.stopping = False
+                    else:
+                        break
                 try:
                     connection, _ = listener.accept()
                 except TimeoutError:
@@ -484,14 +527,16 @@ def request_control(
     config: dict[str, Any], profile_path: Path, registry_path: Path, command: str
 ) -> dict[str, Any]:
     identity = configuration_identity(config, profile_path, registry_path)
-    _, socket_path = supervisor_paths(config)
+    lock_path, socket_path = supervisor_paths(config)
     request = json.dumps(
         {"command": command, "identity": identity},
         separators=(",", ":"),
         sort_keys=True,
     ).encode() + b"\n"
     timeout = (
-        RESTART_CONTROL_SECONDS if command == "restart" else CONTROL_REQUEST_SECONDS
+        SHUTDOWN_CONTROL_SECONDS
+        if command in {"stop", "restart"}
+        else CONTROL_REQUEST_SECONDS
     )
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
@@ -500,6 +545,10 @@ def request_control(
             connection.sendall(request)
             raw = _recv_line(connection, "response")
     except (FileNotFoundError, ConnectionRefusedError):
+        if supervisor_lock_is_held(lock_path):
+            raise SupervisorError(
+                "standalone supervisor is starting or control is unavailable"
+            )
         return {
             "schema": "review-conductor.standalone-supervisor-health.v1",
             "status": "stopped",

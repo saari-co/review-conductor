@@ -36,10 +36,14 @@ termination of the service-owned process group independently of leader state:
 SIGTERM the group, wait while any member remains, SIGKILL the group if it is
 still present, reaping a zombie leader so it cannot keep the group visible.
 If the group remains after the SIGKILL bound, stop/restart fail closed.
+The original supervisor retains its lock and control socket after that failure;
+another `start` cannot overlap the surviving generation. The socket is mode 0600
+from bind under a temporary restrictive umask. Startup connection failures are
+not reported as stopped while the lock is held.
 
 ## Direct tests and mutants
 
-The focused suite passed 24 tests. It exercised:
+The focused suite passed 26 tests. It exercised:
 
 - maximum-size descriptor transport through a real inherited `/dev/fd`
   consumer before any service reader;
@@ -62,11 +66,17 @@ The focused suite passed 24 tests. It exercised:
   so restart cannot overlap generations.
 - reaping an unreaped leader so Linux zombies cannot stall group probes;
 - fail-closed restart when a process group survives SIGKILL;
-- restart control timeout longer than the maximum group-shutdown bound;
+- stop/restart control timeout longer than the maximum group-shutdown bound;
 - rejection of a non-string control command without stopping the supervisor;
 - control-socket unlink when chmod fails after bind.
+- private control-socket mode from bind and restoration of the caller's umask;
+- retained control/lock ownership and a rejected stop response when shutdown
+  fails, followed by a successful retry without generation overlap;
+- startup `ENOENT`/`ECONNREFUSED` classification while the supervisor lock is held;
+- health-based lifecycle readiness instead of socket-path existence;
+- a readiness pipe proving the descendant installed `SIG_IGN` before shutdown.
 
-Twenty-two disposable-copy mutants were killed by one named test each:
+Twenty-five disposable-copy mutants were killed by one named test each:
 
 1. omit `pass_fds`;
 2. omit registry path from the control identity;
@@ -87,9 +97,12 @@ Twenty-two disposable-copy mutants were killed by one named test each:
 17. omit SIGKILL of a process group that ignored SIGTERM.
 18. omit reaping the leader while probing the process group;
 19. return from shutdown while the process group still exists;
-20. use the short control timeout for restart;
+20. use the short control timeout for stop/restart;
 21. membership-test a non-string control command;
 22. register socket unlink only after chmod.
+23. create the control socket under the caller's permissive umask;
+24. report stopping before the old process group is confirmed gone;
+25. report stopped after connection failure while the supervisor lock is held.
 
 Each mutant ran with a bounded timeout and required nonzero status, `Ran 1 test`
 and the intended `FAIL` or `ERROR` name.
@@ -99,7 +112,7 @@ and the intended `FAIL` or `ERROR` name.
 Locally exercised interpreter: CPython 3.14.6 on macOS.
 
 - `make check` — PASS, including all legacy suites, 72 service-runtime tests,
-  9 legacy launcher tests, 24 standalone-supervisor tests and all mutation
+  9 legacy launcher tests, 26 standalone-supervisor tests and all mutation
   harnesses.
 - `make build` — PASS.
 - `python3 -m compileall -q tools tests scripts` — PASS.
@@ -164,3 +177,10 @@ if the group survives SIGKILL, wait longer than the shutdown bound for restart
 control, reject non-string commands without stopping, and unlink the control
 socket from bind before chmod. Direct regressions and precise mutants cover
 each. Suite PR #8 was not edited.
+
+Copilot review `5191138752` on `d13d13446c45b8595f9e2e947493c97271f9b6d0`
+identified five remaining activation-boundary issues: private socket mode at
+bind, retention of lock/control ownership after failed shutdown, deterministic
+descendant readiness, health-based lifecycle readiness, and startup connection
+classification while locked. This bounded engineering pass repairs those
+invariants and deliberately does not request another Copilot review.

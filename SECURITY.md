@@ -105,8 +105,11 @@ process group independently of whether the leader has already exited, wait while
 any member remains, reaping an exited leader so a zombie cannot keep the group
 visible, then SIGKILL remaining members. If the group is still present after
 that bound, stop/restart fail closed instead of starting a new generation.
-The control socket is unlinked from bind onward, including chmod failure.
-Restart control waits longer than the maximum group-shutdown bound; a timeout
-is not reported as a stopped supervisor. Non-string control commands are
-rejected without terminating the service.
+The control socket is private from bind under a temporary restrictive umask and
+is unlinked from bind onward, including chmod failure. A failed shutdown keeps
+the original supervisor lock and control socket active so another start cannot
+overlap the surviving group. Stop/restart control waits longer than the maximum
+group-shutdown bound; connection failure while the lock is held is reported as
+starting/unavailable, never stopped. Non-string control commands are rejected
+without terminating the service.
 Anonymous storage may still be disk-backed and is not a secure-erasure guarantee.

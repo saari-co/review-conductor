@@ -8,8 +8,10 @@ import json
 import os
 from pathlib import Path
 import shutil
+import select
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -132,6 +134,26 @@ class StandaloneSupervisorTests(unittest.TestCase):
             with self.assertRaises(OSError) as error:
                 os.fstat(descriptor)
             self.assertEqual(error.exception.errno, errno.EBADF)
+
+    def wait_for_control_status(self, status, timeout=2):
+        deadline = time.monotonic() + timeout
+        last_response = None
+        last_error = None
+        while time.monotonic() < deadline:
+            try:
+                last_response = supervisor.request_control(
+                    self.config, self.profile, self.registry, "health"
+                )
+            except supervisor.SupervisorError as exc:
+                last_error = exc
+            else:
+                if last_response["status"] == status:
+                    return last_response
+            time.sleep(0.01)
+        self.fail(
+            f"control status never became {status!r}; "
+            f"last_response={last_response!r}, last_error={last_error!r}"
+        )
 
     def test_descriptor_transport_rewinds_for_restart_without_secret_exposure(self):
         calls = []
@@ -346,27 +368,42 @@ assert values[1].startswith(b'-----BEGIN ' + b'PRIVATE KEY-----')
 
     def test_exited_leader_does_not_leave_sigterm_ignoring_descendant(self):
         program = """
-import os, signal, time
+import os, signal, sys, time
+ready = int(sys.argv[1])
 child = os.fork()
 if child == 0:
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    os.write(ready, b'1')
+    os.close(ready)
     time.sleep(60)
     os._exit(0)
+os.close(ready)
 os._exit(0)
 """
-        proc = subprocess.Popen(
-            [sys.executable, "-c", program],
-            start_new_session=True,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        ready_read, ready_write = os.pipe()
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-c", program, str(ready_write)],
+                pass_fds=(ready_write,),
+                start_new_session=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        finally:
+            os.close(ready_write)
 
         def cleanup_group():
             with contextlib.suppress(ProcessLookupError, OSError):
                 REAL_KILLPG(proc.pid, signal.SIGKILL)
 
         self.addCleanup(cleanup_group)
+        try:
+            readable, _, _ = select.select([ready_read], [], [], 5)
+            self.assertEqual(readable, [ready_read])
+            self.assertEqual(os.read(ready_read, 1), b"1")
+        finally:
+            os.close(ready_read)
         proc.wait(timeout=5)
         self.assertIsNotNone(proc.poll())
         deadline = time.monotonic() + 2
@@ -430,6 +467,57 @@ os._exit(0)
         self.assertEqual(spawned, [])
         self.assertIs(item.child, process)
         self.assertEqual(item.generation, 0)
+
+    def test_failed_stop_keeps_control_socket_and_lock_until_retry(self):
+        process = FakeProcess()
+        attempts = []
+
+        def stop_process(item):
+            attempts.append(item.pid)
+            if len(attempts) == 1:
+                raise supervisor.SupervisorError("synthetic surviving process group")
+            item.returncode = -signal.SIGKILL
+            item.reaped = True
+
+        result = []
+        with source_credentials(), patch.object(
+            supervisor, "stop_service_process", side_effect=stop_process
+        ):
+            thread = threading.Thread(
+                target=lambda: result.append(
+                    supervisor.run_supervisor(
+                        self.config,
+                        self.profile,
+                        self.registry,
+                        popen=lambda *_args, **_kwargs: process,
+                        install_signals=False,
+                    )
+                )
+            )
+            thread.start()
+            self.wait_for_control_status("running")
+            rejected = supervisor.request_control(
+                self.config, self.profile, self.registry, "stop"
+            )
+            self.assertEqual(rejected["status"], "rejected")
+            self.assertIn("surviving process group", rejected["error"])
+            self.assertTrue(thread.is_alive())
+            lock_path, socket_path = supervisor.supervisor_paths(self.config)
+            self.assertTrue(socket_path.exists())
+            with self.assertRaisesRegex(
+                supervisor.SupervisorError, "already active"
+            ):
+                with supervisor.supervisor_lock(lock_path):
+                    self.fail("failed shutdown released the supervisor lock")
+            self.assertEqual(self.wait_for_control_status("running")["generation"], 1)
+            stopped = supervisor.request_control(
+                self.config, self.profile, self.registry, "stop"
+            )
+            self.assertEqual(stopped["status"], "stopping")
+            thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result, [0])
+        self.assertGreaterEqual(len(attempts), 2)
 
     def test_control_rejects_wrong_identity_before_restart_or_stop(self):
         with tempfile.TemporaryFile("w+b") as webhook, tempfile.TemporaryFile("w+b") as key:
@@ -531,7 +619,39 @@ os._exit(0)
                     self.config, self.profile, self.registry, "health"
                 )
 
-    def test_restart_control_timeout_exceeds_group_shutdown(self):
+    def test_startup_connection_failure_is_not_reported_as_stopped_while_locked(self):
+        class StartupSocket:
+            def __init__(self, error):
+                self.error = error
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def settimeout(self, _timeout):
+                pass
+
+            def connect(self, _path):
+                raise self.error("synthetic startup window")
+
+        lock_path, _ = supervisor.supervisor_paths(self.config)
+        lock_path.parent.mkdir(mode=0o700)
+        with supervisor.supervisor_lock(lock_path):
+            for error in (FileNotFoundError, ConnectionRefusedError):
+                with self.subTest(error=error.__name__), patch.object(
+                    supervisor.socket, "socket", return_value=StartupSocket(error)
+                ):
+                    with self.assertRaisesRegex(
+                        supervisor.SupervisorError,
+                        "starting or control is unavailable",
+                    ):
+                        supervisor.request_control(
+                            self.config, self.profile, self.registry, "health"
+                        )
+
+    def test_stop_and_restart_control_timeout_exceeds_group_shutdown(self):
         captured = []
 
         class CaptureTimeout:
@@ -558,13 +678,20 @@ os._exit(0)
                 supervisor.SupervisorError, "control request failed"
             ):
                 supervisor.request_control(
+                    self.config, self.profile, self.registry, "stop"
+                )
+            with self.assertRaisesRegex(
+                supervisor.SupervisorError, "control request failed"
+            ):
+                supervisor.request_control(
                     self.config, self.profile, self.registry, "health"
                 )
         self.assertGreater(
             captured[0], 2 * supervisor.GROUP_SHUTDOWN_SECONDS
         )
-        self.assertEqual(captured[1], supervisor.CONTROL_REQUEST_SECONDS)
-        self.assertNotEqual(captured[0], captured[1])
+        self.assertEqual(captured[0], captured[1])
+        self.assertEqual(captured[2], supervisor.CONTROL_REQUEST_SECONDS)
+        self.assertNotEqual(captured[0], captured[2])
 
     def test_control_response_requires_matching_identity(self):
         class ResponseSocket:
@@ -646,14 +773,7 @@ os._exit(0)
             )
             thread.start()
             socket_path = supervisor.supervisor_paths(self.config)[1]
-            for _ in range(200):
-                if socket_path.exists():
-                    break
-                threading.Event().wait(0.01)
-            self.assertTrue(socket_path.exists())
-            health = supervisor.request_control(
-                self.config, self.profile, self.registry, "health"
-            )
+            health = self.wait_for_control_status("running")
             self.assertEqual(health["status"], "running")
             stopped = supervisor.request_control(
                 self.config, self.profile, self.registry, "stop"
@@ -695,17 +815,30 @@ os._exit(0)
 
     def test_chmod_failure_unlinks_bound_control_socket(self):
         socket_path = supervisor.supervisor_paths(self.config)[1]
-        with source_credentials(), patch.object(
-            supervisor.os, "chmod", side_effect=OSError("synthetic chmod failure")
-        ):
-            with self.assertRaises(supervisor.SupervisorError):
-                supervisor.run_supervisor(
-                    self.config,
-                    self.profile,
-                    self.registry,
-                    popen=lambda *_args, **_kwargs: FakeProcess(),
-                    install_signals=False,
-                )
+        observed_modes = []
+
+        def fail_chmod(path, mode):
+            observed_modes.append((stat.S_IMODE(Path(path).stat().st_mode), mode))
+            raise OSError("synthetic chmod failure")
+
+        original_umask = os.umask(0o022)
+        try:
+            with source_credentials(), patch.object(
+                supervisor.os, "chmod", side_effect=fail_chmod
+            ):
+                with self.assertRaises(supervisor.SupervisorError):
+                    supervisor.run_supervisor(
+                        self.config,
+                        self.profile,
+                        self.registry,
+                        popen=lambda *_args, **_kwargs: FakeProcess(),
+                        install_signals=False,
+                    )
+            restored_umask = os.umask(original_umask)
+        finally:
+            os.umask(original_umask)
+        self.assertEqual(restored_umask, 0o022)
+        self.assertEqual(observed_modes, [(0o600, 0o600)])
         self.assertFalse(socket_path.exists())
 
     def test_stop_signals_are_installed_before_child_spawn_and_restored(self):
@@ -771,6 +904,11 @@ class MutationTests(unittest.TestCase):
             'test_foreground_lifecycle_health_stop_and_cleanup',
         ),
         (
+            '            previous_umask = os.umask(0o177)\n',
+            '            previous_umask = os.umask(0o022)\n',
+            'test_chmod_failure_unlinks_bound_control_socket',
+        ),
+        (
             '            os.lseek(descriptor, 0, os.SEEK_SET)\n',
             '            pass\n',
             'test_descriptor_transport_rewinds_for_restart_without_secret_exposure',
@@ -796,9 +934,9 @@ class MutationTests(unittest.TestCase):
             'test_surviving_process_group_fails_closed_before_restart',
         ),
         (
-            '        RESTART_CONTROL_SECONDS if command == "restart" else CONTROL_REQUEST_SECONDS\n',
+            '        SHUTDOWN_CONTROL_SECONDS\n        if command in {"stop", "restart"}\n        else CONTROL_REQUEST_SECONDS\n',
             '        CONTROL_REQUEST_SECONDS\n',
-            'test_restart_control_timeout_exceeds_group_shutdown',
+            'test_stop_and_restart_control_timeout_exceeds_group_shutdown',
         ),
         (
             '    if not isinstance(command, str) or command not in {"health", "stop", "restart"}:\n',
@@ -806,9 +944,19 @@ class MutationTests(unittest.TestCase):
             'test_control_rejects_non_string_command_without_stopping',
         ),
         (
-            '            listener.bind(str(socket_path))\n            stack.callback(socket_path.unlink, missing_ok=True)\n            os.chmod(socket_path, 0o600)\n',
-            '            listener.bind(str(socket_path))\n            os.chmod(socket_path, 0o600)\n            stack.callback(socket_path.unlink, missing_ok=True)\n',
+            '            stack.callback(socket_path.unlink, missing_ok=True)\n            os.chmod(socket_path, 0o600)\n',
+            '            os.chmod(socket_path, 0o600)\n            stack.callback(socket_path.unlink, missing_ok=True)\n',
             'test_chmod_failure_unlinks_bound_control_socket',
+        ),
+        (
+            '        elif request["command"] == "stop":\n            supervisor.stop_child()\n            supervisor.stopping = True\n',
+            '        elif request["command"] == "stop":\n            supervisor.stopping = True\n',
+            'test_failed_stop_keeps_control_socket_and_lock_until_retry',
+        ),
+        (
+            '        if supervisor_lock_is_held(lock_path):\n            raise SupervisorError(\n                "standalone supervisor is starting or control is unavailable"\n            )\n',
+            '',
+            'test_startup_connection_failure_is_not_reported_as_stopped_while_locked',
         ),
         (
             '            os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,\n',
