@@ -907,12 +907,13 @@ def process_pull_request(
             state = "clawsweeper_clean_draft"
             update_exact_head(connection, identity, state=state, rail="clawsweeper", blocker="ready-for-human clearance is paused while the pull request is draft")
         elif is_draft and state == "clawsweeper_queued":
-            connection.execute(
+            paused = connection.execute(
                 "UPDATE actions SET status='obsolete', last_error='pull request returned to draft', updated_at=? WHERE repository=? AND pr_number=? AND base_sha=? AND head_sha=? AND review_epoch=? AND kind='clawsweeper.dispatch' AND status IN ('pending','failed','dispatching')",
                 (utc_now(), *identity.values(), previous["review_epoch"]),
-            )
-            state = "openclaw_clean_draft"
-            update_exact_head(connection, identity, state=state, rail="openclaw", blocker="ClawSweeper waits for ready-for-review state")
+            ).rowcount
+            if paused == 1:
+                state = "openclaw_clean_draft"
+                update_exact_head(connection, identity, state=state, rail="openclaw", blocker="ClawSweeper waits for ready-for-review state")
         elif not is_draft and state == "clawsweeper_clean_draft":
             state = "ready_for_human_merge"
             update_exact_head(connection, identity, state=state, rail="clawsweeper", blocker="human merge authority required")
@@ -934,14 +935,10 @@ def process_pull_request(
                     action = connection.execute(
                         "SELECT status FROM actions WHERE action_id=?", (action_id,)
                     ).fetchone()
-                    if action is not None and action["status"] == "dispatched":
-                        state = "ready_for_human_merge"
-                        update_exact_head(connection, identity, state=state, rail="clawsweeper", blocker="human merge authority required")
-                    elif action is None or action["status"] not in {"pending", "dispatching"}:
+                    if action is None or action["status"] not in {"pending", "dispatching", "dispatched"}:
                         raise ContractError("ClawSweeper action cannot be resumed safely")
-            if state != "ready_for_human_merge":
-                state = "clawsweeper_queued"
-                update_exact_head(connection, identity, state=state, rail="clawsweeper", blocker=None)
+            state = "clawsweeper_queued"
+            update_exact_head(connection, identity, state=state, rail="clawsweeper", blocker=None)
         insert_event(connection, event_id=event_id, kind=f"pull_request.{original_action}", stale=False, payload=payload, **identity)
         return {"result": "accepted", "state": state, "review_epoch": previous["review_epoch"], "action_id": action_id, "action_created": created, "merge_dispatched": False}
     elif previous is not None and bool(previous["is_draft"]) != event["is_draft"] and original_action != "closed":

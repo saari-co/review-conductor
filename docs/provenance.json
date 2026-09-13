@@ -7,7 +7,7 @@
       "source_path": "tools/review_conductor.py",
       "destination_path": "tools/review_conductor.py",
       "source_sha256": "3915b5d15b9226b29c9e1fe6b74af71a08bb787c68e2e6bd8b63fef86924eda4",
-      "destination_sha256": "205cc936ecc91cbc16212b2cdcc12efba664349508963779a409062be70e9e9d",
+      "destination_sha256": "3f12b8da9798efcc2deec6898f16f41c773f447f529ad44bc1de8295e5b70e3f",
       "adaptation": "standalone admission hook, head-state scheduling with an immutable head-incarnation CI cutoff, immediate CI-to-OpenClaw processing, draft-aware adjudication, replay-safe readiness-gated ClawSweeper dispatch and an explicit fully-reviewed-draft state, a distinct recoverable pre-transport authority denial, optional per-command authority callback and isolated per-subprocess environment for multi-step OpenClaw dispatch; legacy callers remain unchanged"
     },
     {
@@ -84,7 +84,7 @@
       "source_path": "tonight-lab/tests/test_review_conductor_profiles.py",
       "destination_path": "tests/test_review_conductor_profiles.py",
       "source_sha256": "b166648b7b0139b718d82ced0911d670475e0885d0aba20a7eb26f257f527462",
-      "destination_sha256": "17e257ec2a2653c468e5575f70c3560c1c4523728de806da4b9515911889f6ad",
+      "destination_sha256": "9719ca240b235dce490c973caee5b096a291b7f9198094bcfb62eed7cfa6f1a5",
       "adaptation": "test root and archived lane location; standalone SMCBD candidate App/installation/Contents-read pins remain inactive; immutable head-incarnation CI freshness, first-event draft status, replay-safe draft/ready action resumption, draft-aware adjudication, closed projection filtering and completed/in-flight ClawSweeper draft demotion are regression checked"
     },
     {

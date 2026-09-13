@@ -32,7 +32,7 @@ def exclusive_service_lock(config: dict, registry_path: Path):
     try:
         descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
     except OSError as exc:
-        raise service.ServiceError("service enrollment registry is unavailable") from exc
+        raise service.ServiceError("service state-root operation lock is unavailable") from exc
     try:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -243,13 +243,12 @@ def serve(profile_path: Path, registry_path: Path) -> None:
     previous_umask = os.umask(0o077)
     try:
         with exclusive_service_lock(config, registry_path):
-            _serve_with_restrictive_umask(profile_path, registry_path)
+            _serve_with_restrictive_umask(config, registry_path)
     finally:
         os.umask(previous_umask)
 
 
-def _serve_with_restrictive_umask(profile_path: Path, registry_path: Path) -> None:
-    config = userland.load_config(profile_path)
+def _serve_with_restrictive_umask(config: dict, registry_path: Path) -> None:
     profiles.require_enabled(config)
     provide_registry = registry_provider(registry_path, config)
     provide_registry()
@@ -328,13 +327,13 @@ def run_maintenance(
     registry_provider(registry_path, config)()
     with exclusive_service_lock(config, registry_path):
         return _run_maintenance_unlocked(
-            profile_path, registry_path, command, pr_number, apply=apply,
+            config, registry_path, command, pr_number, apply=apply,
             channel=channel, disposition=disposition, confirmation=confirmation,
         )
 
 
 def _run_maintenance_unlocked(
-    profile_path: Path,
+    config: dict,
     registry_path: Path,
     command: str,
     pr_number: int,
@@ -345,7 +344,6 @@ def _run_maintenance_unlocked(
     confirmation: str | None = None,
 ) -> dict:
     """Run a supported state recovery only under current standalone authority."""
-    config = userland.load_config(profile_path)
     profiles.require_enabled(config)
     provide_registry = registry_provider(registry_path, config)
     # Match the worker's whole-profile opening gate, then re-check the target

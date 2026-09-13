@@ -2391,6 +2391,7 @@ class EntrypointTests(unittest.TestCase):
 
     def test_service_holds_restrictive_umask_for_threaded_lifecycle(self):
         self.enable_profile()
+        expected_config = userland.load_config(self.profile)
         current_mask = {"value": 0o022}
         transitions = []
 
@@ -2400,9 +2401,9 @@ class EntrypointTests(unittest.TestCase):
             transitions.append((previous, value))
             return previous
 
-        def exercise_lifecycle(profile_path, registry_path):
+        def exercise_lifecycle(config, registry_path):
             self.assertEqual(current_mask["value"], 0o077)
-            self.assertEqual(profile_path, self.profile)
+            self.assertEqual(config, expected_config)
             self.assertEqual(registry_path, self.root / "registry.json")
 
         with patch.object(entrypoint.os, "umask", side_effect=fake_umask), patch.object(
@@ -2424,6 +2425,26 @@ class EntrypointTests(unittest.TestCase):
             with self.assertRaises(service.ServiceError):
                 with entrypoint.exclusive_service_lock(config, self.root / "registry-copy.json"):
                     self.fail("a concurrent maintenance lock must not be acquired")
+
+    def test_service_uses_the_config_that_selected_the_tenant_lock(self):
+        self.enable_profile()
+        loaded = userland.load_config(self.profile)
+        seen = []
+        with patch.object(userland, "load_config", side_effect=lambda _path: seen.append(True) or loaded), \
+                patch.object(entrypoint, "registry_provider", return_value=lambda: object()), \
+                patch.object(entrypoint, "_serve_with_restrictive_umask") as serve_inner:
+            entrypoint.serve(self.profile, self.root / "registry.json")
+        self.assertEqual(len(seen), 1)
+        self.assertIs(serve_inner.call_args.args[0], loaded)
+        seen.clear()
+        with patch.object(userland, "load_config", side_effect=lambda _path: seen.append(True) or loaded), \
+                patch.object(entrypoint, "registry_provider", return_value=lambda: object()), \
+                patch.object(entrypoint, "_run_maintenance_unlocked", return_value={}) as maintenance_inner:
+            entrypoint.run_maintenance(
+                self.profile, self.root / "registry-copy.json", "retry-openclaw", 7, apply=True
+            )
+        self.assertEqual(len(seen), 1)
+        self.assertIs(maintenance_inner.call_args.args[0], loaded)
 
     def test_shipped_candidate_profile_is_refused_before_registry_or_credentials(self):
         missing_registry = self.root / "never-created.json"
@@ -3302,6 +3323,27 @@ MUTANTS = [
         '            SELECT heads.* FROM heads\n',
         '            SELECT heads.* FROM heads JOIN projections USING (repository, pr_number, base_sha, head_sha, review_epoch)\n',
         "test_review_conductor_profiles.ProfilesTest.test_closed_head_without_projection_still_removes_ready_label",
+    ),
+    (
+        "pause a ClawSweeper action that was already dispatched",
+        "tools/review_conductor.py",
+        "            if paused == 1:\n",
+        "            if True:\n",
+        "test_review_conductor_profiles.ProfilesTest.test_draft_transition_preserves_dispatched_clawsweeper_until_terminal",
+    ),
+    (
+        "reload the service profile after selecting its tenant lock",
+        "tools/service_entrypoint.py",
+        "            _serve_with_restrictive_umask(config, registry_path)\n",
+        "            _serve_with_restrictive_umask(userland.load_config(profile_path), registry_path)\n",
+        "EntrypointTests.test_service_uses_the_config_that_selected_the_tenant_lock",
+    ),
+    (
+        "reload the maintenance profile after selecting its tenant lock",
+        "tools/service_entrypoint.py",
+        "            config, registry_path, command, pr_number, apply=apply,\n",
+        "            userland.load_config(profile_path), registry_path, command, pr_number, apply=apply,\n",
+        "EntrypointTests.test_service_uses_the_config_that_selected_the_tenant_lock",
     ),
 ]
 

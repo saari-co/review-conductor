@@ -252,6 +252,32 @@ class ProfilesTest(unittest.TestCase):
         self.assertEqual(self.state(config)['state'],'clawsweeper_clean_draft')
         self.assertFalse(core.state_projection(self.state(config))['ready_for_human_label'])
 
+    def test_draft_transition_preserves_dispatched_clawsweeper_until_terminal(self):
+        config=self.config();self.enqueue(config)
+        openclaw=legacy.action(config,7,'openclaw.enqueue');legacy.mark_dispatched(config,openclaw['action_id'])
+        runtime.bridge_openclaw(config,self.terminal(config,openclaw))
+        clawsweeper=legacy.action(config,7,'clawsweeper.dispatch');legacy.mark_dispatched(config,clawsweeper['action_id'])
+        p=self.payload(legacy.pr_payload(7));p['action']='converted_to_draft';p['pull_request'].update(draft=True,updated_at='2026-08-29T20:23:00Z')
+        self.ingest(config,'pull_request','draft-after-dispatch',p)
+        self.assertEqual(self.state(config)['state'],'clawsweeper_queued')
+        connection=core.open_database(Path(config['paths']['state_root']),REPO)
+        try:
+            core.process_internal_event(connection,core.load_config(Path(config['core_config'])),{
+                'schema':core.INTERNAL_EVENT_SCHEMA,'event_id':'clawsweeper:802:started','type':'clawsweeper.started',
+                'repository':REPO,'pr_number':7,'base_sha':BASE,'head_sha':HEAD,
+                'review_epoch':clawsweeper['review_epoch'],'workflow_run_id':'802',
+            })
+            outcome=core.process_internal_event(connection,core.load_config(Path(config['core_config'])),{
+                'schema':core.INTERNAL_EVENT_SCHEMA,'event_id':'clawsweeper:802:clean','type':'clawsweeper.terminal',
+                'repository':REPO,'pr_number':7,'base_sha':BASE,'head_sha':HEAD,
+                'review_epoch':clawsweeper['review_epoch'],'workflow_run_id':'802','result':'clean',
+                'finding_count':0,'review_scope':'comprehensive','reviewer_actor':'fixture-suite-clawsweeper',
+                'proof_ref':'proof/clawsweeper/802/PROOF.md',
+            })
+            connection.commit()
+        finally:connection.close()
+        self.assertEqual(outcome['state'],'clawsweeper_clean_draft')
+
     def test_cross_repo_stale_epoch_head_base_actor_and_p0_artifacts_fail_closed(self):
         config=self.config();action=self.enqueue(config)
         for override in ({'repository':'dinkuskit/blocks'},{'review_epoch':1},{'head_sha':'3'*40},{'base_sha':'4'*40},{'reviewer_actor':'spark-openclaw'},{'review_scope':'P0-only'},{'operator_id':'review-conductor'}):
