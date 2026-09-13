@@ -53,7 +53,8 @@ class FakeProcess:
         self.returncode = -9
 
     def wait(self, timeout):
-        del timeout
+        if self.returncode is None and timeout == 0:
+            raise subprocess.TimeoutExpired("fake", timeout)
         self.reaped = True
         return self.returncode
 
@@ -382,6 +383,54 @@ os._exit(0)
         with self.assertRaises(ProcessLookupError):
             REAL_KILLPG(proc.pid, 0)
 
+    def test_unreaped_leader_is_reaped_before_group_probe_completes(self):
+        process = FakeProcess(returncode=0)
+        signals = []
+
+        def kill_group(_pid, signum):
+            if signum == 0:
+                if process.reaped:
+                    raise ProcessLookupError
+                return
+            signals.append(signum)
+
+        supervisor.stop_service_process(process, kill_group=kill_group, timeout=0.2)
+        self.assertEqual(signals, [signal.SIGTERM])
+        self.assertTrue(process.reaped)
+
+    def test_surviving_process_group_fails_closed_before_restart(self):
+        process = FakeProcess()
+        spawned = []
+
+        def kill_group(_pid, _signum):
+            return
+
+        with self.assertRaisesRegex(
+            supervisor.SupervisorError, "did not terminate"
+        ):
+            supervisor.stop_service_process(
+                process, kill_group=kill_group, timeout=0.15
+            )
+        item = supervisor.Supervisor(
+            self.config,
+            self.profile,
+            self.registry,
+            (3, 4),
+            "expected",
+            popen=lambda *_args, **_kwargs: spawned.append(True) or FakeProcess(),
+        )
+        item.child = process
+        with patch.object(supervisor, "GROUP_SHUTDOWN_SECONDS", 0.12), patch.object(
+            supervisor.os, "killpg", kill_group
+        ):
+            with self.assertRaisesRegex(
+                supervisor.SupervisorError, "did not terminate"
+            ):
+                item.restart_child()
+        self.assertEqual(spawned, [])
+        self.assertIs(item.child, process)
+        self.assertEqual(item.generation, 0)
+
     def test_control_rejects_wrong_identity_before_restart_or_stop(self):
         with tempfile.TemporaryFile("w+b") as webhook, tempfile.TemporaryFile("w+b") as key:
             webhook.write(b"x")
@@ -406,6 +455,22 @@ os._exit(0)
             self.assertEqual(response["status"], "rejected")
             self.assertEqual(item.generation, 0)
             self.assertIs(item.child, process)
+
+    def test_control_rejects_non_string_command_without_stopping(self):
+        process = FakeProcess()
+        item = supervisor.Supervisor(
+            self.config, self.profile, self.registry, (3, 4), "expected"
+        )
+        item.child = process
+        left, right = socket.socketpair()
+        with left, right:
+            right.sendall(b'{"command":["stop"],"identity":"expected"}\n')
+            self.assertTrue(supervisor._handle_control(left, item))
+            response = json.loads(right.recv(4096))
+        self.assertEqual(response["status"], "rejected")
+        self.assertFalse(item.stopping)
+        self.assertIs(item.child, process)
+        self.assertFalse(process.terminated)
 
     def test_fragmented_health_control_request_is_read_to_its_bound(self):
         process = FakeProcess()
@@ -465,6 +530,41 @@ os._exit(0)
                 supervisor.request_control(
                     self.config, self.profile, self.registry, "health"
                 )
+
+    def test_restart_control_timeout_exceeds_group_shutdown(self):
+        captured = []
+
+        class CaptureTimeout:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def settimeout(self, timeout):
+                captured.append(timeout)
+
+            def connect(self, _path):
+                raise TimeoutError("synthetic control timeout")
+
+        with patch.object(supervisor.socket, "socket", return_value=CaptureTimeout()):
+            with self.assertRaisesRegex(
+                supervisor.SupervisorError, "control request failed"
+            ):
+                supervisor.request_control(
+                    self.config, self.profile, self.registry, "restart"
+                )
+            with self.assertRaisesRegex(
+                supervisor.SupervisorError, "control request failed"
+            ):
+                supervisor.request_control(
+                    self.config, self.profile, self.registry, "health"
+                )
+        self.assertGreater(
+            captured[0], 2 * supervisor.GROUP_SHUTDOWN_SECONDS
+        )
+        self.assertEqual(captured[1], supervisor.CONTROL_REQUEST_SECONDS)
+        self.assertNotEqual(captured[0], captured[1])
 
     def test_control_response_requires_matching_identity(self):
         class ResponseSocket:
@@ -593,6 +693,21 @@ os._exit(0)
         self.assertFalse(supervisor.supervisor_paths(self.config)[1].exists())
         self.assert_closed(captured)
 
+    def test_chmod_failure_unlinks_bound_control_socket(self):
+        socket_path = supervisor.supervisor_paths(self.config)[1]
+        with source_credentials(), patch.object(
+            supervisor.os, "chmod", side_effect=OSError("synthetic chmod failure")
+        ):
+            with self.assertRaises(supervisor.SupervisorError):
+                supervisor.run_supervisor(
+                    self.config,
+                    self.profile,
+                    self.registry,
+                    popen=lambda *_args, **_kwargs: FakeProcess(),
+                    install_signals=False,
+                )
+        self.assertFalse(socket_path.exists())
+
     def test_stop_signals_are_installed_before_child_spawn_and_restored(self):
         events = []
 
@@ -669,6 +784,31 @@ class MutationTests(unittest.TestCase):
             '                kill_group(pgid, signal.SIGKILL)\n',
             '                pass\n',
             'test_exited_leader_does_not_leave_sigterm_ignoring_descendant',
+        ),
+        (
+            '    _reap_leader(process)\n',
+            '',
+            'test_unreaped_leader_is_reaped_before_group_probe_completes',
+        ),
+        (
+            '                    raise SupervisorError(\n                        "standalone service process group did not terminate"\n                    )\n',
+            '                    break\n',
+            'test_surviving_process_group_fails_closed_before_restart',
+        ),
+        (
+            '        RESTART_CONTROL_SECONDS if command == "restart" else CONTROL_REQUEST_SECONDS\n',
+            '        CONTROL_REQUEST_SECONDS\n',
+            'test_restart_control_timeout_exceeds_group_shutdown',
+        ),
+        (
+            '    if not isinstance(command, str) or command not in {"health", "stop", "restart"}:\n',
+            '    if command not in {"health", "stop", "restart"}:\n',
+            'test_control_rejects_non_string_command_without_stopping',
+        ),
+        (
+            '            listener.bind(str(socket_path))\n            stack.callback(socket_path.unlink, missing_ok=True)\n            os.chmod(socket_path, 0o600)\n',
+            '            listener.bind(str(socket_path))\n            os.chmod(socket_path, 0o600)\n            stack.callback(socket_path.unlink, missing_ok=True)\n',
+            'test_chmod_failure_unlinks_bound_control_socket',
         ),
         (
             '            os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,\n',

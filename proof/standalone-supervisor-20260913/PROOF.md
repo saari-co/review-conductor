@@ -34,11 +34,12 @@ crash: health reports `failed` until an explicit restart. Startup failure,
 normal stop and exceptional exit remove the socket, close descriptors and bound
 termination of the service-owned process group independently of leader state:
 SIGTERM the group, wait while any member remains, SIGKILL the group if it is
-still present, and reap the leader when possible.
+still present, reaping a zombie leader so it cannot keep the group visible.
+If the group remains after the SIGKILL bound, stop/restart fail closed.
 
 ## Direct tests and mutants
 
-The focused suite passed 19 tests. It exercised:
+The focused suite passed 24 tests. It exercised:
 
 - maximum-size descriptor transport through a real inherited `/dev/fd`
   consumer before any service reader;
@@ -59,8 +60,13 @@ The focused suite passed 19 tests. It exercised:
 - isolated process-session creation and process-group shutdown on stop/restart.
 - shutdown of a SIGTERM-ignoring descendant after the service leader has exited,
   so restart cannot overlap generations.
+- reaping an unreaped leader so Linux zombies cannot stall group probes;
+- fail-closed restart when a process group survives SIGKILL;
+- restart control timeout longer than the maximum group-shutdown bound;
+- rejection of a non-string control command without stopping the supervisor;
+- control-socket unlink when chmod fails after bind.
 
-Seventeen disposable-copy mutants were killed by one named test each:
+Twenty-two disposable-copy mutants were killed by one named test each:
 
 1. omit `pass_fds`;
 2. omit registry path from the control identity;
@@ -79,6 +85,11 @@ Seventeen disposable-copy mutants were killed by one named test each:
 15. launch the service in the supervisor's process session;
 16. return from shutdown when the service leader has already exited;
 17. omit SIGKILL of a process group that ignored SIGTERM.
+18. omit reaping the leader while probing the process group;
+19. return from shutdown while the process group still exists;
+20. use the short control timeout for restart;
+21. membership-test a non-string control command;
+22. register socket unlink only after chmod.
 
 Each mutant ran with a bounded timeout and required nonzero status, `Ran 1 test`
 and the intended `FAIL` or `ERROR` name.
@@ -88,7 +99,7 @@ and the intended `FAIL` or `ERROR` name.
 Locally exercised interpreter: CPython 3.14.6 on macOS.
 
 - `make check` — PASS, including all legacy suites, 72 service-runtime tests,
-  9 legacy launcher tests, 19 standalone-supervisor tests and all mutation
+  9 legacy launcher tests, 24 standalone-supervisor tests and all mutation
   harnesses.
 - `make build` — PASS.
 - `python3 -m compileall -q tools tests scripts` — PASS.
@@ -146,3 +157,10 @@ exited, so a SIGTERM-ignoring descendant could survive into the next
 generation. Shutdown now probes and signals the process group independently of
 leader state. Direct descendant-process regressions and two precise mutants
 cover the early-return and omitted-SIGKILL cases. Suite PR #8 was not edited.
+
+Copilot review `5191095466` on `3ad730156133b02ab33cf1d9f6380b827dc3857b`
+required four fail-closed repairs: reap zombies during group probe, fail closed
+if the group survives SIGKILL, wait longer than the shutdown bound for restart
+control, reject non-string commands without stopping, and unlink the control
+socket from bind before chmod. Direct regressions and precise mutants cover
+each. Suite PR #8 was not edited.

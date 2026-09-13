@@ -102,7 +102,11 @@ descriptors after creating verified anonymous copies, rewinds those copies befor
 each explicit child start, and closes them plus the socket on every exit path.
 The service starts in its own process session; stop and restart signal that owned
 process group independently of whether the leader has already exited, wait while
-any member remains, then SIGKILL the group if it is still present and reap the
-leader when possible so an adapter descendant cannot be carried into the next
-generation.
+any member remains, reaping an exited leader so a zombie cannot keep the group
+visible, then SIGKILL remaining members. If the group is still present after
+that bound, stop/restart fail closed instead of starting a new generation.
+The control socket is unlinked from bind onward, including chmod failure.
+Restart control waits longer than the maximum group-shutdown bound; a timeout
+is not reported as a stopped supervisor. Non-string control commands are
+rejected without terminating the service.
 Anonymous storage may still be disk-backed and is not a secure-erasure guarantee.

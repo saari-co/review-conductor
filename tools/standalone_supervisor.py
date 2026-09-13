@@ -29,6 +29,8 @@ CONTROL_SOCKET_NAME = ".standalone-supervisor.sock"
 SUPERVISOR_LOCK_NAME = ".standalone-supervisor.lock"
 MAX_CONTROL_BYTES = 4096
 GROUP_SHUTDOWN_SECONDS = 10
+CONTROL_REQUEST_SECONDS = 2
+RESTART_CONTROL_SECONDS = GROUP_SHUTDOWN_SECONDS * 2 + CONTROL_REQUEST_SECONDS
 
 
 class SupervisorError(core.ContractError):
@@ -204,15 +206,31 @@ def process_group_exists(
     return True
 
 
+def _reap_leader(process: Any) -> None:
+    with contextlib.suppress(
+        ChildProcessError, ProcessLookupError, subprocess.TimeoutExpired
+    ):
+        process.wait(timeout=0)
+
+
+def process_group_remaining(
+    process: Any, pgid: int, *, kill_group: Callable[[int, int], None]
+) -> bool:
+    _reap_leader(process)
+    return process_group_exists(pgid, kill_group=kill_group)
+
+
 def stop_service_process(
     process: Any,
     *,
     kill_group: Callable[[int, int], None] | None = None,
-    timeout: float = GROUP_SHUTDOWN_SECONDS,
+    timeout: float | None = None,
 ) -> None:
     """Bound shutdown of the service-owned process group, independent of leader state."""
     if kill_group is None:
         kill_group = os.killpg
+    if timeout is None:
+        timeout = GROUP_SHUTDOWN_SECONDS
     pgid = process.pid
     try:
         kill_group(pgid, signal.SIGTERM)
@@ -220,7 +238,7 @@ def stop_service_process(
         if not _missing_process_group(exc):
             raise
     deadline = time.monotonic() + timeout
-    while process_group_exists(pgid, kill_group=kill_group):
+    while process_group_remaining(process, pgid, kill_group=kill_group):
         if time.monotonic() >= deadline:
             try:
                 kill_group(pgid, signal.SIGKILL)
@@ -229,9 +247,11 @@ def stop_service_process(
                     break
                 raise
             kill_deadline = time.monotonic() + timeout
-            while process_group_exists(pgid, kill_group=kill_group):
+            while process_group_remaining(process, pgid, kill_group=kill_group):
                 if time.monotonic() >= kill_deadline:
-                    break
+                    raise SupervisorError(
+                        "standalone service process group did not terminate"
+                    )
                 time.sleep(0.05)
             break
         time.sleep(0.05)
@@ -334,7 +354,8 @@ def _read_request(connection: socket.socket) -> dict[str, Any]:
         raise SupervisorError("invalid standalone supervisor control request") from exc
     if not isinstance(request, dict) or set(request) != {"command", "identity"}:
         raise SupervisorError("invalid standalone supervisor control request")
-    if request["command"] not in {"health", "stop", "restart"}:
+    command = request["command"]
+    if not isinstance(command, str) or command not in {"health", "stop", "restart"}:
         raise SupervisorError("unsupported standalone supervisor control request")
     return request
 
@@ -421,8 +442,8 @@ def run_supervisor(
         try:
             socket_path.unlink(missing_ok=True)
             listener.bind(str(socket_path))
-            os.chmod(socket_path, 0o600)
             stack.callback(socket_path.unlink, missing_ok=True)
+            os.chmod(socket_path, 0o600)
             listener.listen(4)
             listener.settimeout(0.25)
         except OSError as exc:
@@ -469,9 +490,12 @@ def request_control(
         separators=(",", ":"),
         sort_keys=True,
     ).encode() + b"\n"
+    timeout = (
+        RESTART_CONTROL_SECONDS if command == "restart" else CONTROL_REQUEST_SECONDS
+    )
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-            connection.settimeout(2)
+            connection.settimeout(timeout)
             connection.connect(str(socket_path))
             connection.sendall(request)
             raw = _recv_line(connection, "response")
