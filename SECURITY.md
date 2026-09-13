@@ -20,7 +20,11 @@ ingress, exact App/installation admission, approved-policy retrieval and atomic
 binding persistence; `tools/service_entrypoint.py` requires an enabled profile,
 a same-user external registry with mode exactly 0600 outside source, checkout,
 state and proof roots (re-read on every delivery and tick), and
-descriptor-delivered credentials. These
+descriptor-delivered credentials. `tools/standalone_supervisor.py` is the
+source-only foreground supervisor for that entrypoint. It accepts only profile
+and registry paths plus fixed lifecycle verbs in argv, copies two inherited
+credential descriptors into bounded anonymous files, and passes only descriptor
+numbers through an allowlisted child environment. These
 sources are not deployed. A general client API and delivery outbox remain **not
 implemented**; do not expose the legacy internal-event CLI as an API. A registry
 document is service configuration and must never be committed here or read from
@@ -78,3 +82,21 @@ This repairs a legacy transport deadlock; it does not qualify live cloudflared,
 1Password, service lifecycle, credentials or deployment. Historical 1Password
 bootstrap/resolver code remains regression-only, including its service-account
 environment flow; the standalone package still excludes all launcher code.
+
+## Standalone supervisor boundary (offline qualification only)
+
+The standalone supervisor owns one SMCBD profile and its state-root lock and
+mode-0600 Unix control socket. Control requests carry an exact non-secret identity
+digest covering the profile/registry paths, repository/App/installation IDs,
+state/checkout/proof roots and loopback port. A mismatched profile or registry
+cannot stop or restart that process. `start` runs the supervisor in the
+foreground; `health`, `stop` and explicit `restart` use the local socket.
+A crashed child remains failed and is never automatically restarted.
+
+The caller must already have supplied distinct webhook-secret and GitHub-App-key
+descriptors under the profile's two configured environment names. The supervisor
+does not resolve 1Password, accept credential values in argv/environment, start
+a tunnel, install a service unit or activate the profile. It closes the incoming
+descriptors after creating verified anonymous copies, rewinds those copies before
+each explicit child start, and closes them plus the socket on every exit path.
+Anonymous storage may still be disk-backed and is not a secure-erasure guarantee.

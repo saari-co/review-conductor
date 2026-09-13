@@ -108,13 +108,15 @@ Non-secret credential selectors are already isolated in the inactive profile:
 | GitHub App private key | `op://Review Conductor SMCBD Suite GitHub App Runtime/Review Conductor SMCBD Suite GitHub App/private-key.pem` |
 | Cloudflare connector | `op://Smoky Review Conductor SMCBD Suite Cloudflare Tunnel/SMCBD Suite Cloudflare Tunnel/connector-token` |
 
-The existing legacy launcher does not yet invoke the registry-aware standalone
-entrypoint. A separately reviewed launcher or supervisor path must pass the
-webhook secret and App key to `tools/service_entrypoint.py` through inherited
-file descriptors while supplying the non-secret profile and registry paths as
-arguments. This wiring is an activation prerequisite, not functionality claimed
-by this source slice. Secret values must never be entered in chat, command
-arguments, environment values, Git, logs, proof, PR comments or Actions
+The source-only `tools/standalone_supervisor.py` now invokes the registry-aware
+entrypoint. It passes the webhook secret and App key to
+`tools/service_entrypoint.py` through inherited file descriptors while
+supplying only the non-secret profile and registry paths plus fixed lifecycle
+verbs as arguments. It binds local health/stop/restart control to the exact
+profile, registry, tenant roots and loopback port; a crashed service remains
+failed pending explicit restart. This is synthetic qualification, not an
+installed supervisor or activation. Secret values must never be entered in chat,
+command arguments, environment values, Git, logs, proof, PR comments or Actions
 artifacts.
 
 ### Approved credential transfer procedure
@@ -135,8 +137,8 @@ artifacts.
    their recovery tokens in protected bootstrap locations outside source, state
    and proof roots. Operators verify access with `op whoami` without reading
    secret values into logs. Do not use the legacy userland launcher for the
-   standalone profile; activation waits for the separately reviewed
-   registry-aware descriptor/supervisor wiring.
+   standalone profile. A later deployment procedure must connect the protected
+   resolver output to the qualified supervisor's inherited descriptor inputs.
 
 ## HTTPS ingress and source qualification
 
@@ -219,8 +221,8 @@ Activation remains blocked until all are true:
   exactly;
 - dedicated 1Password service accounts, private key, webhook secret and tunnel
   connector are provisioned;
-- registry-aware launcher or supervisor descriptor wiring is reviewed and
-  qualified against `tools/service_entrypoint.py`;
+- the registry-aware standalone supervisor source is independently reviewed and
+  an exact landed revision is selected for deployment;
 - the isolated HTTPS edge and local service health are verified;
 - a human explicitly authorizes deployment and SMCBD shadow-mode activation.
 
@@ -232,6 +234,12 @@ authoritative rail check names after validating their exact-revision evidence.
 Verify clean, findings,
 timeout, replay, stale head/base/epoch, cross-installation and policy-promotion
 cases before proposing cutover.
+
+The target repository still carries its v1 manifest with
+`quiet_seconds=600`. This launcher slice does not edit that repository. After
+launcher qualification, a separate target-repository change must promote the
+owner-approved scheduling-v2 manifest and record its exact commit/hash in the
+external registry before activation.
 
 ## Authority-bound maintenance
 
