@@ -143,10 +143,10 @@ class PolicyLoadingTests(unittest.TestCase):
         policy = ta.load_approved_policy(self.blocks, BLOCKS_COMMIT, self.fx.read)
         self.assertEqual((policy.repository, policy.repository_id, policy.commit, policy.sha256),
                          (BLOCKS, 1306882611, BLOCKS_COMMIT, sha(self.fx.blocks)))
-        self.assertEqual(policy.quiet_seconds, 600)
+        self.assertIs(policy.clawsweeper_requires_ready, True)
         self.assertEqual(self.fx.reads, [(BLOCKS, BLOCKS_COMMIT)])
         with self.assertRaises(dataclasses.FrozenInstanceError):
-            policy.quiet_seconds = 0
+            policy.clawsweeper_requires_ready = False
 
     def test_unapproved_commit_is_refused_before_transport(self):
         for commit in [HEAD, BASE, SMCBD_COMMIT, "e" * 40, BLOCKS_COMMIT.upper(), None, ""]:
@@ -331,7 +331,7 @@ class BindingTests(unittest.TestCase):
         for kwargs in [{"repository": SMCBD}, {"repository": []},
                        {"repository_id": 1366416798}, {"repository": "attacker/blocks"},
                        {"repository_id": "1306882611"}, {"commit": HEAD.upper()}, {"sha256": "z" * 64},
-                       {"quiet_seconds": 0}, {"quiet_seconds": True}, {"quiet_seconds": 601},
+                       {"clawsweeper_requires_ready": False}, {"clawsweeper_requires_ready": 1},
                        {"default_branch": ""}, {"default_branch": "forged"},
                        {"manifest_bytes": good.policy.manifest_bytes + b"\n"},
                        {"manifest_bytes": good.policy.manifest_bytes.decode()}]:
@@ -367,7 +367,7 @@ class BindingTests(unittest.TestCase):
         item = ta.Admission(good.review, BLOCKS_APP, BLOCKS_INSTALL, good.policy)
         object.__setattr__(item, "policy", policy); crafted.append(item)
         policy = dataclasses.replace(good.policy)
-        object.__setattr__(policy, "quiet_seconds", 601)
+        object.__setattr__(policy, "clawsweeper_requires_ready", False)
         item = ta.Admission(good.review, BLOCKS_APP, BLOCKS_INSTALL, good.policy)
         object.__setattr__(item, "policy", policy); crafted.append(item)
         policy = dataclasses.replace(good.policy)

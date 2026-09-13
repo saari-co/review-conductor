@@ -50,8 +50,8 @@ service deployment, authoritative checks or migration. Keep those grants separat
 5. Separately commit SMCBD's manifest, remove/rename Actions placeholder rail jobs,
    observe genuine App-owned checks, then seek owner authorization for a precise
    protection rebinding. PR #3 is not changed by scaffold work.
-6. Restart quiet period -> deterministic CI -> OpenClaw -> ClawSweeper at a new
-   exact head. No stale or skipped evidence is carried forward as PASS.
+6. Restart deterministic CI -> OpenClaw at every new exact head; add ClawSweeper
+   only while that exact head is ready. No stale or skipped evidence is carried forward as PASS.
 7. Only after SMCBD proves the standalone path and rollback, migrate Blocks.
    Retire x-api ownership in a separate reviewed and authorized change.
 

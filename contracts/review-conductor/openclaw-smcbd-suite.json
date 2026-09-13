@@ -23,8 +23,7 @@
   "merge_policy": "human_only",
   "review_policy": {
     "enabled": false,
-    "require_ready": true,
-    "quiet_seconds": 600,
+    "clawsweeper_requires_ready": true,
     "comprehensive": true,
     "reviewers": {
       "openclaw": null,

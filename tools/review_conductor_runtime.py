@@ -833,14 +833,16 @@ def reconcile_superseded_projection(
     client: GitHubAppClient | Any,
     *,
     dry_run: bool,
+    conclusion: str = "skipped",
+    ready_label_already_removed: bool = False,
 ) -> dict[str, Any]:
     item = {
         "pr_number": row["pr_number"],
         "base_sha": row["base_sha"],
         "head_sha": row["head_sha"],
         "review_epoch": row["review_epoch"],
-        "visible_state": "superseded",
-        "checks": {name: "skipped" for name in CHECK_NAMES},
+        "visible_state": "closed" if conclusion == "cancelled" else "superseded",
+        "checks": {name: conclusion for name in CHECK_NAMES},
         "ready_label": False,
         "merge_authorized": False,
     }
@@ -866,12 +868,14 @@ def reconcile_superseded_projection(
                 name,
                 row["head_sha"],
                 projection_external_id(row, name),
-                "skipped",
+                conclusion,
             )
         elif row[create_state_column] == "creating":
             raise RuntimeError(
                 f"superseded {name} creation outcome is uncertain and requires reconciliation"
             )
+    if conclusion == "cancelled" and bool(row["ready_label_applied"]) and not ready_label_already_removed:
+        client.remove_ready_label(row["pr_number"])
     now = core.utc_now()
     connection.execute(
         """
@@ -912,12 +916,69 @@ def reconcile_projection(
                     connection, stale_projection, client, dry_run=dry_run
                 )
             )
+        closed_query = """
+            SELECT heads.* FROM heads
+            WHERE heads.repository=? AND heads.is_current=1
+              AND heads.state IN ('closed','closed_merged')
+              AND NOT EXISTS (
+                  SELECT 1 FROM projections
+                  WHERE projections.repository=heads.repository
+                    AND projections.pr_number=heads.pr_number
+                    AND projections.base_sha=heads.base_sha
+                    AND projections.head_sha=heads.head_sha
+                    AND projections.review_epoch=heads.review_epoch
+                    AND projections.last_projected_state='superseded'
+              )
+        """
+        closed_params: list[Any] = [core_config["repository"]]
+        if pr_number is not None:
+            closed_query += " AND heads.pr_number=?"
+            closed_params.append(pr_number)
+        closed_query += " ORDER BY heads.pr_number"
+        closed = connection.execute(closed_query, closed_params).fetchall()
+        for closed_head in closed:
+            if not dry_run:
+                client.remove_ready_label(closed_head["pr_number"])
+            closed_projection = connection.execute(
+                """
+                SELECT * FROM projections
+                WHERE repository=? AND pr_number=? AND base_sha=? AND head_sha=?
+                  AND review_epoch=?
+                  AND COALESCE(last_projected_state, '') != 'superseded'
+                """,
+                (
+                    closed_head["repository"], closed_head["pr_number"],
+                    closed_head["base_sha"], closed_head["head_sha"],
+                    closed_head["review_epoch"],
+                ),
+            ).fetchone()
+            if closed_projection is None and dry_run:
+                projected.append({
+                    "pr_number": closed_head["pr_number"],
+                    "base_sha": closed_head["base_sha"],
+                    "head_sha": closed_head["head_sha"],
+                    "review_epoch": closed_head["review_epoch"],
+                    "visible_state": "closed",
+                    "checks": {name: "cancelled" for name in CHECK_NAMES},
+                    "ready_label": False,
+                    "merge_authorized": False,
+                    "check_ids": {name: None for name in CHECK_NAMES},
+                })
+                continue
+            if closed_projection is None:
+                closed_projection = ensure_projection_row(connection, closed_head)
+            projected.append(
+                reconcile_superseded_projection(
+                    connection, closed_projection, client, dry_run=dry_run,
+                    conclusion="cancelled", ready_label_already_removed=True,
+                )
+            )
         query = "SELECT * FROM heads WHERE repository = ? AND is_current = 1"
         params: list[Any] = [core_config["repository"]]
         if pr_number is not None:
             query += " AND pr_number = ?"
             params.append(pr_number)
-        query += " ORDER BY pr_number"
+        query += " AND state NOT IN ('closed','closed_merged') ORDER BY pr_number"
         rows = connection.execute(query, params).fetchall()
         for row in rows:
             projection = ensure_projection_row(connection, row)

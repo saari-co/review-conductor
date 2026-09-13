@@ -429,12 +429,13 @@ class AdmissionIngressTests(unittest.TestCase):
         finally:
             connection.close()
         ready = self.fx.payload()
-        ready["action"] = "ready_for_review"
+        ready["action"] = "synchronize"
+        ready["pull_request"]["head"]["sha"] = "e" * 40
         ready["pull_request"]["updated_at"] = "2026-08-30T20:11:00Z"
-        receipt = self.fx.ingest("ready", ready, registry=promoted_registry)
-        self.assertEqual((receipt["result"], receipt["review_epoch"]), ("accepted", 1))
+        receipt = self.fx.ingest("new-head", ready, registry=promoted_registry)
+        self.assertEqual((receipt["result"], receipt["review_epoch"]), ("accepted", 0))
         self.assertEqual([(row["review_epoch"], row["policy_sha256"]) for row in self.fx.binding_rows()],
-                         [(0, hashlib.sha256(promoted[:-1]).hexdigest()), (1, hashlib.sha256(promoted).hexdigest())])
+                         [(0, hashlib.sha256(promoted[:-1]).hexdigest()), (0, hashlib.sha256(promoted).hexdigest())])
         service.require_current_bindings(self.fx.app_config(), promoted_registry)
 
     def test_registry_file_requires_same_user_mode_0600(self):
@@ -560,11 +561,12 @@ class AdmissionIngressTests(unittest.TestCase):
         finally:
             connection.close()
         ready = self.fx.payload()
-        ready["action"] = "ready_for_review"
+        ready["action"] = "synchronize"
+        ready["pull_request"]["head"]["sha"] = "e" * 40
         ready["pull_request"]["updated_at"] = "2026-08-30T20:11:00Z"
         self.assertEqual(self.fx.ingest("readmit", ready, registry=rotated_registry)["result"], "accepted")
         self.assertEqual([(row["review_epoch"], row["reviewer_openclaw"]) for row in self.fx.binding_rows()],
-                         [(0, REVIEWERS["openclaw"]), (1, "rotated-openclaw")])
+                         [(0, REVIEWERS["openclaw"]), (0, "rotated-openclaw")])
         service.require_current_bindings(self.fx.app_config(), rotated_registry)
 
     def test_profile_change_after_admission_invalidates_existing_bindings(self):
@@ -577,7 +579,7 @@ class AdmissionIngressTests(unittest.TestCase):
         # approves the same policy commit/hash: every policy-governed field change
         # blocks projection of the old binding.
         edits = {
-            "quiet_seconds": lambda c: c["review_policy"].__setitem__("quiet_seconds", 600),
+            "clawsweeper_requires_ready": lambda c: c["review_policy"].__setitem__("clawsweeper_requires_ready", False),
             "default_branch": lambda c: c.__setitem__("default_branch", "release"),
             "workflow_name": lambda c: c["ci"].__setitem__("workflow_name", "Other pipeline"),
             "workflow_path": lambda c: c["ci"].__setitem__("workflow_path", ".github/workflows/other.yml"),
@@ -595,11 +597,11 @@ class AdmissionIngressTests(unittest.TestCase):
         for label, edit in edits.items():
             changed = json.loads(original)
             edit(changed)
-            if label == "quiet_seconds":
-                # The engine pins 600 for generalized profiles; prove the digest itself
-                # is sensitive instead.
+            if label == "clawsweeper_requires_ready":
+                # The engine requires readiness-gated ClawSweeper dispatch; prove
+                # the digest itself is sensitive to an invalid profile value.
                 variant = json.loads(original)
-                variant["review_policy"]["quiet_seconds"] = 900
+                variant["review_policy"]["clawsweeper_requires_ready"] = False
                 self.assertNotEqual(service.profile_policy_digest(variant, self.fx.app_config()), digest)
                 continue
             self.fx.config_path.write_text(json.dumps(changed) + "\n")
@@ -2230,7 +2232,6 @@ class AdmissionIngressTests(unittest.TestCase):
     def test_admitted_policy_must_match_the_engine_profile(self):
         manifest = json.loads(self.fx.policy)
         variants = {
-            "quiet_seconds": lambda m: m["review"].__setitem__("quiet_seconds", 900),
             "default_branch": lambda m: m.__setitem__("default_branch", "release"),
             "workflow_name": lambda m: m["ci"].__setitem__("workflow_name", "Other pipeline"),
             "workflow_path": lambda m: m["ci"].__setitem__("workflow_path", ".github/workflows/other.yml"),
@@ -2389,6 +2390,8 @@ class EntrypointTests(unittest.TestCase):
         self.profile.write_text(json.dumps(profile) + "\n")
 
     def test_service_holds_restrictive_umask_for_threaded_lifecycle(self):
+        self.enable_profile()
+        expected_config = userland.load_config(self.profile)
         current_mask = {"value": 0o022}
         transitions = []
 
@@ -2398,12 +2401,14 @@ class EntrypointTests(unittest.TestCase):
             transitions.append((previous, value))
             return previous
 
-        def exercise_lifecycle(profile_path, registry_path):
+        def exercise_lifecycle(config, registry_path):
             self.assertEqual(current_mask["value"], 0o077)
-            self.assertEqual(profile_path, self.profile)
+            self.assertEqual(config, expected_config)
             self.assertEqual(registry_path, self.root / "registry.json")
 
         with patch.object(entrypoint.os, "umask", side_effect=fake_umask), patch.object(
+            entrypoint, "registry_provider", return_value=lambda: object()
+        ), patch.object(
             entrypoint,
             "_serve_with_restrictive_umask",
             side_effect=exercise_lifecycle,
@@ -2412,6 +2417,34 @@ class EntrypointTests(unittest.TestCase):
 
         self.assertEqual(current_mask["value"], 0o022)
         self.assertEqual(transitions, [(0o022, 0o077), (0o077, 0o022)])
+
+    def test_service_and_maintenance_are_mutually_exclusive(self):
+        config = userland.load_config(self.profile)
+        registry = self.root / "registry.json"
+        with entrypoint.exclusive_service_lock(config, registry):
+            with self.assertRaises(service.ServiceError):
+                with entrypoint.exclusive_service_lock(config, self.root / "registry-copy.json"):
+                    self.fail("a concurrent maintenance lock must not be acquired")
+
+    def test_service_uses_the_config_that_selected_the_tenant_lock(self):
+        self.enable_profile()
+        loaded = userland.load_config(self.profile)
+        seen = []
+        with patch.object(userland, "load_config", side_effect=lambda _path: seen.append(True) or loaded), \
+                patch.object(entrypoint, "registry_provider", return_value=lambda: object()), \
+                patch.object(entrypoint, "_serve_with_restrictive_umask") as serve_inner:
+            entrypoint.serve(self.profile, self.root / "registry.json")
+        self.assertEqual(len(seen), 1)
+        self.assertIs(serve_inner.call_args.args[0], loaded)
+        seen.clear()
+        with patch.object(userland, "load_config", side_effect=lambda _path: seen.append(True) or loaded), \
+                patch.object(entrypoint, "registry_provider", return_value=lambda: object()), \
+                patch.object(entrypoint, "_run_maintenance_unlocked", return_value={}) as maintenance_inner:
+            entrypoint.run_maintenance(
+                self.profile, self.root / "registry-copy.json", "retry-openclaw", 7, apply=True
+            )
+        self.assertEqual(len(seen), 1)
+        self.assertIs(maintenance_inner.call_args.args[0], loaded)
 
     def test_shipped_candidate_profile_is_refused_before_registry_or_credentials(self):
         missing_registry = self.root / "never-created.json"
@@ -2783,8 +2816,8 @@ MUTANTS = [
     (
         "serve an inactive profile",
         "tools/service_entrypoint.py",
-        "    profiles.require_enabled(config)\n    provide_registry = registry_provider(registry_path, config)\n    provide_registry()\n",
-        "    pass\n    provide_registry = registry_provider(registry_path, config)\n    provide_registry()\n",
+        "    profiles.require_enabled(config)\n    registry_provider(registry_path, config)()\n    previous_umask = os.umask(0o077)\n",
+        "    pass\n    registry_provider(registry_path, config)()\n    previous_umask = os.umask(0o077)\n",
         "EntrypointTests.test_shipped_candidate_profile_is_refused_before_registry_or_credentials",
     ),
     (
@@ -3235,6 +3268,83 @@ MUTANTS = [
         "    except (core.ContractError, OSError) as exc:\n",
         "EntrypointTests.test_maintenance_sqlite_failure_is_a_controlled_service_error",
     ),
+    (
+        "invalidate in-flight CI on a same-head status transition",
+        "tools/review_conductor.py",
+        '    if event["source_created_at"] <= row["head_started_at"]:\n',
+        '    if event["source_created_at"] <= row["source_updated_at"]:\n',
+        "test_review_conductor_profiles.ProfilesTest.test_status_transition_preserves_inflight_ci_and_first_draft_value",
+    ),
+    (
+        "leave a draft-obsoleted ClawSweeper action inert after returning ready",
+        "tools/review_conductor.py",
+        "                    SET status='pending', last_error=NULL, claim_owner=NULL,\n",
+        "                    SET status='obsolete', last_error=NULL, claim_owner=NULL,\n",
+        "test_review_conductor_profiles.ProfilesTest.test_draft_runs_openclaw_and_ready_enables_clawsweeper_without_new_epoch",
+    ),
+    (
+        "dispatch ClawSweeper after clean OpenClaw adjudication while draft",
+        "tools/review_conductor.py",
+        '    if rail == "openclaw":\n        if bool(row["is_draft"]):\n',
+        '    if rail == "openclaw":\n        if False:\n',
+        "test_review_conductor_profiles.ProfilesTest.test_clean_adjudication_while_draft_never_dispatches_clawsweeper",
+    ),
+    (
+        "retain a ready label when closing a projected pull request",
+        "tools/review_conductor_runtime.py",
+        '        for closed_head in closed:\n            if not dry_run:\n                client.remove_ready_label(closed_head["pr_number"])\n',
+        '        for closed_head in closed:\n            if False:\n                client.remove_ready_label(closed_head["pr_number"])\n',
+        "test_review_conductor_profiles.ProfilesTest.test_closed_projection_filter_removes_only_target_ready_label",
+    ),
+    (
+        "retain merge-ready state when a fully cleared pull request returns to draft",
+        "tools/review_conductor.py",
+        '        if is_draft and state == "ready_for_human_merge":\n',
+        '        if False:\n',
+        "test_review_conductor_profiles.ProfilesTest.test_clawsweeper_finishing_after_return_to_draft_cannot_clear_merge",
+    ),
+    (
+        "redispatch consumed ClawSweeper work after returning ready",
+        "tools/review_conductor.py",
+        '        elif not is_draft and state == "clawsweeper_clean_draft":\n',
+        '        elif False:\n',
+        "test_review_conductor_profiles.ProfilesTest.test_clawsweeper_finishing_after_return_to_draft_cannot_clear_merge",
+    ),
+    (
+        "key the service lock to a registry copy instead of tenant state",
+        "tools/service_entrypoint.py",
+        '    lock_path = core.ensure_state_root(Path(config["paths"]["state_root"])) / ".service-operation.lock"\n',
+        '    lock_path = registry_path.parent / ".service-operation.lock"\n',
+        "EntrypointTests.test_service_and_maintenance_are_mutually_exclusive",
+    ),
+    (
+        "skip closed heads that have no projection row",
+        "tools/review_conductor_runtime.py",
+        '            SELECT heads.* FROM heads\n',
+        '            SELECT heads.* FROM heads JOIN projections USING (repository, pr_number, base_sha, head_sha, review_epoch)\n',
+        "test_review_conductor_profiles.ProfilesTest.test_closed_head_without_projection_still_removes_ready_label",
+    ),
+    (
+        "pause a ClawSweeper action that was already dispatched",
+        "tools/review_conductor.py",
+        "            if paused == 1:\n",
+        "            if True:\n",
+        "test_review_conductor_profiles.ProfilesTest.test_draft_transition_preserves_dispatched_clawsweeper_until_terminal",
+    ),
+    (
+        "reload the service profile after selecting its tenant lock",
+        "tools/service_entrypoint.py",
+        "            _serve_with_restrictive_umask(config, registry_path)\n",
+        "            _serve_with_restrictive_umask(userland.load_config(profile_path), registry_path)\n",
+        "EntrypointTests.test_service_uses_the_config_that_selected_the_tenant_lock",
+    ),
+    (
+        "reload the maintenance profile after selecting its tenant lock",
+        "tools/service_entrypoint.py",
+        "            config, registry_path, command, pr_number, apply=apply,\n",
+        "            userland.load_config(profile_path), registry_path, command, pr_number, apply=apply,\n",
+        "EntrypointTests.test_service_uses_the_config_that_selected_the_tenant_lock",
+    ),
 ]
 
 
@@ -3253,8 +3363,9 @@ class MutationTests(unittest.TestCase):
                     self.assertEqual(source.count(old), 1, f"mutant anchor drifted: {label}")
                     target.write_text(source.replace(old, new))
                     try:
+                        target_id = test_id if test_id.startswith("test_") else f"test_service_runtime.{test_id}"
                         completed = subprocess.run(
-                            [sys.executable, "-m", "unittest", "-q", f"test_service_runtime.{test_id}"],
+                            [sys.executable, "-m", "unittest", "-q", target_id],
                             cwd=copy_root / "tests", capture_output=True, text=True, timeout=180,
                             env={"PATH": "/usr/bin:/bin", "HOME": temp, "PYTHONDONTWRITEBYTECODE": "1"},
                         )

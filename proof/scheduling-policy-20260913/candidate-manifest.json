@@ -1,0 +1,13 @@
+{
+  "schema": "review-conductor.candidate-manifest.v1",
+  "base_sha": "c6df9bb1368766253fed35c243585142ffd5b392",
+  "captured_date": "2026-09-13",
+  "files": {
+    "tools/review_conductor.py": "3f12b8da9798efcc2deec6898f16f41c773f447f529ad44bc1de8295e5b70e3f",
+    "tools/review_conductor_runtime.py": "b4b05dbe8af9a422cb9b262273dba2b7024c8c58971dd014198d354114e139c0",
+    "tools/service_entrypoint.py": "b229099034a917a29defe50c76544c872623e11e45e8222021e0bd6e263c0be7",
+    "tools/service_runtime.py": "4dfcce62c03a3618c5d89a6494123252faf3746b797299023702b9cd3efcf763",
+    "tools/target_manifest.py": "23a09e5a7e9fa01532479bb0fdc00b507139cbff70403eeb4c8bc3d4e0f0aa4c",
+    "tools/trusted_admission.py": "fb69a20bd7c0d29830c21e332335bca5237c8a48486b08d69f466f3b66496c59"
+  }
+}

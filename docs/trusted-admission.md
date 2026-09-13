@@ -77,7 +77,7 @@ enrollment's values fail.
 
 The result is a frozen `AdmittedPolicy` that retains the exact immutable manifest
 bytes. Construction and revalidation recompute their digest, parse them again and
-require the exposed `quiet_seconds` and `default_branch` values to match the
+require the exposed readiness rule and `default_branch` values to match the
 validated content. Shape-valid replacement or crafted-object mutation therefore
 cannot preserve a current binding. `policy_id` is the SHA-256 of a
 canonical JSON of `(schema, repository, repository_id, commit, sha256)`. Same
@@ -123,10 +123,11 @@ SQLite binding persistence. Only the accepted `pull_request` delivery that
 established a head binds it; `workflow_run` deliveries and closed/duplicate
 pull-request deliveries never create bindings. One exact tuple keeps exactly one
 binding, so a promoted policy applies only to a newly admitted head or review
-epoch (for example `ready_for_review` or `reopened`), and the binding table
+epoch (for example a new head or `reopened`). A same-head `ready_for_review`
+transition preserves the existing epoch and binding, and the binding table
 refuses a conflicting rebinding outright. Before binding, the admitted manifest
 must agree with the engine profile's repository, default branch, CI workflow,
-quiet period and merge policy. Each binding records the App, installation,
+readiness-gated ClawSweeper policy and merge policy. Each binding records the App, installation,
 policy commit/hash, the enrollment's reviewer actors and a digest of those
 policy-governed profile fields plus the adapter authority fields (ClawSweeper
 workflow id/name/path/ref/publish, the adapter contract/artifact prefix and the

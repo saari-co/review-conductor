@@ -62,8 +62,8 @@ contain SMCBD only. `dinkuskit/blocks` is added after the pilot under a separate
 installation and migration decision.
 
 The engine still reads its rules from the core profile. A policy binds only when
-the admitted manifest's repository, default branch, CI workflow name/path, quiet
-period and merge policy agree exactly with that profile; promoting a manifest that
+the admitted manifest's repository, default branch, CI workflow name/path,
+ClawSweeper readiness gate and merge policy agree exactly with that profile; promoting a manifest that
 changes any of them requires the matching profile change first.
 
 Every worker tick re-checks that the running profile's App, installation,

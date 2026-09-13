@@ -204,9 +204,9 @@ def load_config(path: Path) -> dict[str, Any]:
         policy = require_object(config["review_policy"], "review_policy")
         if re.fullmatch(r"[A-Za-z0-9_.-]+\.ya?ml", clawsweeper["workflow_id"]) is None or clawsweeper["workflow_path"] != f".github/workflows/{clawsweeper['workflow_id']}":
             raise ContractError("profile ClawSweeper workflow must be one exact workflow file")
-        require_exact_keys(policy, {"enabled", "require_ready", "quiet_seconds", "comprehensive", "reviewers"}, set(), "review_policy")
-        if type(policy["enabled"]) is not bool or policy["require_ready"] is not True or policy["comprehensive"] is not True or policy["quiet_seconds"] != 600:
-            raise ContractError("generalized profiles require ready, comprehensive review and a 600-second quiet period")
+        require_exact_keys(policy, {"enabled", "clawsweeper_requires_ready", "comprehensive", "reviewers"}, set(), "review_policy")
+        if type(policy["enabled"]) is not bool or policy["clawsweeper_requires_ready"] is not True or policy["comprehensive"] is not True:
+            raise ContractError("generalized profiles require comprehensive review and ready state before ClawSweeper")
         require_exact_keys(require_object(policy["reviewers"], "reviewers"), {"openclaw", "clawsweeper"}, set(), "reviewers")
         for actor in policy["reviewers"].values():
             if actor is not None or policy["enabled"]:
@@ -282,6 +282,7 @@ def open_database(state_root: Path, repository: str | None = None) -> sqlite3.Co
           base_sha TEXT NOT NULL,
           head_sha TEXT NOT NULL,
           source_updated_at TEXT NOT NULL,
+          head_started_at TEXT NOT NULL,
           is_current INTEGER NOT NULL CHECK (is_current IN (0, 1)),
           state TEXT NOT NULL,
           author TEXT NOT NULL,
@@ -379,6 +380,13 @@ def open_database(state_root: Path, repository: str | None = None) -> sqlite3.Co
     if "source_updated_at" not in head_columns:
         connection.execute(
             "ALTER TABLE heads ADD COLUMN source_updated_at TEXT NOT NULL DEFAULT ''"
+        )
+    if "head_started_at" not in head_columns:
+        connection.execute(
+            "ALTER TABLE heads ADD COLUMN head_started_at TEXT NOT NULL DEFAULT ''"
+        )
+        connection.execute(
+            "UPDATE heads SET head_started_at = source_updated_at WHERE head_started_at = ''"
         )
     if "review_epoch" not in head_columns:
         connection.execute(
@@ -728,13 +736,14 @@ def begin_new_head(
     now = utc_now()
     connection.execute(
         """
-        INSERT INTO heads(repository, pr_number, base_sha, head_sha, source_updated_at, is_current, state, author,
+        INSERT INTO heads(repository, pr_number, base_sha, head_sha, source_updated_at, head_started_at, is_current, state, author,
                           mutation_owner, repair_cycle, review_epoch, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, 1, 'ci_running', ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, 1, 'ci_running', ?, ?, ?, ?, ?, ?)
         ON CONFLICT(repository, pr_number, base_sha, head_sha) DO UPDATE SET
           is_current = 1,
           state = 'ci_running',
           source_updated_at = excluded.source_updated_at,
+          head_started_at = excluded.head_started_at,
           author = excluded.author,
           mutation_owner = excluded.mutation_owner,
           repair_cycle = excluded.repair_cycle,
@@ -752,6 +761,7 @@ def begin_new_head(
             pr_number,
             base_sha,
             head_sha,
+            source_updated_at,
             source_updated_at,
             author,
             mutation_owner,
@@ -875,8 +885,62 @@ def process_pull_request(
     if (previous is not None and previous["state"] in {"closed", "closed_merged"}
         and original_action not in {"reopened", "closed"}):
         raise ContractError("only a reopened event can reopen a terminal PR")
-    if original_action in {"ready_for_review", "converted_to_draft"}:
-        event = {**event, "action": "reopened"}
+    if original_action in {"ready_for_review", "converted_to_draft"} and previous is not None:
+        identity = {k: event[k] for k in ("repository", "pr_number", "base_sha", "head_sha")}
+        if previous["base_sha"] != event["base_sha"] or previous["head_sha"] != event["head_sha"]:
+            result = _process_pull_request(connection, config, event_id, event, payload)
+            if result["result"] in {"accepted", "duplicate"}:
+                connection.execute(
+                    "UPDATE heads SET is_draft=? WHERE repository=? AND pr_number=? AND base_sha=? AND head_sha=? AND is_current=1",
+                    (int(event["is_draft"]), *identity.values()),
+                )
+            return result
+        is_draft = original_action == "converted_to_draft"
+        connection.execute(
+            "UPDATE heads SET is_draft=?, source_updated_at=?, updated_at=? WHERE repository=? AND pr_number=? AND base_sha=? AND head_sha=? AND is_current=1",
+            (int(is_draft), event["source_updated_at"], utc_now(), *identity.values()),
+        )
+        action_id = None
+        created = False
+        state = previous["state"]
+        if is_draft and state == "ready_for_human_merge":
+            state = "clawsweeper_clean_draft"
+            update_exact_head(connection, identity, state=state, rail="clawsweeper", blocker="ready-for-human clearance is paused while the pull request is draft")
+        elif is_draft and state == "clawsweeper_queued":
+            paused = connection.execute(
+                "UPDATE actions SET status='obsolete', last_error='pull request returned to draft', updated_at=? WHERE repository=? AND pr_number=? AND base_sha=? AND head_sha=? AND review_epoch=? AND kind='clawsweeper.dispatch' AND status IN ('pending','failed','dispatching')",
+                (utc_now(), *identity.values(), previous["review_epoch"]),
+            ).rowcount
+            if paused == 1:
+                state = "openclaw_clean_draft"
+                update_exact_head(connection, identity, state=state, rail="openclaw", blocker="ClawSweeper waits for ready-for-review state")
+        elif not is_draft and state == "clawsweeper_clean_draft":
+            state = "ready_for_human_merge"
+            update_exact_head(connection, identity, state=state, rail="clawsweeper", blocker="human merge authority required")
+        elif not is_draft and state == "openclaw_clean_draft":
+            payload_action = clawsweeper_action_payload(config, event["pr_number"], event["base_sha"], event["head_sha"], int(previous["review_epoch"]))
+            action_id, created = insert_action(connection, kind="clawsweeper.dispatch", payload=payload_action, review_epoch=int(previous["review_epoch"]), **identity)
+            if not created:
+                resumed = connection.execute(
+                    """
+                    UPDATE actions
+                    SET status='pending', last_error=NULL, claim_owner=NULL,
+                        claimed_at=NULL, lease_expires_at=NULL, updated_at=?
+                    WHERE action_id=? AND status='obsolete'
+                      AND last_error='pull request returned to draft'
+                    """,
+                    (utc_now(), action_id),
+                ).rowcount
+                if resumed != 1:
+                    action = connection.execute(
+                        "SELECT status FROM actions WHERE action_id=?", (action_id,)
+                    ).fetchone()
+                    if action is None or action["status"] not in {"pending", "dispatching", "dispatched"}:
+                        raise ContractError("ClawSweeper action cannot be resumed safely")
+            state = "clawsweeper_queued"
+            update_exact_head(connection, identity, state=state, rail="clawsweeper", blocker=None)
+        insert_event(connection, event_id=event_id, kind=f"pull_request.{original_action}", stale=False, payload=payload, **identity)
+        return {"result": "accepted", "state": state, "review_epoch": previous["review_epoch"], "action_id": action_id, "action_created": created, "merge_dispatched": False}
     elif previous is not None and bool(previous["is_draft"]) != event["is_draft"] and original_action != "closed":
         event = {**event, "action": "reopened"}
     result = _process_pull_request(connection, config, event_id, event, payload)
@@ -1003,14 +1067,14 @@ def _process_pull_request(
             connection.execute(
                 """
                 UPDATE heads
-                SET state = 'ci_running', source_updated_at = ?, review_epoch = ?,
+                SET state = 'ci_running', source_updated_at = ?, head_started_at = ?, review_epoch = ?,
                     ci_conclusion = NULL, rail = NULL, review_request_id = NULL,
                     reviewer_actor = NULL, repair_owner = NULL, blocker = NULL,
                     updated_at = ?
                 WHERE repository = ? AND pr_number = ? AND base_sha = ? AND head_sha = ?
                   AND is_current = 1
                 """,
-                (event["source_updated_at"], next_epoch, utc_now(), *identity.values()),
+                (event["source_updated_at"], event["source_updated_at"], next_epoch, utc_now(), *identity.values()),
             )
             insert_event(
                 connection,
@@ -1148,7 +1212,7 @@ def process_workflow_run(
             "review_invoked": False,
             "merge_dispatched": False,
         }
-    if event["source_created_at"] <= row["source_updated_at"]:
+    if event["source_created_at"] <= row["head_started_at"]:
         insert_event(
             connection,
             event_id=event_id,
@@ -1166,11 +1230,7 @@ def process_workflow_run(
         }
     policy = config.get("review_policy")
     if policy:
-        deadline = dt.datetime.fromisoformat(row["source_updated_at"].replace("Z", "+00:00")) + dt.timedelta(seconds=policy["quiet_seconds"])
-        completed = require_github_timestamp(payload["workflow_run"].get("updated_at"), "CI completion timestamp")
-        if row["is_draft"] or dt.datetime.fromisoformat(completed.replace("Z", "+00:00")) < deadline or dt.datetime.fromisoformat(utc_now().replace("Z", "+00:00")) < deadline:
-            insert_event(connection, event_id=event_id, kind="ci.completed", stale=True, payload=payload, **identity)
-            return {"result": "ignored", "reason": "draft or quiet-period CI is not eligible", "review_invoked": False, "merge_dispatched": False}
+        require_github_timestamp(payload["workflow_run"].get("updated_at"), "CI completion timestamp")
     conclusion = event["conclusion"]
     action_id = None
     created = False
@@ -1419,6 +1479,15 @@ def continue_after_adjudication(
     rail: str,
 ) -> tuple[str, str | None, bool]:
     if rail == "openclaw":
+        if bool(row["is_draft"]):
+            update_exact_head(
+                connection,
+                identity,
+                state="openclaw_clean_draft",
+                rail="openclaw",
+                blocker="ClawSweeper waits for ready-for-review state",
+            )
+            return "openclaw_clean_draft", None, False
         review_epoch = int(row["review_epoch"])
         payload = clawsweeper_action_payload(
             config,
@@ -1436,6 +1505,15 @@ def continue_after_adjudication(
         )
         update_exact_head(connection, identity, state="clawsweeper_queued", rail="clawsweeper", blocker=None)
         return "clawsweeper_queued", action_id, created
+    if bool(row["is_draft"]):
+        update_exact_head(
+            connection,
+            identity,
+            state="clawsweeper_clean_draft",
+            rail="clawsweeper",
+            blocker="ready-for-human clearance is paused while the pull request is draft",
+        )
+        return "clawsweeper_clean_draft", None, False
     update_exact_head(connection, identity, state="ready_for_human_merge", blocker="human merge authority required")
     return "ready_for_human_merge", None, False
 
@@ -1480,7 +1558,10 @@ def process_internal_event(connection: sqlite3.Connection, config: dict[str, Any
             raise ContractError("OpenClaw terminal does not match the exact queued action request_id")
         if row["review_request_id"] and row["review_request_id"] != event["request_id"]:
             raise ContractError("OpenClaw terminal request_id does not match the running request")
-        if event["result"] == "clean":
+        if event["result"] == "clean" and bool(row["is_draft"]):
+            next_state = "openclaw_clean_draft"
+            update_exact_head(connection, identity, state=next_state, rail="openclaw", review_request_id=event["request_id"], reviewer_actor=event["reviewer_actor"], blocker="ClawSweeper waits for ready-for-review state")
+        elif event["result"] == "clean":
             review_epoch = int(row["review_epoch"])
             payload = clawsweeper_action_payload(
                 config,
@@ -1527,7 +1608,18 @@ def process_internal_event(connection: sqlite3.Connection, config: dict[str, Any
             raise ContractError("ClawSweeper terminal does not match a dispatched exact-tuple action")
         if row["review_request_id"] and row["review_request_id"] != str(event["workflow_run_id"]):
             raise ContractError("ClawSweeper terminal workflow_run_id does not match the running request")
-        if event["result"] == "clean":
+        if event["result"] == "clean" and bool(row["is_draft"]):
+            next_state = "clawsweeper_clean_draft"
+            update_exact_head(
+                connection,
+                identity,
+                state=next_state,
+                rail="clawsweeper",
+                review_request_id=None,
+                reviewer_actor=event["reviewer_actor"],
+                blocker="ready-for-human clearance is paused while the pull request is draft",
+            )
+        elif event["result"] == "clean":
             next_state = "ready_for_human_merge"
             update_exact_head(connection, identity, state=next_state, rail="clawsweeper", review_request_id=str(event["workflow_run_id"]), reviewer_actor=event["reviewer_actor"], blocker="human merge authority required")
         elif event["result"] == "findings":
@@ -2056,6 +2148,10 @@ def state_projection(row: dict[str, Any]) -> dict[str, Any]:
         openclaw, clawsweeper = "in_progress", "queued"
     elif state == "openclaw_failed":
         openclaw, clawsweeper = "failure", "skipped"
+    elif state == "openclaw_clean_draft":
+        openclaw, clawsweeper = "success", "skipped"
+    elif state == "clawsweeper_clean_draft":
+        openclaw, clawsweeper = "success", "success"
     elif state == "clawsweeper_queued":
         openclaw, clawsweeper = "success", "queued"
     elif state == "clawsweeper_running":
