@@ -87,9 +87,10 @@ environment flow; the standalone package still excludes all launcher code.
 
 The standalone supervisor owns one SMCBD profile and its state-root lock and
 mode-0600 Unix control socket. Control requests carry an exact non-secret identity
-digest covering the profile/registry paths, repository/App/installation IDs,
-state/checkout/proof roots and loopback port. A mismatched profile or registry
-cannot stop or restart that process. `start` runs the supervisor in the
+digest covering the complete validated profile configuration, profile/registry
+paths, repository/App/installation IDs, state/checkout/proof roots and loopback
+port. A mismatched or changed profile or registry path cannot stop or restart
+that process. `start` runs the supervisor in the
 foreground; `health`, `stop` and explicit `restart` use the local socket.
 A crashed child remains failed and is never automatically restarted.
 

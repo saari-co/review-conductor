@@ -60,10 +60,14 @@ def configuration_identity(
     """Bind local control to the exact non-secret tenant/process boundary."""
     paths = config["paths"]
     app = config["github_app"]
+    config_digest = hashlib.sha256(
+        json.dumps(config, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
     document = {
         "schema": "review-conductor.standalone-supervisor-identity.v1",
         "profile_path": str(profile_path.resolve(strict=True)),
         "registry_path": str(require_registry_path(registry_path)),
+        "config_sha256": config_digest,
         "profile_id": config["profile_id"],
         "repository": app["repository"],
         "repository_id": app["repository_id"],
@@ -92,24 +96,34 @@ def _source_descriptor(config: dict[str, Any], key: str) -> int:
     return descriptor
 
 
+def _close_descriptor(descriptor: int) -> None:
+    with contextlib.suppress(OSError):
+        os.close(descriptor)
+
+
 def prepare_credentials(
     config: dict[str, Any], stack: contextlib.ExitStack
 ) -> tuple[int, int]:
     """Copy inherited values into bounded anonymous files retained for restart."""
     keys = ("webhook_secret_fd_env", "github_private_key_fd_env")
-    sources = tuple(_source_descriptor(config, key) for key in keys)
-    if sources[0] == sources[1]:
-        raise SupervisorError("standalone credentials require distinct descriptors")
     prepared: list[int] = []
     labels = ("GitHub webhook secret", "GitHub App private key")
-    for key, label in zip(keys, labels):
-        value = userland.read_inherited_value(config["credentials"][key], label)
-        try:
-            descriptor = legacy_launcher.credential_descriptor(value.encode("utf-8"))
-        finally:
-            value = ""
-        stack.callback(os.close, descriptor)
-        prepared.append(descriptor)
+    with contextlib.ExitStack() as incoming:
+        sources: list[int] = []
+        for key in keys:
+            descriptor = _source_descriptor(config, key)
+            if descriptor in sources:
+                raise SupervisorError("standalone credentials require distinct descriptors")
+            incoming.callback(_close_descriptor, descriptor)
+            sources.append(descriptor)
+        for key, label in zip(keys, labels):
+            value = userland.read_inherited_value(config["credentials"][key], label)
+            try:
+                descriptor = legacy_launcher.credential_descriptor(value.encode("utf-8"))
+            finally:
+                value = ""
+            stack.callback(_close_descriptor, descriptor)
+            prepared.append(descriptor)
     return prepared[0], prepared[1]
 
 
@@ -285,7 +299,15 @@ def _handle_control(connection: socket.socket, supervisor: Supervisor) -> bool:
             return False
         _send_response(connection, supervisor.snapshot())
     except SupervisorError as exc:
-        _send_response(connection, {"status": "rejected", "error": str(exc)})
+        with contextlib.suppress(OSError):
+            _send_response(connection, {"status": "rejected", "error": str(exc)})
+    except OSError:
+        # A stalled or disconnected local client cannot terminate the service.
+        with contextlib.suppress(OSError):
+            _send_response(
+                connection,
+                {"status": "rejected", "error": "control transport failed"},
+            )
     return True
 
 
@@ -334,18 +356,7 @@ def run_supervisor(
     identity = configuration_identity(config, profile_path, registry_path)
     lock_path, socket_path = supervisor_paths(config)
     with supervisor_lock(lock_path), contextlib.ExitStack() as stack:
-        source_descriptors = tuple(
-            _source_descriptor(config, key)
-            for key in ("webhook_secret_fd_env", "github_private_key_fd_env")
-        )
-        try:
-            credentials = prepare_credentials(config, stack)
-        finally:
-            for descriptor in source_descriptors:
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
+        credentials = prepare_credentials(config, stack)
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         stack.callback(listener.close)
         try:
@@ -360,16 +371,18 @@ def run_supervisor(
         supervisor = Supervisor(
             config, profile_path, registry_path, credentials, identity, popen=popen
         )
-        supervisor.start_child()
         previous_handlers: dict[int, Any] = {}
 
         def request_stop(_signum: int, _frame: Any) -> None:
             supervisor.stopping = True
 
-        if install_signals:
-            for signum in (signal.SIGINT, signal.SIGTERM):
-                previous_handlers[signum] = signal.signal(signum, request_stop)
         try:
+            if install_signals:
+                for signum in (signal.SIGINT, signal.SIGTERM):
+                    previous_handlers[signum] = signal.signal(signum, request_stop)
+            # Install handlers before spawning so a startup-time signal cannot
+            # leave the service child running without its foreground supervisor.
+            supervisor.start_child()
             while not supervisor.stopping:
                 try:
                     connection, _ = listener.accept()
@@ -403,7 +416,7 @@ def request_control(
             connection.connect(str(socket_path))
             connection.sendall(request)
             raw = _recv_line(connection, "response")
-    except (OSError, TimeoutError):
+    except (FileNotFoundError, ConnectionRefusedError):
         return {
             "schema": "review-conductor.standalone-supervisor-health.v1",
             "status": "stopped",
@@ -412,12 +425,27 @@ def request_control(
             "repository": config["github_app"]["repository"],
             "automatic_restart": False,
         }
+    except OSError as exc:
+        raise SupervisorError("standalone supervisor control request failed") from exc
     try:
         response = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SupervisorError("standalone supervisor returned an invalid response") from exc
     if not isinstance(response, dict):
         raise SupervisorError("standalone supervisor returned an invalid response")
+    status = response.get("status")
+    if status not in {"running", "failed", "stopping", "rejected"}:
+        raise SupervisorError("standalone supervisor returned an invalid response")
+    if status == "rejected":
+        if set(response) != {"status", "error"} or not isinstance(
+            response["error"], str
+        ):
+            raise SupervisorError("standalone supervisor returned an invalid response")
+    elif (
+        response.get("schema") != "review-conductor.standalone-supervisor-health.v1"
+        or response.get("identity") != identity
+    ):
+        raise SupervisorError("standalone supervisor returned a mismatched identity")
     return response
 
 

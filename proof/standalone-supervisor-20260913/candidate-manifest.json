@@ -6,11 +6,11 @@
   "files": {
     "Makefile": "26c6fb958b85890ece2fb1ec0fd2c2114a5b8437af4ea9c0396c34c2d2c7a7f7",
     "README.md": "c765d1d92a3e99dc5d6418d61e73af2e47f7decad22f489de0b1043a0c7930e7",
-    "SECURITY.md": "a36d251ab28bb89ac54e2bca9d45889e82ac72d402d03eefc25d7a74e83c3ef6",
+    "SECURITY.md": "10361912ba57c16fbb2e91025b30b79e3be620b7fb604710f29c44a5974595ec",
     "docs/integration-contract.md": "143bb54666ccc247db880bda6081322a9c66c6ec90feb297258f6d4d8f74d353",
     "docs/migration.md": "6b7b37257cd23ad82ea9918cb15b7ead8327ed815bb9cce7f9e46bde79f209a2",
-    "docs/smcbd-pilot-handoff.md": "abac69f72a0c33f3e9da6a3c26ebb29750d490629ddd0546265e59c56f3c42a3",
-    "tests/test_standalone_supervisor.py": "1fc3e5b55eeda013dd455f1833164fe7da69f5c2e0b9fb177010fe1eed3a0162",
-    "tools/standalone_supervisor.py": "c1e4716fed01ee4403f334dc96ba15324d77980b31c23fa415be446b96fcb7e3"
+    "docs/smcbd-pilot-handoff.md": "d5abddd6c858717de27fb67ef1b6ad02e840998ae5e1b1694f41907f49ffeab4",
+    "tests/test_standalone_supervisor.py": "483b973d04f34cdfa27107d94b800e4e62affdd174af242df9a8268ba4ee1243",
+    "tools/standalone_supervisor.py": "eb0277043517d5cfbc2b074d53768324a83f7554b5b8c072c89c181e79e5b03d"
   }
 }

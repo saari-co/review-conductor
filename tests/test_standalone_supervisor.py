@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -187,6 +188,21 @@ assert values[1].startswith(b'-----BEGIN ' + b'PRIVATE KEY-----')
                 supervisor.prepare_credentials(self.config, stack)
         self.assert_closed(captured)
 
+    def test_partial_source_descriptor_acquisition_closes_first_source(self):
+        with tempfile.TemporaryFile("w+b") as source:
+            inherited = os.dup(source.fileno())
+            with patch.dict(
+                os.environ,
+                {
+                    "TEST_WEBHOOK_SECRET_FD": str(inherited),
+                    "TEST_GITHUB_PRIVATE_KEY_FD": "999999999",
+                },
+                clear=False,
+            ), contextlib.ExitStack() as stack:
+                with self.assertRaises(supervisor.SupervisorError):
+                    supervisor.prepare_credentials(self.config, stack)
+                self.assert_closed([inherited])
+
     def test_spawn_argv_and_environment_contain_only_paths_and_descriptor_numbers(self):
         with tempfile.TemporaryFile("w+b") as webhook, tempfile.TemporaryFile("w+b") as key:
             webhook.write(b"one")
@@ -241,6 +257,12 @@ assert values[1].startswith(b'-----BEGIN ' + b'PRIVATE KEY-----')
             variants.append((changed, self.profile, self.registry))
         changed = copy.deepcopy(self.config)
         changed["ingress"]["bind_port"] += 1
+        variants.append((changed, self.profile, self.registry))
+        changed = copy.deepcopy(self.config)
+        changed["credentials"]["webhook_secret_fd_env"] = "OTHER_WEBHOOK_FD"
+        variants.append((changed, self.profile, self.registry))
+        changed = copy.deepcopy(self.config)
+        changed["enrollment"]["enabled"] = False
         variants.append((changed, self.profile, self.registry))
         for config, profile, registry in variants:
             with self.subTest(config=config, profile=profile, registry=registry):
@@ -314,6 +336,83 @@ assert values[1].startswith(b'-----BEGIN ' + b'PRIVATE KEY-----')
             thread.join(2)
         self.assertEqual(response["status"], "running")
         self.assertEqual(result, [True])
+
+    def test_control_transport_failure_cannot_stop_supervisor(self):
+        class BrokenConnection:
+            def recv(self, _size):
+                raise TimeoutError("synthetic stalled client")
+
+            def sendall(self, _value):
+                raise BrokenPipeError("synthetic disconnected client")
+
+        process = FakeProcess()
+        item = supervisor.Supervisor(
+            self.config, self.profile, self.registry, (3, 4), "expected"
+        )
+        item.child = process
+        self.assertTrue(supervisor._handle_control(BrokenConnection(), item))
+        self.assertFalse(item.stopping)
+        self.assertFalse(process.terminated)
+
+    def test_control_timeout_is_not_reported_as_stopped(self):
+        class TimedOutSocket:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def settimeout(self, _timeout):
+                pass
+
+            def connect(self, _path):
+                raise TimeoutError("synthetic control timeout")
+
+        with patch.object(supervisor.socket, "socket", return_value=TimedOutSocket()):
+            with self.assertRaisesRegex(
+                supervisor.SupervisorError, "control request failed"
+            ):
+                supervisor.request_control(
+                    self.config, self.profile, self.registry, "health"
+                )
+
+    def test_control_response_requires_matching_identity(self):
+        class ResponseSocket:
+            def __init__(self, response):
+                self.response = response
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def settimeout(self, _timeout):
+                pass
+
+            def connect(self, _path):
+                pass
+
+            def sendall(self, _value):
+                pass
+
+            def recv(self, size):
+                result, self.response = self.response[:size], self.response[size:]
+                return result
+
+        invalid = (
+            (b'{"status":"running","identity":"wrong"}\n', "mismatched identity"),
+            (b'{"status":"invented","identity":"wrong"}\n', "invalid response"),
+            (b'{"status":"rejected"}\n', "invalid response"),
+        )
+        for payload, message in invalid:
+            with self.subTest(payload=payload), patch.object(
+                supervisor.socket, "socket", return_value=ResponseSocket(payload)
+            ):
+                with self.assertRaisesRegex(supervisor.SupervisorError, message):
+                    supervisor.request_control(
+                        self.config, self.profile, self.registry, "health"
+                    )
 
     def test_supervisor_lock_rejects_insecure_state_root_and_symlink_lock(self):
         lock_path = supervisor.supervisor_paths(self.config)[0]
@@ -404,6 +503,35 @@ assert values[1].startswith(b'-----BEGIN ' + b'PRIVATE KEY-----')
         self.assertFalse(supervisor.supervisor_paths(self.config)[1].exists())
         self.assert_closed(captured)
 
+    def test_stop_signals_are_installed_before_child_spawn_and_restored(self):
+        events = []
+
+        def install(signum, handler):
+            events.append(("signal", signum, handler))
+            return f"previous-{signum}"
+
+        def fail_spawn(*_args, **_kwargs):
+            events.append(("spawn",))
+            raise OSError("synthetic spawn failure")
+
+        with source_credentials(), patch.object(
+            supervisor.signal, "signal", side_effect=install
+        ):
+            with self.assertRaises(supervisor.SupervisorError):
+                supervisor.run_supervisor(
+                    self.config,
+                    self.profile,
+                    self.registry,
+                    popen=fail_spawn,
+                    install_signals=True,
+                )
+        self.assertEqual(
+            [event[0] for event in events],
+            ["signal", "signal", "spawn", "signal", "signal"],
+        )
+        self.assertEqual(events[3][2], f"previous-{signal.SIGINT}")
+        self.assertEqual(events[4][2], f"previous-{signal.SIGTERM}")
+
 
 class MutationTests(unittest.TestCase):
     MUTANTS = (
@@ -441,6 +569,41 @@ class MutationTests(unittest.TestCase):
             '            os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,\n',
             '            os.O_RDWR | os.O_CREAT | os.O_CLOEXEC,\n',
             'test_supervisor_lock_rejects_insecure_state_root_and_symlink_lock',
+        ),
+        (
+            '        "config_sha256": config_digest,\n',
+            '',
+            'test_configuration_identity_covers_profile_registry_and_isolation_boundary',
+        ),
+        (
+            '            incoming.callback(_close_descriptor, descriptor)\n',
+            '',
+            'test_partial_source_descriptor_acquisition_closes_first_source',
+        ),
+        (
+            '    except OSError:\n        # A stalled or disconnected local client cannot terminate the service.\n        with contextlib.suppress(OSError):\n            _send_response(\n                connection,\n                {"status": "rejected", "error": "control transport failed"},\n            )\n',
+            '    except OSError:\n        raise\n',
+            'test_control_transport_failure_cannot_stop_supervisor',
+        ),
+        (
+            '    except OSError as exc:\n        raise SupervisorError("standalone supervisor control request failed") from exc\n',
+            '    except OSError:\n        raise\n',
+            'test_control_timeout_is_not_reported_as_stopped',
+        ),
+        (
+            '    if status not in {"running", "failed", "stopping", "rejected"}:\n        raise SupervisorError("standalone supervisor returned an invalid response")\n',
+            '',
+            'test_control_response_requires_matching_identity',
+        ),
+        (
+            '    elif (\n        response.get("schema") != "review-conductor.standalone-supervisor-health.v1"\n        or response.get("identity") != identity\n    ):\n        raise SupervisorError("standalone supervisor returned a mismatched identity")\n',
+            '',
+            'test_control_response_requires_matching_identity',
+        ),
+        (
+            '            if install_signals:\n                for signum in (signal.SIGINT, signal.SIGTERM):\n                    previous_handlers[signum] = signal.signal(signum, request_stop)\n            # Install handlers before spawning so a startup-time signal cannot\n            # leave the service child running without its foreground supervisor.\n            supervisor.start_child()\n',
+            '            supervisor.start_child()\n            if install_signals:\n                for signum in (signal.SIGINT, signal.SIGTERM):\n                    previous_handlers[signum] = signal.signal(signum, request_stop)\n',
+            'test_stop_signals_are_installed_before_child_spawn_and_restored',
         ),
     )
 

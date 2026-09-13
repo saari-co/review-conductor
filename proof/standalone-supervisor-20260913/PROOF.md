@@ -36,7 +36,7 @@ child termination through terminate/kill/reap.
 
 ## Direct tests and mutants
 
-The focused suite passed 11 tests. It exercised:
+The focused suite passed 16 tests. It exercised:
 
 - maximum-size descriptor transport through a real inherited `/dev/fd`
   consumer before any service reader;
@@ -49,8 +49,13 @@ The focused suite passed 11 tests. It exercised:
 - wrong-identity rejection before stop/restart.
 - rejection of group/world-writable state roots and symlinked lock files.
 - bounded control framing when a request arrives in multiple stream reads.
+- cleanup when acquisition fails after only the first source descriptor;
+- full validated-profile identity changes, including credential selectors and
+  enrollment state;
+- control timeout/failure classification and response-identity verification;
+- signal-handler installation before child spawn and restoration after failure.
 
-Seven disposable-copy mutants were killed by one named test each:
+Thirteen disposable-copy mutants were killed by one named test each:
 
 1. omit `pass_fds`;
 2. omit registry path from the control identity;
@@ -59,6 +64,12 @@ Seven disposable-copy mutants were killed by one named test each:
 5. omit control-socket cleanup;
 6. omit descriptor rewind before restart.
 7. follow a symlinked supervisor lock.
+8. omit the complete validated-profile digest from control identity;
+9. leak a source descriptor on partial acquisition;
+10. let a disconnected control client escape the request boundary;
+11. misreport a control timeout as a stopped supervisor;
+12. accept a response for a foreign control identity;
+13. spawn the child before installing stop-signal handlers.
 
 Each mutant ran with a bounded timeout and required nonzero status, `Ran 1 test`
 and the intended `FAIL` or `ERROR` name.
@@ -68,7 +79,7 @@ and the intended `FAIL` or `ERROR` name.
 Locally exercised interpreter: CPython 3.14.6 on macOS.
 
 - `make check` — PASS, including all legacy suites, 72 service-runtime tests,
-  9 legacy launcher tests, 11 standalone-supervisor tests and all mutation
+  9 legacy launcher tests, 16 standalone-supervisor tests and all mutation
   harnesses.
 - `make build` — PASS.
 - `python3 -m compileall -q tools tests scripts` — PASS.
@@ -112,7 +123,10 @@ shadow activation each remain separate explicit authorizations.
 
 Owner approval was subsequently granted to publish this source slice for review
 and begin the separate target-repository scheduling-v2 change. Exact-head review
-found one duplicated README inventory row and removed it in a follow-up commit;
-runtime, tests and security-contract bytes were unchanged. The complete local
-gate set was rerun before publication. Draft publication does not authorize
-merge, deployment, manifest-hash promotion or shadow activation.
+removed one duplicated README inventory row and hardened six fail-closed edges:
+complete validated-profile identity, partial source-descriptor cleanup,
+control-client failure containment, timeout classification, response identity,
+and signal installation before child spawn. Direct tests and precise mutants
+cover each edge. The complete local gate set was rerun before publication. Draft
+publication does not authorize merge, deployment, manifest-hash promotion or
+shadow activation.

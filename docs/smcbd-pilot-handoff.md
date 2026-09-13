@@ -112,8 +112,8 @@ The source-only `tools/standalone_supervisor.py` now invokes the registry-aware
 entrypoint. It passes the webhook secret and App key to
 `tools/service_entrypoint.py` through inherited file descriptors while
 supplying only the non-secret profile and registry paths plus fixed lifecycle
-verbs as arguments. It binds local health/stop/restart control to the exact
-profile, registry, tenant roots and loopback port; a crashed service remains
+verbs as arguments. It binds local health/stop/restart control to the complete
+validated profile, registry path, tenant roots and loopback port; a crashed service remains
 failed pending explicit restart. This is synthetic qualification, not an
 installed supervisor or activation. Secret values must never be entered in chat,
 command arguments, environment values, Git, logs, proof, PR comments or Actions
