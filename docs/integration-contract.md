@@ -62,7 +62,9 @@ wait longer than the shutdown bound; failed normal or exceptional shutdown
 retains the active supervisor lock/control boundary, and startup connection
 failures are not reported as stopped while that lock is held. Malformed control
 commands are rejected without shutting the supervisor down. The control socket
-is private from bind and unlinked from bind onward. It neither provisions
+is private from bind and unlinked from bind onward. Startup requires the default
+`SIGCHLD` disposition, and every control frame has one absolute monotonic
+deadline rather than a resettable per-read timeout. It neither provisions
 credentials nor starts an HTTPS tunnel, and it is not installed or active.
 
 ## Service-owned enrollment

@@ -114,6 +114,9 @@ undrained generation fails closed instead of starting a new one. Before registry
 or state access, the entrypoint also requires
 the normalized profile digest calculated by the supervisor to match its one
 loaded configuration, so a replaced profile cannot change the advertised tenant.
+The supervisor rejects startup unless it owns the default `SIGCHLD`
+disposition, preventing inherited auto-reap or custom handlers from releasing
+the leader identity behind its back.
 The control socket is private from bind under a temporary restrictive umask and
 is unlinked from bind onward, including chmod failure. A failed shutdown keeps
 the original supervisor lock and control socket active so another start cannot
@@ -123,4 +126,6 @@ Stop/restart control waits longer than the maximum
 group-shutdown bound; connection failure while the lock is held is reported as
 starting/unavailable, never stopped. Non-string control commands are rejected
 without terminating the service.
+Control framing uses one absolute monotonic deadline, so trickled bytes cannot
+extend the single-threaded request boundary indefinitely.
 Anonymous storage may still be disk-backed and is not a secure-erasure guarantee.

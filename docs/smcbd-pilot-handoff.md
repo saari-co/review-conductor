@@ -125,7 +125,9 @@ the supervisor's normalized-profile digest before registry or state access. Rest
 and stop control wait longer than that shutdown bound. A failed shutdown
 retains the supervisor lock/control boundary even after an unexpected loop
 failure; startup connection failure while that lock is held is not reported as
-stopped. The Unix socket is private from bind, not only after chmod.
+stopped. The Unix socket is private from bind, not only after chmod. Startup
+requires the default `SIGCHLD` disposition, and local control framing has one
+absolute deadline that slow byte trickling cannot extend.
 This is synthetic qualification, not an installed supervisor or activation.
 Secret values must never be entered in chat,
 command arguments, environment values, Git, logs, proof, PR comments or Actions

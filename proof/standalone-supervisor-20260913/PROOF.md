@@ -53,7 +53,7 @@ connection failures are not reported as stopped while the lock is held.
 
 ## Direct tests and mutants
 
-The focused suite passed 32 direct tests. It exercised:
+The focused suite passed 34 direct tests. It exercised:
 
 - maximum-size descriptor transport through a real inherited `/dev/fd`
   consumer before any service reader;
@@ -98,8 +98,10 @@ The focused suite passed 32 direct tests. It exercised:
   reaping the process-group leader; and
 - real adapter subprocess inheritance of the generation descriptor through an
   otherwise allowlisted environment and default `close_fds`.
+- fail-closed startup under inherited ignored/custom `SIGCHLD`; and
+- one absolute monotonic deadline across fragmented control-frame reads.
 
-Thirty-five disposable-copy mutants were killed by one named test each:
+Thirty-seven disposable-copy mutants were killed by one named test each:
 
 1. omit credential descriptors from `pass_fds`;
 2. omit the generation descriptor from `pass_fds`;
@@ -137,6 +139,8 @@ Thirty-five disposable-copy mutants were killed by one named test each:
 33. let adapter execs inherit the leader-only descriptor;
 34. ignore leader-descriptor EOF on a host without `waitid`; and
 35. omit the generation descriptor from the shared adapter-command boundary.
+36. accept an inherited non-default `SIGCHLD` disposition; and
+37. reset the full control timeout for every fragmented read.
 
 Each mutant ran with a bounded timeout and required nonzero status, `Ran 1 test`
 and the intended `FAIL` or `ERROR` name.
@@ -146,7 +150,7 @@ and the intended `FAIL` or `ERROR` name.
 Locally exercised interpreter: CPython 3.14.6 on macOS.
 
 - `make check` — PASS, including all legacy suites, 72 service-runtime tests,
-  9 legacy launcher tests, 32 standalone-supervisor tests and all mutation
+  9 legacy launcher tests, 34 standalone-supervisor tests and all mutation
   harnesses.
 - `make build` — PASS.
 - `python3 -m compileall -q tools tests scripts` — PASS.
@@ -234,3 +238,9 @@ held the generation descriptor, and that direct adapter subprocesses using
 close-on-exec descriptor now reports exit without reaping on every supported
 host. All active adapter subprocess boundaries use one generation-preserving
 runner, with direct tests and precise mutants for both invariants.
+
+Copilot review `5192387534` on `5f3fb5bf2515834d4e5f9e310b7d67d9f59a9c50`
+found that inherited `SIGCHLD` handling could auto-reap the leader and that
+per-read socket timeouts did not bound a trickled control frame. Startup now
+requires the default `SIGCHLD` disposition, and control framing enforces one
+absolute monotonic deadline. Direct regressions and precise mutants cover both.

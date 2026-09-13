@@ -1,20 +1,20 @@
 {
   "schema": "review-conductor.candidate-manifest.v1",
-  "follow_up_of": "c7bd1a3140acde9a146b459af8754b76c0ae54c9",
+  "follow_up_of": "5f3fb5bf2515834d4e5f9e310b7d67d9f59a9c50",
   "base_sha": "9acb1ee3300490aa2f31ffd56b3999552834803b",
   "captured_date": "2026-09-13",
   "files": {
     "Makefile": "26c6fb958b85890ece2fb1ec0fd2c2114a5b8437af4ea9c0396c34c2d2c7a7f7",
     "README.md": "c765d1d92a3e99dc5d6418d61e73af2e47f7decad22f489de0b1043a0c7930e7",
-    "SECURITY.md": "cffdeb83e3f56bb24a66d09666bf6432f7a66c96c9ab1b2ce8c381501bffe7ec",
-    "docs/integration-contract.md": "97d1f90eb74239be14fa99406ce0aafaf7e7d7f4331c167b03df28b5598f0fd0",
+    "SECURITY.md": "54227e8fa14bcd4271fb3dc1d93094bafc905ad6900c12218887e5d183bac354",
+    "docs/integration-contract.md": "e56d1556cabcfa6e949b0f70bb6f5a22fd9c3a9cae5a094cf9bc49732ab25270",
     "docs/migration.md": "df995c474d69161c297c6f05aabd7c36ed1a334cc383a3b175bbd39cf1343a07",
     "docs/provenance.json": "c45df6e125396c5a9b4e6bfcceba60dc478d7cb9f9a7a96bc697701e0b95c2b9",
-    "docs/smcbd-pilot-handoff.md": "d18084bbea922f85c3b989815502fe436bf5bcbb1b21948fcfe77a8b957ea15d",
-    "tests/test_standalone_supervisor.py": "fe8f56fb1a0dc2454575f0fc1fdab7ae15add8f97964c522788ec71053760787",
+    "docs/smcbd-pilot-handoff.md": "2006ba0840b0cea34c13b36dc26e20f047fee62fad9647bfbbd09316649d91de",
+    "tests/test_standalone_supervisor.py": "8d22ef40bc294eff28853b330f83b01024b19989a9702a5d4b6eda49186e2770",
     "tools/review_conductor.py": "55ead91af7d9ff9e0c22fc361fa6744e6ebff167dbae27ad80e4a8a81f3c9790",
     "tools/review_conductor_userland.py": "8466b98518083cbc6e884fd77747fbaa5bb74e7ec792aed591cd09594cc4b95a",
     "tools/service_entrypoint.py": "f16edf009734bca31ef37e0d7e63ed96d92281f1982a57099de43b0d9b0b95c0",
-    "tools/standalone_supervisor.py": "9b854eff413ff61c330e9f59ef460857ec5469f2946c81f43a2d2a53ead220dd"
+    "tools/standalone_supervisor.py": "fc602f018b32ab379270eda287a5768b64715c86da653270804a9f0aabfcc32c"
   }
 }

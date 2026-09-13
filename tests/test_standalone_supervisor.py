@@ -383,6 +383,25 @@ os.fstat(leader)
         self.assertNotIn("synthetic-private-key-value", repr(command) + repr(environment))
         supervisor.stop_service_process(generation)
 
+    def test_spawn_rejects_inherited_ignored_sigchld_before_resource_creation(self):
+        spawned = []
+        with tempfile.TemporaryFile("w+b") as webhook, tempfile.TemporaryFile(
+            "w+b"
+        ) as key, patch.object(
+            supervisor.signal, "getsignal", return_value=signal.SIG_IGN
+        ):
+            with self.assertRaisesRegex(
+                supervisor.SupervisorError, "default SIGCHLD"
+            ):
+                supervisor.spawn_service(
+                    self.config,
+                    self.profile,
+                    self.registry,
+                    (webhook.fileno(), key.fileno()),
+                    popen=lambda *_args, **_kwargs: spawned.append(True),
+                )
+        self.assertEqual(spawned, [])
+
     def test_configuration_identity_covers_profile_registry_and_isolation_boundary(self):
         baseline = supervisor.configuration_identity(
             self.config, self.profile, self.registry
@@ -868,10 +887,36 @@ os._exit(0)
         self.assertEqual(response["status"], "running")
         self.assertEqual(result, [True])
 
+    def test_control_frame_uses_one_absolute_deadline(self):
+        class TrickleConnection:
+            def __init__(self):
+                self.chunks = [b"x", b"x", b"{}\n"]
+                self.timeouts = []
+
+            def settimeout(self, value):
+                self.timeouts.append(value)
+
+            def recv(self, _size):
+                return self.chunks.pop(0)
+
+        connection = TrickleConnection()
+        with patch.object(
+            supervisor.time,
+            "monotonic",
+            side_effect=[0.0, 0.03, 0.07, 0.11],
+        ):
+            with self.assertRaisesRegex(supervisor.SupervisorError, "timed out"):
+                supervisor._recv_line(connection, "control request", 0.1)
+        self.assertEqual(len(connection.timeouts), 2)
+        self.assertGreater(connection.timeouts[0], connection.timeouts[1])
+
     def test_control_transport_failure_cannot_stop_supervisor(self):
         class BrokenConnection:
+            def settimeout(self, _value):
+                pass
+
             def recv(self, _size):
-                raise TimeoutError("synthetic stalled client")
+                raise ConnectionResetError("synthetic disconnected client")
 
             def sendall(self, _value):
                 raise BrokenPipeError("synthetic disconnected client")
@@ -1166,6 +1211,11 @@ os._exit(0)
 class MutationTests(unittest.TestCase):
     MUTANTS = (
         (
+            '    if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:\n        raise SupervisorError(\n            "standalone supervisor requires the default SIGCHLD disposition"\n        )\n',
+            '',
+            'test_spawn_rejects_inherited_ignored_sigchld_before_resource_creation',
+        ),
+        (
             '            pass_fds=(*credentials, lifetime_write, leader_write),\n',
             '            pass_fds=(lifetime_write, leader_write),\n',
             'test_spawn_argv_and_environment_contain_only_paths_and_descriptor_numbers',
@@ -1332,6 +1382,11 @@ class MutationTests(unittest.TestCase):
             '    if status not in {"running", "failed", "stopping", "rejected"}:\n        raise SupervisorError("standalone supervisor returned an invalid response")\n',
             '',
             'test_control_response_requires_matching_identity',
+        ),
+        (
+            '        remaining = deadline - time.monotonic()\n        if remaining <= 0:\n            raise SupervisorError(f"standalone supervisor {label} timed out")\n        connection.settimeout(remaining)\n',
+            '        connection.settimeout(timeout)\n',
+            'test_control_frame_uses_one_absolute_deadline',
         ),
         (
             '    elif (\n        response.get("schema") != "review-conductor.standalone-supervisor-health.v1"\n        or response.get("identity") != identity\n    ):\n        raise SupervisorError("standalone supervisor returned a mismatched identity")\n',

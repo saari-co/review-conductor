@@ -227,6 +227,10 @@ def spawn_service(
     *,
     popen: Callable[..., Any] = subprocess.Popen,
 ) -> ServiceGeneration:
+    if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+        raise SupervisorError(
+            "standalone supervisor requires the default SIGCHLD disposition"
+        )
     for descriptor in credentials:
         try:
             os.lseek(descriptor, 0, os.SEEK_SET)
@@ -437,11 +441,25 @@ class Supervisor:
         }
 
 
-def _recv_line(connection: socket.socket, label: str) -> bytes:
+def _recv_line(
+    connection: socket.socket, label: str, timeout: float | None = None
+) -> bytes:
+    if timeout is None:
+        timeout = CONTROL_REQUEST_SECONDS
+    deadline = time.monotonic() + timeout
     chunks: list[bytes] = []
     total = 0
     while total <= MAX_CONTROL_BYTES:
-        chunk = connection.recv(min(1024, MAX_CONTROL_BYTES + 1 - total))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SupervisorError(f"standalone supervisor {label} timed out")
+        connection.settimeout(remaining)
+        try:
+            chunk = connection.recv(min(1024, MAX_CONTROL_BYTES + 1 - total))
+        except TimeoutError as exc:
+            raise SupervisorError(
+                f"standalone supervisor {label} timed out"
+            ) from exc
         if not chunk:
             break
         chunks.append(chunk)
@@ -680,7 +698,7 @@ def request_control(
             connection.settimeout(timeout)
             connection.connect(str(socket_path))
             connection.sendall(request)
-            raw = _recv_line(connection, "response")
+            raw = _recv_line(connection, "response", timeout)
     except (FileNotFoundError, ConnectionRefusedError):
         if supervisor_lock_is_held(lock_path):
             raise SupervisorError(
