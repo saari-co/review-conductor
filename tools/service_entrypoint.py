@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import fcntl
+import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -23,6 +25,62 @@ import trusted_admission as admission
 
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY_MODE = 0o600
+PROFILE_DIGEST_ENV = "REVIEW_CONDUCTOR_EXPECTED_PROFILE_SHA256"
+GENERATION_FD_ENV = "REVIEW_CONDUCTOR_GENERATION_FD"
+LEADER_FD_ENV = "REVIEW_CONDUCTOR_LEADER_FD"
+
+
+def profile_config_digest(config: dict) -> str:
+    return hashlib.sha256(
+        json.dumps(config, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+
+
+def load_supervised_profile(profile_path: Path) -> dict:
+    """Load exactly the profile configuration approved by the supervisor."""
+    expected = os.environ.get(PROFILE_DIGEST_ENV)
+    generation_raw = os.environ.get(GENERATION_FD_ENV)
+    leader_raw = os.environ.get(LEADER_FD_ENV)
+    config = userland.load_config(profile_path)
+    if expected is None and generation_raw is None and leader_raw is None:
+        # Direct source qualification and maintenance callers have no supervisor
+        # identity to compare. The standalone supervisor always supplies both.
+        return config
+    if (
+        expected is None
+        or len(expected) != 64
+        or expected != expected.lower()
+        or any(character not in "0123456789abcdef" for character in expected)
+    ):
+        raise service.ServiceError("expected supervised profile digest is unavailable")
+    if (
+        generation_raw is None
+        or not generation_raw.isascii()
+        or not generation_raw.isdigit()
+        or int(generation_raw) < 3
+    ):
+        raise service.ServiceError("service generation descriptor is unavailable")
+    try:
+        os.fstat(int(generation_raw))
+    except OSError as exc:
+        raise service.ServiceError("service generation descriptor is unavailable") from exc
+    if (
+        leader_raw is None
+        or not leader_raw.isascii()
+        or not leader_raw.isdigit()
+        or int(leader_raw) < 3
+    ):
+        raise service.ServiceError("service leader descriptor is unavailable")
+    try:
+        leader_fd = int(leader_raw)
+        os.fstat(leader_fd)
+        os.set_inheritable(leader_fd, False)
+    except OSError as exc:
+        raise service.ServiceError("service leader descriptor is unavailable") from exc
+    actual = profile_config_digest(config)
+    if not hmac.compare_digest(actual, expected):
+        raise service.ServiceError("service profile changed after supervisor validation")
+    return config
 
 
 @contextmanager
@@ -237,7 +295,7 @@ class ServiceStopped(service.ServiceError):
 
 def serve(profile_path: Path, registry_path: Path) -> None:
     """Hold a restrictive process umask for the complete threaded lifecycle."""
-    config = userland.load_config(profile_path)
+    config = load_supervised_profile(profile_path)
     profiles.require_enabled(config)
     registry_provider(registry_path, config)()
     previous_umask = os.umask(0o077)

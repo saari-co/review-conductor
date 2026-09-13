@@ -37,6 +37,7 @@ merge, or credential commands.
 | `tools/conductor_cli.py`, `tools/target_manifest.py` | Independent offline CLI and target contract |
 | `tools/trusted_admission.py` | Inert service-owned enrollment and policy-binding library |
 | `tools/service_runtime.py`, `tools/service_entrypoint.py` | Inactive authenticated ingress, policy transport/binding and guarded worker entrypoint; not packaged or deployed |
+| `tools/standalone_supervisor.py` | Source-only foreground supervisor with inherited-descriptor credential transport and identity-bound local lifecycle control; not installed or started |
 | `contracts/target-manifest.schema.json` | Versioned repository manifest schema |
 | `contracts/review-conductor/` | Unchanged historical Blocks profile fixtures plus the inactive SMCBD candidate profile; not deployment configuration |
 | `tests/` | Blocks compatibility, isolated SMCBD, manifest and packaged-build coverage |

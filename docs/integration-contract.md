@@ -41,6 +41,32 @@ and tick. See [trusted admission](trusted-admission.md).
 No live registry, credential, HTTPS edge or deployment exists, so this is
 qualified source behavior, not live admission.
 
+The source-only `tools/standalone_supervisor.py` invokes
+`tools/service_entrypoint.py` for one exact SMCBD profile. Its child argv carries
+only the profile and external-registry paths plus fixed command words; webhook
+and GitHub App credentials move only through explicitly inherited descriptors.
+The foreground supervisor exposes identity-bound local health/stop/restart
+control, retains anonymous descriptor copies for explicit restart, and leaves a
+crashed service failed until that restart is requested. The service runs in an
+owned process session and inherits dedicated leader and generation descriptors
+alongside the credential descriptors. The entrypoint makes the leader descriptor
+close-on-exec, while every direct adapter command uses one authoritative wrapper
+that explicitly preserves the generation descriptor and selector through
+`close_fds`. Explicit stop/restart keeps the unreaped leader and generation
+descriptor as race-free identities, signals the process group, and reaps the
+leader only after every inheritor has closed the generation descriptor; no
+numeric PGID is probed after identity release. The entrypoint verifies the
+supervisor's digest of the complete
+normalized profile before registry or state access. Restart and stop control
+wait longer than the shutdown bound; failed normal or exceptional shutdown
+retains the active supervisor lock/control boundary, and startup connection
+failures are not reported as stopped while that lock is held. Malformed control
+commands are rejected without shutting the supervisor down. The control socket
+is private from bind and unlinked from bind onward. Startup requires the default
+`SIGCHLD` disposition, and every control frame has one absolute monotonic
+deadline rather than a resettable per-read timeout. It neither provisions
+credentials nor starts an HTTPS tunnel, and it is not installed or active.
+
 ## Service-owned enrollment
 
 Keep numeric repository identity, approved policy commit/hash, reviewer actor map,

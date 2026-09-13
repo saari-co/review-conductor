@@ -20,7 +20,11 @@ ingress, exact App/installation admission, approved-policy retrieval and atomic
 binding persistence; `tools/service_entrypoint.py` requires an enabled profile,
 a same-user external registry with mode exactly 0600 outside source, checkout,
 state and proof roots (re-read on every delivery and tick), and
-descriptor-delivered credentials. These
+descriptor-delivered credentials. `tools/standalone_supervisor.py` is the
+source-only foreground supervisor for that entrypoint. It accepts only profile
+and registry paths plus fixed lifecycle verbs in argv, copies two inherited
+credential descriptors into bounded anonymous files, and passes only descriptor
+numbers through an allowlisted child environment. These
 sources are not deployed. A general client API and delivery outbox remain **not
 implemented**; do not expose the legacy internal-event CLI as an API. A registry
 document is service configuration and must never be committed here or read from
@@ -78,3 +82,50 @@ This repairs a legacy transport deadlock; it does not qualify live cloudflared,
 1Password, service lifecycle, credentials or deployment. Historical 1Password
 bootstrap/resolver code remains regression-only, including its service-account
 environment flow; the standalone package still excludes all launcher code.
+
+## Standalone supervisor boundary (offline qualification only)
+
+The standalone supervisor owns one SMCBD profile and its state-root lock and
+mode-0600 Unix control socket. Control requests carry an exact non-secret identity
+digest covering the complete validated profile configuration, profile/registry
+paths, repository/App/installation IDs, state/checkout/proof roots and loopback
+port. A mismatched or changed profile or registry path cannot stop or restart
+that process. `start` runs the supervisor in the
+foreground; `health`, `stop` and explicit `restart` use the local socket.
+A crashed child remains failed and is never automatically restarted.
+
+The caller must already have supplied distinct webhook-secret and GitHub-App-key
+descriptors under the profile's two configured environment names. The supervisor
+does not resolve 1Password, accept credential values in argv/environment, start
+a tunnel, install a service unit or activate the profile. It closes the incoming
+descriptors after creating verified anonymous copies, rewinds those copies before
+each explicit child start, and closes them plus the socket on every exit path.
+The service starts in its own process session; stop and restart signal that owned
+process group independently of whether the leader has already exited. Distinct
+inherited descriptors track the leader and the complete service generation. The
+leader descriptor is made close-on-exec by the entrypoint, so every supported
+host can report leader exit without reaping and releasing its process-group
+identity. Every direct adapter subprocess is launched through the generation
+boundary with the generation descriptor explicitly preserved despite
+`close_fds`. Shutdown sends SIGTERM and then bounded SIGKILL, and reaps the
+leader only after the generation descriptor reaches EOF; it never probes or
+signals a numeric PGID after releasing that identity. A missing, escaped or
+undrained generation fails closed instead of starting a new one. Before registry
+or state access, the entrypoint also requires
+the normalized profile digest calculated by the supervisor to match its one
+loaded configuration, so a replaced profile cannot change the advertised tenant.
+The supervisor rejects startup unless it owns the default `SIGCHLD`
+disposition, preventing inherited auto-reap or custom handlers from releasing
+the leader identity behind its back.
+The control socket is private from bind under a temporary restrictive umask and
+is unlinked from bind onward, including chmod failure. A failed shutdown keeps
+the original supervisor lock and control socket active so another start cannot
+overlap the surviving group. Unexpected control-loop failure uses the same
+retained cleanup state and cannot unwind either owner until shutdown succeeds.
+Stop/restart control waits longer than the maximum
+group-shutdown bound; connection failure while the lock is held is reported as
+starting/unavailable, never stopped. Non-string control commands are rejected
+without terminating the service.
+Control framing uses one absolute monotonic deadline, so trickled bytes cannot
+extend the single-threaded request boundary indefinitely.
+Anonymous storage may still be disk-backed and is not a secure-erasure guarantee.

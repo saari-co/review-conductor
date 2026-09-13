@@ -14,6 +14,12 @@
   synthetic key marker is assembled from bytes with the same runtime value for
   source hygiene. The versioned extraction/provenance ledger records these adaptations.
 - Independent offline manifest contract, tests, zipapp build, and CI.
+- A native standalone foreground supervisor now invokes the registry-aware
+  entrypoint with inherited webhook/App descriptors, an allowlisted child
+  environment, an inherited generation-lifetime descriptor, an entrypoint-verified
+  exact SMCBD config/state identity and fail-closed
+  health/start/stop/restart behavior. It is source-only, uninstalled and never
+  starts a tunnel.
 - `provenance.json` is a versioned extraction/provenance ledger: it records
   `source_branch`, the source commit, original hashes and current destination
   hashes/adaptations. Recording a branch name does not push that branch. The
@@ -58,6 +64,10 @@ configuration. The build excludes all historical profiles and legacy launchers.
    rollback are accepted, repeat for Blocks and prove cross-tenant isolation.
    Retire x-api ownership in a separately reviewed change. No dual active
    conductor writers.
+
+The supervisor is new repository-native source, not an extracted x-api file.
+The versioned extraction ledger therefore retains the original hashes and
+adaptations for all 14 imported files; its verifier must remain green.
 
 ## Untouched
 
