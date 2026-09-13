@@ -2390,6 +2390,7 @@ class EntrypointTests(unittest.TestCase):
         self.profile.write_text(json.dumps(profile) + "\n")
 
     def test_service_holds_restrictive_umask_for_threaded_lifecycle(self):
+        self.enable_profile()
         current_mask = {"value": 0o022}
         transitions = []
 
@@ -2405,6 +2406,8 @@ class EntrypointTests(unittest.TestCase):
             self.assertEqual(registry_path, self.root / "registry.json")
 
         with patch.object(entrypoint.os, "umask", side_effect=fake_umask), patch.object(
+            entrypoint, "registry_provider", return_value=lambda: object()
+        ), patch.object(
             entrypoint,
             "_serve_with_restrictive_umask",
             side_effect=exercise_lifecycle,
@@ -2419,7 +2422,7 @@ class EntrypointTests(unittest.TestCase):
         registry = self.root / "registry.json"
         with entrypoint.exclusive_service_lock(config, registry):
             with self.assertRaises(service.ServiceError):
-                with entrypoint.exclusive_service_lock(config, registry):
+                with entrypoint.exclusive_service_lock(config, self.root / "registry-copy.json"):
                     self.fail("a concurrent maintenance lock must not be acquired")
 
     def test_shipped_candidate_profile_is_refused_before_registry_or_credentials(self):
@@ -2792,8 +2795,8 @@ MUTANTS = [
     (
         "serve an inactive profile",
         "tools/service_entrypoint.py",
-        "    profiles.require_enabled(config)\n    provide_registry = registry_provider(registry_path, config)\n    provide_registry()\n",
-        "    pass\n    provide_registry = registry_provider(registry_path, config)\n    provide_registry()\n",
+        "    profiles.require_enabled(config)\n    registry_provider(registry_path, config)()\n    previous_umask = os.umask(0o077)\n",
+        "    pass\n    registry_provider(registry_path, config)()\n    previous_umask = os.umask(0o077)\n",
         "EntrypointTests.test_shipped_candidate_profile_is_refused_before_registry_or_credentials",
     ),
     (
@@ -3268,9 +3271,37 @@ MUTANTS = [
     (
         "retain a ready label when closing a projected pull request",
         "tools/review_conductor_runtime.py",
-        '    if conclusion == "cancelled" and bool(row["ready_label_applied"]):\n        client.remove_ready_label(row["pr_number"])\n',
-        '    if False:\n        client.remove_ready_label(row["pr_number"])\n',
+        '        for closed_head in closed:\n            if not dry_run:\n                client.remove_ready_label(closed_head["pr_number"])\n',
+        '        for closed_head in closed:\n            if False:\n                client.remove_ready_label(closed_head["pr_number"])\n',
         "test_review_conductor_profiles.ProfilesTest.test_closed_projection_filter_removes_only_target_ready_label",
+    ),
+    (
+        "retain merge-ready state when a fully cleared pull request returns to draft",
+        "tools/review_conductor.py",
+        '        if is_draft and state == "ready_for_human_merge":\n',
+        '        if False:\n',
+        "test_review_conductor_profiles.ProfilesTest.test_clawsweeper_finishing_after_return_to_draft_cannot_clear_merge",
+    ),
+    (
+        "redispatch consumed ClawSweeper work after returning ready",
+        "tools/review_conductor.py",
+        '        elif not is_draft and state == "clawsweeper_clean_draft":\n',
+        '        elif False:\n',
+        "test_review_conductor_profiles.ProfilesTest.test_clawsweeper_finishing_after_return_to_draft_cannot_clear_merge",
+    ),
+    (
+        "key the service lock to a registry copy instead of tenant state",
+        "tools/service_entrypoint.py",
+        '    lock_path = core.ensure_state_root(Path(config["paths"]["state_root"])) / ".service-operation.lock"\n',
+        '    lock_path = registry_path.parent / ".service-operation.lock"\n',
+        "EntrypointTests.test_service_and_maintenance_are_mutually_exclusive",
+    ),
+    (
+        "skip closed heads that have no projection row",
+        "tools/review_conductor_runtime.py",
+        '            SELECT heads.* FROM heads\n',
+        '            SELECT heads.* FROM heads JOIN projections USING (repository, pr_number, base_sha, head_sha, review_epoch)\n',
+        "test_review_conductor_profiles.ProfilesTest.test_closed_head_without_projection_still_removes_ready_label",
     ),
 ]
 

@@ -27,7 +27,8 @@ REGISTRY_MODE = 0o600
 
 @contextmanager
 def exclusive_service_lock(config: dict, registry_path: Path):
-    lock_path = registry_path.parent / f".service-operation-{config['github_app']['repository_id']}.lock"
+    del registry_path  # Registry copies must not create distinct locks for one tenant state root.
+    lock_path = core.ensure_state_root(Path(config["paths"]["state_root"])) / ".service-operation.lock"
     try:
         descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
     except OSError as exc:
@@ -237,6 +238,8 @@ class ServiceStopped(service.ServiceError):
 def serve(profile_path: Path, registry_path: Path) -> None:
     """Hold a restrictive process umask for the complete threaded lifecycle."""
     config = userland.load_config(profile_path)
+    profiles.require_enabled(config)
+    registry_provider(registry_path, config)()
     previous_umask = os.umask(0o077)
     try:
         with exclusive_service_lock(config, registry_path):

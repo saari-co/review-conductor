@@ -12,11 +12,12 @@
 - `ready_for_review` dispatches ClawSweeper for the already-cleared exact revision without changing its review epoch.
 - Returning to draft obsoletes a not-yet-dispatched ClawSweeper action while preserving exact-head CI/OpenClaw clearance.
 - Returning to ready requeues only the exact ClawSweeper action obsoleted by that draft transition.
+- A fully cleared head that returns to draft enters a distinct non-ready state; returning ready restores its consumed exact-tuple evidence without redispatch.
 - Draft/ready timestamps do not invalidate an already-started CI run for the same head incarnation.
 - Clean adjudication while draft cannot dispatch or clear ClawSweeper.
 - New base/head tuples supersede prior work; duplicate events remain idempotent.
-- Closed heads receive cleanup-only projection, remove any remote ready label, honor a requested PR filter, and never cold-create rail checks.
-- The service and maintenance CLI share an exclusive tenant operation lock, preventing notification reconciliation while the sender is active.
+- Closed heads receive cleanup-only projection, including when no projection row previously existed, remove any remote ready label, honor a requested PR filter, and never cold-create rail checks.
+- The service and maintenance CLI share an exclusive state-root tenant operation lock independent of registry copies, preventing notification reconciliation while the sender is active.
 
 ## Verification
 
@@ -26,11 +27,12 @@
 - `git diff --check`: PASS
 - Provenance verification: PASS
 
-Copilot's exact-head review on `69b972d7c3ea95dc2f8758f430154dab9d4b8d50`
-identified the repaired state-transition, action-resume, adjudication, closed-projection,
-schema, and operator-documentation defects. Direct regressions and four executable
-mutants cover the behavioral fixes. That prior review is repair input, not clearance
-for the follow-up head.
+Copilot's reviews on `69b972d7c3ea95dc2f8758f430154dab9d4b8d50` and
+`f7c98462eed3747465012f582299eb46ed846a76` identified the repaired
+state-transition, action-resume, adjudication, closed-projection, schema,
+operation-locking, and operator-documentation defects. Direct regressions and eight
+executable mutants cover the behavioral fixes. Those reviews are repair input, not
+clearance for the follow-up head.
 
 ## Limits
 

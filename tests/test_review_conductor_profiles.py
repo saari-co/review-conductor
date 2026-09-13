@@ -211,6 +211,9 @@ class ProfilesTest(unittest.TestCase):
     def test_closed_projection_filter_removes_only_target_ready_label(self):
         adapters.test_closed_projection_filter_removes_only_target_ready_label(self.root)
 
+    def test_closed_head_without_projection_still_removes_ready_label(self):
+        adapters.test_closed_head_without_projection_still_removes_ready_label(self.root)
+
     def test_clawsweeper_finishing_after_return_to_draft_cannot_clear_merge(self):
         config=self.config();self.enqueue(config)
         openclaw=legacy.action(config,7,'openclaw.enqueue');legacy.mark_dispatched(config,openclaw['action_id'])
@@ -238,8 +241,16 @@ class ProfilesTest(unittest.TestCase):
             })
             connection.commit()
         finally:connection.close()
-        self.assertEqual(self.state(config)['state'],'openclaw_clean_draft')
+        self.assertEqual(self.state(config)['state'],'clawsweeper_clean_draft')
         self.assertFalse(core.state_projection(self.state(config))['merge_authorized'])
+        p['action']='ready_for_review';p['pull_request'].update(draft=False,updated_at='2026-08-29T20:24:00Z')
+        self.ingest(config,'pull_request','ready-after-clawsweeper-clean',p)
+        self.assertEqual(self.state(config)['state'],'ready_for_human_merge')
+
+        p['action']='converted_to_draft';p['pull_request'].update(draft=True,updated_at='2026-08-29T20:25:00Z')
+        self.ingest(config,'pull_request','draft-after-full-clearance',p)
+        self.assertEqual(self.state(config)['state'],'clawsweeper_clean_draft')
+        self.assertFalse(core.state_projection(self.state(config))['ready_for_human_label'])
 
     def test_cross_repo_stale_epoch_head_base_actor_and_p0_artifacts_fail_closed(self):
         config=self.config();action=self.enqueue(config)

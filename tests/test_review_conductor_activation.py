@@ -1033,6 +1033,31 @@ def test_closed_projection_filter_removes_only_target_ready_label(root: Path) ->
         connection.close()
 
 
+def test_closed_head_without_projection_still_removes_ready_label(root: Path) -> None:
+    _, config = fixture_config(root / "closed-without-projection")
+    pr = 63
+    head = "8" * 40
+    assert ingress(config, "pull_request", "open-no-projection", pr_payload(pr, head))[0] == 202
+    connection = core.open_database(Path(config["paths"]["state_root"]))
+    try:
+        connection.execute(
+            "UPDATE heads SET state='closed' WHERE pr_number=? AND is_current=1", (pr,)
+        )
+        connection.commit()
+        assert connection.execute(
+            "SELECT 1 FROM projections WHERE pr_number=?", (pr,)
+        ).fetchone() is None
+    finally:
+        connection.close()
+    github = FakeGitHub(label_present=True)
+    result = runtime.reconcile_projection(config, github, pr_number=pr)
+    assert [(call[0], call[1]) for call in github.calls if call[0] == "remove_label"] == [("remove_label", pr)]
+    assert result["projected"][0]["visible_state"] == "closed"
+    github.calls.clear()
+    assert runtime.reconcile_projection(config, github, pr_number=pr)["projected"] == []
+    assert github.calls == []
+
+
 def test_v1_config_upgrade_and_failed_projection_compatibility(root: Path) -> None:
     legacy = json.loads(CORE_CONFIG.read_text(encoding="utf-8"))
     legacy["openclaw"].pop("transport")
