@@ -265,7 +265,7 @@ def profile_policy_digest(core_config: dict[str, Any], service_config: dict[str,
                 "contract": adapter.get("contract"), "artifact_prefix": adapter.get("artifact_prefix")
             },
             "openclaw": {
-                key: openclaw.get(key) for key in ("operator_id", "transport", "remote_worktree_shelf")
+                key: openclaw.get(key) for key in ("operator_id", "transport", "remote_worktree_shelf", "exact_tuple_contract")
             },
             "spark_target": spark_target,
             "spark_executables": spark_executables,

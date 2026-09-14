@@ -593,6 +593,7 @@ class AdmissionIngressTests(unittest.TestCase):
             "openclaw_operator_id": lambda c: c["openclaw"].__setitem__("operator_id", "other-operator"),
             "openclaw_transport": lambda c: c["openclaw"].__setitem__("transport", "ssh"),
             "openclaw_shelf": lambda c: c["openclaw"].__setitem__("remote_worktree_shelf", "/tmp/other-shelf"),
+            "openclaw_exact_tuple_contract": lambda c: c["openclaw"].pop("exact_tuple_contract"),
         }
         for label, edit in edits.items():
             changed = json.loads(original)
@@ -3026,7 +3027,7 @@ MUTANTS = [
     (
         "ignore the OpenClaw adapter authority in the profile digest",
         "tools/service_runtime.py",
-        '            "openclaw": {\n                key: openclaw.get(key) for key in ("operator_id", "transport", "remote_worktree_shelf")\n            },\n',
+        '            "openclaw": {\n                key: openclaw.get(key) for key in ("operator_id", "transport", "remote_worktree_shelf", "exact_tuple_contract")\n            },\n',
         '            "openclaw": None,\n',
         "AdmissionIngressTests.test_profile_change_after_admission_invalidates_existing_bindings",
     ),

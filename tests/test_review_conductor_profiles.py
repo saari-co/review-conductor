@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -85,9 +86,40 @@ class ProfilesTest(unittest.TestCase):
     def terminal(self, config, action, **overrides):
         path = adapters.openclaw_artifact(self.root,config,action)
         value=json.loads(path.read_text())
-        value.update(review_scope='comprehensive',reviewer_actor='fixture-suite-openclaw')
+        drop = overrides.pop('_drop', ())
+        value.update(
+            review_scope='comprehensive',
+            reviewer_actor='fixture-suite-openclaw',
+            native_max_priority='P3',
+            applied_max_priority='P3',
+            exact_tuple_qualified=True,
+        )
         value.update(overrides)
+        for key in drop:
+            value.pop(key, None)
         return write(path,value)
+
+    def write_openclaw_status(self, run, action, config, **overrides):
+        payload = json.loads(action['payload_json'])
+        drop = overrides.pop('_drop', ())
+        status = json.loads((run / 'REQUEST_STATUS.json').read_text())
+        status.update({
+            'operator_id': payload['operator_id'],
+            'repository': action['repository'],
+            'pr_number': action['pr_number'],
+            'base_sha': action['base_sha'],
+            'head_sha': action['head_sha'],
+            'review_epoch': action['review_epoch'],
+            'review_scope': 'comprehensive',
+            'reviewer_actor': config['review_policy']['reviewers']['openclaw'],
+            'native_max_priority': 'P3',
+            'applied_max_priority': 'P3',
+            'exact_tuple_qualified': True,
+        }, **overrides)
+        for key in drop:
+            status.pop(key, None)
+        (run / 'REQUEST_STATUS.json').write_text(json.dumps(status) + '\n')
+        return run
 
     def state(self, config, pr=7):
         connection=core.open_database(Path(config['paths']['state_root']),REPO)
@@ -278,6 +310,137 @@ class ProfilesTest(unittest.TestCase):
         finally:connection.close()
         self.assertEqual(outcome['state'],'clawsweeper_clean_draft')
 
+    def test_capability_declared_profile_emits_exact_tuple_queue_flags(self):
+        config=self.config(); action=self.enqueue(config)
+        checkout=self.root/'source-checkout'
+        checkout.mkdir()
+        core_config=core.load_config(Path(config['core_config']))
+        self.assertTrue(core.declares_openclaw_exact_tuple_contract(core_config))
+        commands=core.command_preview(action, core_config, checkout)
+        queue=commands[1]
+        self.assertEqual(
+            queue[-4:],
+            ['--exact-tuple-contract', 'review-conductor-openclaw-v1', '--review-epoch', str(action['review_epoch'])],
+        )
+
+    def test_generalized_openclaw_terminal_requires_applied_p3_qualification(self):
+        config=self.config(); action=self.enqueue(config)
+        request_id=json.loads(action['payload_json'])['queue_request_id']
+        run=legacy.openclaw_run_fixture(self.root, request_id)
+        for findings in (False, True):
+            with self.subTest(findings=findings):
+                overrides={'review_clean': False, 'review_finding_count': 1} if findings else {}
+                self.write_openclaw_status(run, action, config, **overrides)
+                result=userland.collect_openclaw_terminals(config, dry_run=False, runner=legacy.SparkStatusRunner(run))
+                self.assertEqual(result, [{'request_id': request_id, 'result': 'terminal_materialized'}])
+                artifact=Path(config['spark']['terminal_inbox']) / f'{request_id}.terminal.json'
+                self.assertTrue(artifact.is_file())
+                proof=Path(config['paths']['proof_root']) / 'openclaw' / request_id / 'PROOF.md'
+                self.assertTrue(proof.is_file())
+                value=json.loads(artifact.read_text())
+                self.assertEqual(value['review_scope'], 'comprehensive')
+                self.assertEqual(value['native_max_priority'], 'P3')
+                self.assertEqual(value['applied_max_priority'], 'P3')
+                self.assertIs(value['exact_tuple_qualified'], True)
+                self.assertEqual(value['review_finding_count'], 1 if findings else 0)
+                self.assertEqual(value['review_clean'], not findings)
+
+    def test_generalized_openclaw_unqualified_status_writes_zero_artifacts(self):
+        config=self.config(); action=self.enqueue(config)
+        request_id=json.loads(action['payload_json'])['queue_request_id']
+        run=legacy.openclaw_run_fixture(self.root, request_id)
+        inbox=Path(config['spark']['terminal_inbox'])
+        proof=Path(config['paths']['proof_root']) / 'openclaw' / request_id
+        cases=(
+            ('missing_native', {'_drop': ('native_max_priority',)}),
+            ('p0_native', {'native_max_priority': 'P0'}),
+            ('missing_applied', {'_drop': ('applied_max_priority',)}),
+            ('p0_applied', {'applied_max_priority': 'P0'}),
+            ('conflicting_priorities', {'native_max_priority': 'P3', 'applied_max_priority': 'P0'}),
+            ('missing_qualified', {'_drop': ('exact_tuple_qualified',)}),
+            ('false_qualified', {'exact_tuple_qualified': False}),
+            ('truthy_qualified', {'exact_tuple_qualified': 1}),
+            ('copied_comprehensive_native_p0', {'native_max_priority': 'P0', 'applied_max_priority': 'P0', 'exact_tuple_qualified': False}),
+        )
+        for findings in (False, True):
+            for label, overrides in cases:
+                with self.subTest(label=label, findings=findings):
+                    extra=dict(overrides)
+                    if findings:
+                        extra.update(review_clean=False, review_finding_count=1)
+                    self.write_openclaw_status(run, action, config, **extra)
+                    with self.assertRaises(core.ContractError):
+                        userland.collect_openclaw_terminals(config, dry_run=False, runner=legacy.SparkStatusRunner(run))
+                    self.assertEqual(list(inbox.glob('*.terminal.json')) if inbox.exists() else [], [])
+                    self.assertFalse(proof.exists())
+
+    def test_generalized_openclaw_status_rejects_json_type_coercions(self):
+        config=self.config(); action=self.enqueue(config, pr=1)
+        request_id=json.loads(action['payload_json'])['queue_request_id']
+        run=legacy.openclaw_run_fixture(self.root, request_id)
+        inbox=Path(config['spark']['terminal_inbox'])
+        self.assertEqual(action['pr_number'], 1)
+        self.assertEqual(action['review_epoch'], 0)
+        cases=(
+            ('false_vs_0', {'review_epoch': False}),
+            ('true_vs_1', {'pr_number': True}),
+            ('float_vs_int', {'pr_number': 1.0}),
+            ('string_vs_int', {'pr_number': '1'}),
+        )
+        for label, overrides in cases:
+            with self.subTest(label=label):
+                self.write_openclaw_status(run, action, config, **overrides)
+                with self.assertRaises(core.ContractError):
+                    userland.collect_openclaw_terminals(config, dry_run=False, runner=legacy.SparkStatusRunner(run))
+                self.assertEqual(list(inbox.glob('*.terminal.json')) if inbox.exists() else [], [])
+
+    def test_bridge_rejects_direct_artifact_and_internal_event_without_qualification(self):
+        config=self.config(); action=self.enqueue(config)
+        for override in (
+            {'_drop': ('native_max_priority', 'applied_max_priority', 'exact_tuple_qualified')},
+            {'applied_max_priority': 'P0'},
+            {'native_max_priority': 'P0'},
+            {'exact_tuple_qualified': False},
+            {'exact_tuple_qualified': 1},
+        ):
+            with self.subTest(artifact=override):
+                with self.assertRaises(core.ContractError):
+                    runtime.bridge_openclaw(config, self.terminal(config, action, **override))
+                self.assertEqual(self.state(config)['state'], 'openclaw_queued')
+        request_id=json.loads(action['payload_json'])['queue_request_id']
+        proof = Path(config['paths']['proof_root']) / 'openclaw-internal.md'
+        proof.parent.mkdir(parents=True, exist_ok=True)
+        proof.write_text('internal terminal proof\n', encoding='utf-8')
+        base_event={
+            'schema':core.INTERNAL_EVENT_SCHEMA,
+            'event_id':'direct-openclaw-terminal',
+            'type':'openclaw.terminal',
+            'repository':REPO,
+            'pr_number':7,
+            'base_sha':BASE,
+            'head_sha':HEAD,
+            'review_epoch':action['review_epoch'],
+            'request_id':request_id,
+            'result':'clean',
+            'finding_count':0,
+            'reviewer_actor':'fixture-suite-openclaw',
+            'proof_ref':str(proof),
+            'review_scope':'comprehensive',
+        }
+        for fields in (
+            {},
+            {'native_max_priority':'P3','applied_max_priority':'P0','exact_tuple_qualified':True},
+            {'native_max_priority':'P3','applied_max_priority':'P3','exact_tuple_qualified':1},
+        ):
+            with self.subTest(event=fields):
+                with self.assertRaises(core.ContractError):
+                    core.ingest_internal_event(
+                        config_path=Path(config['core_config']),
+                        state_root=Path(config['paths']['state_root']),
+                        event_payload={**base_event, **fields},
+                    )
+                self.assertEqual(self.state(config)['state'], 'openclaw_queued')
+
     def test_cross_repo_stale_epoch_head_base_actor_and_p0_artifacts_fail_closed(self):
         config=self.config();action=self.enqueue(config)
         for override in ({'repository':'dinkuskit/blocks'},{'review_epoch':1},{'head_sha':'3'*40},{'base_sha':'4'*40},{'reviewer_actor':'spark-openclaw'},{'review_scope':'P0-only'},{'operator_id':'review-conductor'}):
@@ -354,6 +517,61 @@ class ProfilesTest(unittest.TestCase):
         self.assertEqual(candidate['github_app']['installation_id'],161027021)
         self.assertEqual(candidate['github_app']['permissions']['contents'],'read')
         self.assertFalse(candidate['enrollment']['enabled'])
+
+
+class OpenClawTerminalMutationTests(unittest.TestCase):
+    """Each applied-P3 guard bites: a precise disposable-copy mutant fails its intended test."""
+
+    MUTANTS = (
+        (
+            "omit native_max_priority P3",
+            'tools/review_conductor_userland.py',
+            ', "native_max_priority": "P3", "applied_max_priority": "P3", "exact_tuple_qualified": True}',
+            ', "applied_max_priority": "P3", "exact_tuple_qualified": True}',
+            'test_review_conductor_profiles.ProfilesTest.test_generalized_openclaw_unqualified_status_writes_zero_artifacts',
+        ),
+        (
+            "omit applied_max_priority P3",
+            'tools/review_conductor_userland.py',
+            ', "native_max_priority": "P3", "applied_max_priority": "P3", "exact_tuple_qualified": True}',
+            ', "native_max_priority": "P3", "exact_tuple_qualified": True}',
+            'test_review_conductor_profiles.ProfilesTest.test_generalized_openclaw_unqualified_status_writes_zero_artifacts',
+        ),
+        (
+            "omit exact_tuple_qualified identity",
+            'tools/review_conductor_userland.py',
+            ', "native_max_priority": "P3", "applied_max_priority": "P3", "exact_tuple_qualified": True}',
+            ', "native_max_priority": "P3", "applied_max_priority": "P3"}',
+            'test_review_conductor_profiles.ProfilesTest.test_generalized_openclaw_unqualified_status_writes_zero_artifacts',
+        ),
+    )
+
+    def test_precise_openclaw_applied_p3_mutants(self):
+        for label, relative, old, new, test_id in self.MUTANTS:
+            with self.subTest(mutant=label):
+                with tempfile.TemporaryDirectory(prefix='review-conductor-mutant-') as temp:
+                    copy_root = Path(temp) / 'copy'
+                    for name in ('tools', 'tests', 'contracts'):
+                        shutil.copytree(ROOT / name, copy_root / name)
+                    target = copy_root / relative
+                    source = target.read_text()
+                    self.assertEqual(source.count(old), 1, f'mutant anchor drifted: {label}')
+                    target.write_text(source.replace(old, new, 1))
+                    completed = subprocess.run(
+                        [sys.executable, '-m', 'unittest', '-q', test_id],
+                        cwd=copy_root / 'tests',
+                        capture_output=True,
+                        text=True,
+                        timeout=120,
+                        env={'PATH': '/usr/bin:/bin', 'HOME': temp, 'PYTHONDONTWRITEBYTECODE': '1'},
+                    )
+                self.assertNotEqual(completed.returncode, 0, f'mutant survived: {label}\n{completed.stderr}')
+                self.assertIn('Ran 1 test', completed.stderr, f'intended test did not run: {label}\n{completed.stderr}')
+                self.assertRegex(
+                    completed.stderr,
+                    r'(FAIL|ERROR): test_generalized_openclaw_unqualified_status_writes_zero_artifacts',
+                    f'failure was not the intended test: {label}\n{completed.stderr}',
+                )
 
 
 if __name__=='__main__':unittest.main(verbosity=2)

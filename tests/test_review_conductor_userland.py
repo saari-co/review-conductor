@@ -716,6 +716,39 @@ def test_real_spark_receipt_shape_bridges_nonzero_human_gate() -> None:
             connection.close()
 
 
+def test_legacy_openclaw_terminal_without_review_policy_does_not_require_applied_p3() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config = config_fixture(root)
+        assert not config.get("review_policy")
+        pr = 76
+        ingress(config, "pull_request", "legacy-openclaw-pr", pr_payload(pr))
+        ingress(config, "workflow_run", "legacy-openclaw-ci", ci_payload(pr, 1076))
+        queued = action(config, pr, "openclaw.enqueue")
+        mark_dispatched(config, queued["action_id"])
+        request_id = json.loads(queued["payload_json"])["queue_request_id"]
+        run = openclaw_run_fixture(root, request_id)
+        status = json.loads((run / "REQUEST_STATUS.json").read_text(encoding="utf-8"))
+        assert "native_max_priority" not in status
+        assert "applied_max_priority" not in status
+        assert "exact_tuple_qualified" not in status
+        assert "review_scope" not in status
+        result = userland.collect_openclaw_terminals(
+            config,
+            dry_run=False,
+            runner=SparkStatusRunner(run),
+        )
+        assert result == [{"request_id": request_id, "result": "terminal_materialized"}]
+        artifact = Path(config["spark"]["terminal_inbox"]) / f"{request_id}.terminal.json"
+        assert artifact.is_file()
+        value = json.loads(artifact.read_text(encoding="utf-8"))
+        assert "native_max_priority" not in value
+        assert "applied_max_priority" not in value
+        assert "exact_tuple_qualified" not in value
+        runtime.drain_bridge_inboxes(config)
+        assert current(config, pr)["state"] == "clawsweeper_queued"
+
+
 def test_exact_artifacts_drive_ready_notification_once_without_merge() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
@@ -1163,6 +1196,7 @@ def main() -> None:
         test_openclaw_human_gate_is_terminal_without_dispatching_clawsweeper,
         test_ci_failure_alerts_without_starting_either_review_rail,
         test_real_spark_receipt_shape_bridges_nonzero_human_gate,
+        test_legacy_openclaw_terminal_without_review_policy_does_not_require_applied_p3,
         test_exact_artifacts_drive_ready_notification_once_without_merge,
         test_clawsweeper_finding_waits_for_adjudication_and_notifies_discord_only,
         test_sub_platinum_or_insufficient_proof_stops_at_human_gate,

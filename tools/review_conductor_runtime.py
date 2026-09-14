@@ -1858,12 +1858,25 @@ def bridge_openclaw(config: dict[str, Any], artifact_path: Path) -> dict[str, An
     }
     policy = config.get("review_policy", {})
     if policy:
-        required.add("review_scope")
+        required.update(
+            {
+                "review_scope",
+                "native_max_priority",
+                "applied_max_priority",
+                "exact_tuple_qualified",
+            }
+        )
     core.require_exact_keys(artifact, required, set(), "OpenClaw terminal artifact")
     if artifact["repository"] != config["github_app"]["repository"]:
         raise RuntimeError("terminal artifact belongs to another repository")
-    if policy and (artifact.get("review_scope") != "comprehensive" or artifact["reviewer_actor"] != policy["reviewers"]["openclaw"]):
-        raise RuntimeError("terminal artifact has untrusted reviewer or non-comprehensive scope")
+    if policy and (
+        artifact.get("review_scope") != "comprehensive"
+        or artifact["reviewer_actor"] != policy["reviewers"]["openclaw"]
+        or not core.has_openclaw_applied_p3_qualification(artifact)
+    ):
+        raise RuntimeError(
+            "terminal artifact has untrusted reviewer, non-comprehensive scope, or missing exact-tuple qualification"
+        )
     if artifact["status"] not in {"completed", "needs-human", "failed"}:
         raise RuntimeError("OpenClaw queue submission or running state is not terminal")
     review_epoch = require_review_epoch(
@@ -1919,6 +1932,9 @@ def bridge_openclaw(config: dict[str, Any], artifact_path: Path) -> dict[str, An
         if config.get("review_policy"):
             event["review_scope"] = artifact["review_scope"]
             event["review_epoch"] = artifact["review_epoch"]
+            event["native_max_priority"] = artifact["native_max_priority"]
+            event["applied_max_priority"] = artifact["applied_max_priority"]
+            event["exact_tuple_qualified"] = artifact["exact_tuple_qualified"]
         event = core.validate_internal_event(core.load_config(Path(config["core_config"])), event)
         prior = connection.execute("SELECT payload_json FROM events WHERE event_id = ?", (event["event_id"],)).fetchone()
         if prior is not None:

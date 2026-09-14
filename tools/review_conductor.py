@@ -25,6 +25,7 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
 GENERATION_FD_ENV = "REVIEW_CONDUCTOR_GENERATION_FD"
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+OPENCLAW_EXACT_TUPLE_CONTRACT = "review-conductor-openclaw-v1"
 CLASSIFICATIONS = {
     "required_fix",
     "reject_false_positive",
@@ -153,6 +154,47 @@ def require_positive_int(value: Any, label: str) -> int:
     return value
 
 
+def require_non_negative_int(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ContractError(f"{label} must be a non-negative integer")
+    return value
+
+
+def same_typed_value(observed: Any, expected: Any) -> bool:
+    return type(observed) is type(expected) and observed == expected
+
+
+def matches_typed_mapping(observed: dict[str, Any], expected: dict[str, Any]) -> bool:
+    return all(same_typed_value(observed.get(key), value) for key, value in expected.items())
+
+
+def has_openclaw_applied_p3_qualification(observed: dict[str, Any]) -> bool:
+    return matches_typed_mapping(
+        observed,
+        {
+            "native_max_priority": "P3",
+            "applied_max_priority": "P3",
+            "exact_tuple_qualified": True,
+        },
+    )
+
+
+def declares_openclaw_exact_tuple_contract(config: dict[str, Any]) -> bool:
+    return config.get("openclaw", {}).get("exact_tuple_contract") == OPENCLAW_EXACT_TUPLE_CONTRACT
+
+
+def bound_openclaw_queue_epoch(action: sqlite3.Row, payload: dict[str, Any]) -> int:
+    persisted = require_non_negative_int(action["review_epoch"], "OpenClaw action review_epoch")
+    payload_epoch = require_non_negative_int(
+        payload.get("review_epoch"), "OpenClaw payload review_epoch"
+    )
+    if payload_epoch != persisted:
+        raise ContractError(
+            "OpenClaw payload review_epoch does not match the persisted action identity"
+        )
+    return persisted
+
+
 def require_github_timestamp(value: Any, label: str) -> str:
     text = require_text(value, label, 40)
     try:
@@ -208,7 +250,7 @@ def load_config(path: Path) -> dict[str, Any]:
     require_exact_keys(
         openclaw,
         {"operator_id", "remote_worktree_shelf"},
-        {"transport"},
+        {"transport", "exact_tuple_contract"},
         "config openclaw",
     )
     operator_id = require_text(openclaw["operator_id"], "config openclaw operator_id", 128)
@@ -220,6 +262,14 @@ def load_config(path: Path) -> dict[str, Any]:
     openclaw.setdefault("transport", "origin")
     if openclaw["transport"] not in {"bundle", "origin"}:
         raise ContractError("config openclaw transport must be bundle or origin")
+    if "exact_tuple_contract" in openclaw:
+        declared = require_text(
+            openclaw["exact_tuple_contract"], "config openclaw exact_tuple_contract", 64
+        )
+        if declared != OPENCLAW_EXACT_TUPLE_CONTRACT:
+            raise ContractError(
+                "config openclaw exact_tuple_contract must be the pinned companion contract"
+            )
     clawsweeper = require_object(config["clawsweeper"], "config clawsweeper")
     require_exact_keys(
         clawsweeper,
@@ -1427,6 +1477,12 @@ def validate_internal_event(config: dict[str, Any], event: dict[str, Any]) -> di
     required, optional = INTERNAL_EVENT_FIELDS[event_type]
     if config.get("review_policy") and event_type.endswith(".terminal"):
         required = required | {"review_scope"}
+        if event_type == "openclaw.terminal":
+            required = required | {
+                "native_max_priority",
+                "applied_max_priority",
+                "exact_tuple_qualified",
+            }
     if config.get("review_policy"):
         common = common | {"review_epoch"}
         epoch = event.get("review_epoch")
@@ -1437,6 +1493,10 @@ def validate_internal_event(config: dict[str, Any], event: dict[str, Any]) -> di
         rail = event_type.split(".")[0]
         if event.get("review_scope") != "comprehensive" or event.get("reviewer_actor") != config["review_policy"]["reviewers"][rail]:
             raise ContractError("terminal review must be comprehensive and from the authoritative repository reviewer")
+        if event_type == "openclaw.terminal" and not has_openclaw_applied_p3_qualification(event):
+            raise ContractError(
+                "OpenClaw terminal lacks trusted comprehensive exact-tuple qualification"
+            )
     if event["repository"] != config["repository"]:
         raise ContractError("internal event repository does not match config")
     require_positive_int(event["pr_number"], "internal event pr_number")
@@ -1816,6 +1876,7 @@ def command_preview(
     if action["kind"] == "openclaw.enqueue":
         if source_checkout is None or not source_checkout.is_absolute():
             raise ContractError("OpenClaw dispatch requires an absolute --source-checkout")
+        review_epoch = bound_openclaw_queue_epoch(action, payload)
         smoky = command_environment.get("SMOKY_REVIEW_CONDUCTOR_SMOKY", str(Path(__file__).resolve().parents[1] / "bin" / "smoky"))
         materialize = [
             smoky, "lane", "run", "spark-openclaw-materialize-worktree",
@@ -1829,6 +1890,11 @@ def command_preview(
             "--mode", "branch", "--base", payload["base_sha"], "--remote-worktree", payload["remote_worktree"],
             "--pr-url", payload["pr_url"],
         ]
+        if declares_openclaw_exact_tuple_contract(config):
+            queue.extend([
+                "--exact-tuple-contract", OPENCLAW_EXACT_TUPLE_CONTRACT,
+                "--review-epoch", str(review_epoch),
+            ])
         return [materialize, queue]
     if action["kind"] == "clawsweeper.dispatch":
         gh = command_environment.get("SMOKY_REVIEW_CONDUCTOR_GH", "gh")
