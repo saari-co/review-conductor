@@ -6,13 +6,25 @@
 - Worktree: this isolated branch only.
 - Branch: `openclaw/review-conductor-openclaw-exact-contract-flags-v1`.
 - Exact base: `2f5818cacdf84a72b22362f984d0c3d8c18af244` (`origin/main`, merged PR #6).
-- Exact head: the single local candidate commit that contains this packet.
-- New source-scope repair count: `1/2`.
-- Captured: `2026-09-13` America/New_York.
-- Mutation authority: local source, tests, and one candidate commit.
-- Not authorized: push, PR, review request, deployment, service/tunnel,
+- Historical first-packet exact-head wording claimed this packet contained its
+  own commit SHA. That is impossible and is not current binding.
+- Code-source SHA (cycle-2 repaired source; this F6 proof edit does not change
+  runtime source): `7b1267f812ac0822c991f2cb7dc24a9634e302b1`.
+- Historical first-packet source-scope repair count: `1/2` (snapshot at
+  `proof_source_head` `88aed1d8824f480134728e8f442f9a9aac5f92e7`).
+- Authoritative source-scope repair count at the code-source SHA: `2/2`.
+- Historical model review rounds: `2/2` terminal, not clean. They are not
+  current-head review clearance.
+- Final published head/base live only in the closeout-owner external receipt;
+  this packet does not contain its own commit SHA.
+- Captured: `2026-09-13` America/New_York; F6 binding corrected `2026-09-14`.
+- Historical first-packet mutation authority was local source, tests, and one
+  candidate commit, with push/PR unauthorized. This F6 closeout lane may
+  commit the tracked proof binding, non-force push the existing branch, and
+  update PR #7 body only.
+- Still unauthorized: review request, merge, deployment, service/tunnel,
   credentials, webhook/App/protection/check-writer changes, live queue or
-  model run, or source changes outside this worktree.
+  model run, activation, or source changes outside this worktree.
 
 ## Qualified adapter dependency
 
@@ -22,8 +34,13 @@ rejected) that equals the persisted `action['review_epoch']`. Only then does it
 emit the queue command. Materialize bytes and every non-OpenClaw action are
 unchanged.
 
-Every queue command includes exactly once, in this order, the source-owned
-selector and the bound epoch:
+Historical first-packet snapshot below described every OpenClaw queue command
+as emitting these flags. Current source is capability-gated: only
+`openclaw.exact_tuple_contract=review-conductor-openclaw-v1` emits them;
+legacy profiles keep the legacy vector. The ordered flags remain:
+
+Every qualified exact-tuple queue command includes exactly once, in this
+order, the source-owned selector and the bound epoch:
 
 ```text
 --exact-tuple-contract review-conductor-openclaw-v1
@@ -98,9 +115,13 @@ Locally exercised interpreter: CPython 3.14.6 on macOS.
   is run after the local commit
 - Workflow files were not changed; actionlint was not required
 
-File SHA-256 values are in `candidate-manifest.json`.
-`tools/review_conductor_userland.py` is now
+File SHA-256 values of the current code-source files are in
+`candidate-manifest.json` and match `docs/provenance.json`.
+Historical first-packet digest of `tools/review_conductor_userland.py` at
+`88aed1d8824f480134728e8f442f9a9aac5f92e7` is
 `14e08a08187ef27adc95505051ff0334aaedcf8f17b3ee60490af25bd0f026ce`.
+Current code-source digest is
+`c27d8c45e45ffa2b10c6f1680f425b7453775ef5af72d5e801d0048a937126a2`.
 
 ## Untouched and live boundaries
 
@@ -120,13 +141,13 @@ not publication, installation, or activation.
 
 ## Repair — 2026-09-13 (Copilot review 5192995503)
 
-Local repair on isolated branch
+Historical cycle-2 source repair on isolated branch
 `openclaw/review-conductor-openclaw-exact-contract-flags-v1` from
-`proof_source_head` `88aed1d8824f480134728e8f442f9a9aac5f92e7`. A commit cannot
-contain its own SHA, so `candidate-manifest.json` records that source head,
-per-file sha256 hashes of the changed source/test files at finalize, and
-`final_head_receipt` as pending coordinator recording against the committed
-head.
+`proof_source_head` `88aed1d8824f480134728e8f442f9a9aac5f92e7` to code-source
+SHA `7b1267f812ac0822c991f2cb7dc24a9634e302b1`. A commit cannot contain its
+own SHA. The earlier pending `final_head_receipt` placeholder is removed;
+this packet now records `proof_source_head`, `code_source_sha`, and file
+hashes, and points at the closeout-owner external final-head receipt.
 
 ### Per-finding disposition
 
@@ -135,15 +156,17 @@ head.
 | 4001479555 | required_fix applied | `tools/review_conductor_userland.py:694` via `tools/review_conductor.py:163` `same_typed_value` |
 | 4001479572 | required_fix applied | persist at `tools/review_conductor_userland.py:724-727`; enforce at `tools/review_conductor_runtime.py:1860-1878` and `tools/review_conductor.py:1481-1498` |
 | 4001479530 | required_fix applied | `tools/review_conductor.py:1893` gated by `openclaw.exact_tuple_contract` |
-| 4001479583 | required_fix applied | `proof/.../candidate-manifest.json` `proof_source_head` + pending `final_head_receipt` |
+| 4001479583 | required_fix applied; F6 replaces pending placeholder | `proof_source_head` + `code_source_sha` + file hashes; `final_head_receipt` is the external closeout-owner receipt contract, not a self-SHA |
 
 ### Binding scheme
 
-`proof_source_head` is the pre-repair commit the repair was captured against.
-File hashes are working-tree sha256 values of the changed source/test files
-after the repair edits. `final_head_receipt` is explicitly pending so the
-coordinator can bind the committed head without asking this packet to contain
-its own SHA.
+`proof_source_head` is the historical pre-repair snapshot
+`88aed1d8824f480134728e8f442f9a9aac5f92e7`. `code_source_sha` is the cycle-2
+repaired source `7b1267f812ac0822c991f2cb7dc24a9634e302b1`. File hashes are
+sha256 values of those code-source/test files and match `docs/provenance.json`.
+`final_head_receipt` is the external closeout-owner final head/base receipt
+and independent matrix contract. This packet must not contain its own commit
+SHA.
 
 ### Companion admission evidence (finding 4001479530)
 
@@ -169,3 +192,32 @@ the new flags.
 - `make build` — PASS (`dist/review-conductor.pyz` generated, not tracked)
 - `git diff --check` — PASS on the working tree
 - Interpreter: CPython 3.14.6 on macOS; no x-api, OpenClaw, Smoky, or live credentials
+
+## F6 — honest proof bindings — 2026-09-14
+
+Frozen closeout disposition F6 for this Conductor packet only. No runtime
+exception or source-behavior change. F4 remains `reject_false_positive`:
+`tools/review_conductor_runtime.py` `class RuntimeError(core.ContractError)`
+is caught by the existing `core.ContractError` handler. Historical finding
+4001479583 asked this packet to contain its own exact-head SHA; that is
+impossible. The later pending-placeholder repair is also removed.
+
+### Distinctions
+
+| Claim | Status |
+| --- | --- |
+| Historical first-packet snapshot `88aed1d8824f480134728e8f442f9a9aac5f92e7` | `1/2` source-scope count; userland digest `14e08a08...`; not current source |
+| Cycle-2 code-source SHA `7b1267f812ac0822c991f2cb7dc24a9634e302b1` | `2/2` source-scope count; current file digests; unchanged by this F6 edit |
+| Historical model review rounds | `2/2` terminal, not clean; not clearance of this or any later head |
+| Source-only companion compatibility | no-network matrix in Spark #179 against this code-source SHA and x-api `ca7bc76a6e396b536e861a74ee08857224148744`; not installation |
+| Hosted checks | exact-head GitHub Actions CI only; not review or merge clearance |
+| Current-head review applicability | prior rounds do not apply to a later head; no new review is requested or invented |
+| Live installation | unproven; no enrollment, live queue/model review, check writer, or activation |
+
+### External final receipt
+
+`final_head_receipt` =
+`external:BOUNDED-CLOSEOUT-DISPOSITIONS.md#F6-closeout-owner-final-head-base-receipt`.
+The closeout owner, not this commit, records the exact final head/base and
+the independent final-head matrix for Conductor, x-api, and spark-dgx. This
+packet tracks code-source SHA plus file hashes only.

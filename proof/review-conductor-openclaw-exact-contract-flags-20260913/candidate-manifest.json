@@ -5,10 +5,21 @@
   "branch": "openclaw/review-conductor-openclaw-exact-contract-flags-v1",
   "exact_base_sha": "2f5818cacdf84a72b22362f984d0c3d8c18af244",
   "proof_source_head": "88aed1d8824f480134728e8f442f9a9aac5f92e7",
-  "final_head_receipt": "to be recorded by coordinator against the committed head",
+  "code_source_sha": "7b1267f812ac0822c991f2cb7dc24a9634e302b1",
+  "final_head_receipt": "external:BOUNDED-CLOSEOUT-DISPOSITIONS.md#F6-closeout-owner-final-head-base-receipt",
+  "historical_first_packet_source_scope_repair_count": "1/2",
   "source_scope_repair_count": "2/2",
+  "historical_model_review_rounds": "2/2 terminal, not clean",
+  "historical_userland_digest_at_proof_source_head": "14e08a08187ef27adc95505051ff0334aaedcf8f17b3ee60490af25bd0f026ce",
   "scope": "openclaw-exact-tuple-contract-adapter-flags",
-  "binding_scheme": "proof_source_head is the pre-repair commit this packet was captured against. Per-file sha256 values are of the changed source/test files in the working tree at finalize. A commit cannot contain its own SHA; final_head_receipt stays pending for the coordinator.",
+  "binding_scheme": "proof_source_head is the historical first-packet / pre-repair snapshot. code_source_sha is the cycle-2 repaired source this F6 edit does not change. Per-file sha256 values are of those code-source/test files and match docs/provenance.json. A commit cannot contain its own SHA; final_head_receipt is the closeout-owner external final head/base receipt and independent matrix, not a self-SHA or pending placeholder.",
+  "distinctions": {
+    "historical_snapshots": "first-packet 88aed1d8824f480134728e8f442f9a9aac5f92e7 recorded source-scope 1/2 and userland digest 14e08a08...; cycle-2 source 7b1267f812ac0822c991f2cb7dc24a9634e302b1 is current code; model reviews remain 2/2 terminal not clean and do not clear a later head",
+    "source_only_compatibility": "no-network companion matrix in Spark #179 against this code-source SHA and x-api ca7bc76a6e396b536e861a74ee08857224148744; not installation",
+    "hosted_checks": "exact-head GitHub Actions CI only; not review or merge clearance",
+    "current_head_review_applicability": "historical 2/2 model rounds are not applicable as clearance of this or any later head; no new review is requested or invented",
+    "live_installation": "unproven; no enrollment, live queue/model review, check writer, or activation"
+  },
   "files": {
     "contracts/review-conductor/openclaw-smcbd-suite.json": "b1df89f563f24801b3be9829f384018a47a44c32fc8000d37e2848f717eb7caa",
     "docs/integration-contract.md": "0d69dd5692f7e63af4e314ac8fc0a2417d2abbdfee96a134a5a028a6f20def6b",
@@ -105,8 +116,9 @@
     "remote push/PR/review/deployment"
   ],
   "remaining_gates": [
-    "x-api attachment and source pin of the exact-tuple contract transport",
-    "spark-dgx applied-P3 attestation source and install",
-    "coordinator records final_head_receipt against the committed head"
+    "live x-api attachment/source pin and spark-dgx install remain unproven; source-only no-network compatibility is separate",
+    "external closeout-owner final head/base receipt and independent matrix; this packet must not contain its own commit SHA",
+    "current-head review applicability: historical 2/2 not clean; no invented clean review",
+    "no live installation, enrollment, or activation"
   ]
 }
