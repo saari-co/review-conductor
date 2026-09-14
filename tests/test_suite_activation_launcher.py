@@ -1,6 +1,8 @@
 """Synthetic qualification of the SMCBD standalone launcher boundary."""
 from __future__ import annotations
 
+import contextlib
+import copy
 import errno
 import hashlib
 import json
@@ -122,6 +124,32 @@ class SuiteActivationLauncherTests(unittest.TestCase):
         }
         return values[capability]
 
+    def refuse_resolve(self, _config, capability):
+        self.resolutions.append(capability)
+        raise AssertionError("standalone start must not resolve profile credential refs")
+
+    def inherited_env(self, config):
+        webhook = tempfile.TemporaryFile("w+b")
+        github = tempfile.TemporaryFile("w+b")
+        self.addCleanup(webhook.close)
+        self.addCleanup(github.close)
+        webhook.write(WEBHOOK)
+        webhook.seek(0)
+        github.write(PRIVATE_KEY)
+        github.seek(0)
+        inherited = (os.dup(webhook.fileno()), os.dup(github.fileno()))
+
+        def close_inherited():
+            for descriptor in inherited:
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
+
+        self.addCleanup(close_inherited)
+        return {
+            config["credentials"]["webhook_secret_fd_env"]: str(inherited[0]),
+            config["credentials"]["github_private_key_fd_env"]: str(inherited[1]),
+        }
+
     def start(self, config, profile_path, popen, **kwargs):
         original = launcher.credential_descriptor
         descriptors = []
@@ -131,8 +159,9 @@ class SuiteActivationLauncherTests(unittest.TestCase):
             descriptors.append(descriptor)
             return descriptor
 
-        with patch.object(launcher, "bootstrap_status", return_value={"result": "ready"}), \
-             patch.object(launcher, "resolve_runtime_value", side_effect=self.resolve), \
+        with patch.dict(os.environ, self.inherited_env(config), clear=False), \
+             patch.object(launcher, "bootstrap_status", return_value={"result": "ready"}), \
+             patch.object(launcher, "resolve_runtime_value", side_effect=self.refuse_resolve), \
              patch.object(launcher, "credential_descriptor", side_effect=prepare):
             try:
                 return launcher.start_standalone(
@@ -168,7 +197,14 @@ class SuiteActivationLauncherTests(unittest.TestCase):
 
     def test_inactive_or_absent_enrollment_rejects_before_any_resolution(self):
         path, config = self.load_enabled()
-        with patch.object(launcher, "bootstrap_status", return_value={"result": "ready"}), \
+        started = []
+
+        def popen(command, **kwargs):
+            started.append(command)
+            return legacy.FakeProcess(command, kwargs)
+
+        with patch.dict(os.environ, self.inherited_env(config), clear=False), \
+             patch.object(launcher, "bootstrap_status", return_value={"result": "ready"}), \
              patch.object(launcher, "resolve_runtime_value", side_effect=self.resolve):
             with self.assertRaises(launcher.LauncherError):
                 launcher.validate_standalone_enrollment(config, self.registry)
@@ -176,17 +212,23 @@ class SuiteActivationLauncherTests(unittest.TestCase):
                 launcher.standalone_preflight(config, path, self.registry)
             with self.assertRaises(launcher.LauncherError):
                 launcher.start_standalone(
-                    config, profile_path=path, registry_path=self.registry
+                    config, profile_path=path, registry_path=self.registry, popen=popen
                 )
         self.assertEqual(self.resolutions, [])
+        self.assertEqual(started, [])
         self.write_registry()
-        with patch.object(launcher, "bootstrap_status", return_value={"result": "ready"}), \
+        with patch.dict(os.environ, self.inherited_env(config), clear=False), \
+             patch.object(launcher, "bootstrap_status", return_value={"result": "ready"}), \
              patch.object(launcher, "resolve_runtime_value", side_effect=self.resolve):
             with self.assertRaises(launcher.LauncherError):
                 launcher.start_standalone(
-                    config, profile_path=path, registry_path=self.root / "missing-registry.json"
+                    config,
+                    profile_path=path,
+                    registry_path=self.root / "missing-registry.json",
+                    popen=popen,
                 )
         self.assertEqual(self.resolutions, [])
+        self.assertEqual(started, [])
         inactive = json.loads(path.read_text())
         inactive["enrollment"] = {
             "enabled": False,
@@ -201,13 +243,15 @@ class SuiteActivationLauncherTests(unittest.TestCase):
         })
         write_json(path, inactive)
         config = userland.load_config(path, home=self.home, source_root=self.source)
-        with patch.object(launcher, "bootstrap_status", return_value={"result": "ready"}), \
+        with patch.dict(os.environ, self.inherited_env(config), clear=False), \
+             patch.object(launcher, "bootstrap_status", return_value={"result": "ready"}), \
              patch.object(launcher, "resolve_runtime_value", side_effect=self.resolve):
             with self.assertRaises(launcher.LauncherError):
                 launcher.start_standalone(
-                    config, profile_path=path, registry_path=self.registry
+                    config, profile_path=path, registry_path=self.registry, popen=popen
                 )
         self.assertEqual(self.resolutions, [])
+        self.assertEqual(started, [])
 
     def test_permission_wrong_registry_rejects_before_resolution(self):
         path, config = self.load_enabled()
@@ -269,11 +313,47 @@ class SuiteActivationLauncherTests(unittest.TestCase):
         with patch.object(launcher, "resolve_runtime_value", side_effect=self.resolve):
             result = launcher.standalone_preflight(config, path, self.registry)
         self.assertEqual(self.resolutions, [])
+        self.assertEqual(result["result"], "waiting_for_human")
+        self.assertEqual(result["bootstrap"]["result"], "waiting_for_human")
+        self.assertEqual(
+            result["bootstrap"]["auth_mode"],
+            "selected_webhook_verify_and_github_installation",
+        )
         self.assertEqual(result["reviewers"], REVIEWERS)
         self.assertFalse(result["credentials_resolved"])
         self.assertFalse(result["tunnel_started"])
         self.assertFalse(result["activation_authorized"])
         self.assertIsNone(config["tunnel"]["tunnel_id"])
+
+    def test_preflight_ready_requires_bootstrap_and_does_not_hard_code_auth_mode(self):
+        path, config = self.load_enabled()
+        self.write_registry()
+        ready = {
+            "schema": "smoky.review-conductor.userland-bootstrap-status.v1",
+            "result": "ready",
+            "auth_mode": launcher.selected_auth_mode(
+                launcher.standalone_capabilities(config)
+            ),
+            "domains": {},
+            "values_exposed": False,
+            "merge_authorized": False,
+        }
+        with patch.object(launcher, "bootstrap_status", return_value=ready), \
+             patch.object(launcher, "resolve_runtime_value", side_effect=self.resolve):
+            result = launcher.standalone_preflight(config, path, self.registry)
+        self.assertEqual(self.resolutions, [])
+        self.assertEqual(result["result"], "ready")
+        self.assertEqual(
+            result["bootstrap"]["auth_mode"],
+            "selected_webhook_verify_and_github_installation",
+        )
+        self.assertNotEqual(
+            result["bootstrap"]["auth_mode"], "three_distinct_service_accounts"
+        )
+        self.assertEqual(
+            launcher.selected_auth_mode(launcher.CAPABILITIES),
+            "three_distinct_service_accounts",
+        )
 
     def test_standalone_start_invokes_supervisor_with_inherited_descriptors_only(self):
         path, config = self.load_enabled()
@@ -312,7 +392,7 @@ class SuiteActivationLauncherTests(unittest.TestCase):
         for value in (WEBHOOK, PRIVATE_KEY, TUNNEL):
             self.assertNotIn(value.decode(), serialized)
         self.assertFalse(any(name.startswith("OP_") for name in calls[0].kwargs["env"]))
-        self.assertEqual(self.resolutions, list(launcher.standalone_capabilities(config)))
+        self.assertEqual(self.resolutions, [])
         self.assertNotIn(
             f"review-conductor.{config['profile_id']}.cloudflare-tunnel",
             self.resolutions,
@@ -383,8 +463,9 @@ print('ok', file=sys.stderr)
                     descriptors.append(descriptor)
                     return descriptor
 
-                with patch.object(launcher, "bootstrap_status", return_value={"result": "ready"}), \
-                     patch.object(launcher, "resolve_runtime_value", side_effect=self.resolve), \
+                with patch.dict(os.environ, self.inherited_env(config), clear=False), \
+                     patch.object(launcher, "bootstrap_status", return_value={"result": "ready"}), \
+                     patch.object(launcher, "resolve_runtime_value", side_effect=self.refuse_resolve), \
                      patch.object(launcher, "credential_descriptor", side_effect=prepare), \
                      patch("subprocess.Popen") as popen:
                     with self.assertRaises(launcher.LauncherError):
@@ -396,22 +477,21 @@ print('ok', file=sys.stderr)
                         )
                     popen.assert_not_called()
                 self.assert_closed(descriptors)
+                self.assertEqual(self.resolutions, [])
         self.resolutions.clear()
         with patch.object(launcher, "bootstrap_status", return_value={"result": "ready"}), \
-             patch.object(
-                 launcher,
-                 "resolve_runtime_value",
-                 side_effect=launcher.LauncherError("synthetic resolver failure"),
-             ), \
+             patch.object(launcher, "resolve_runtime_value", side_effect=self.refuse_resolve), \
              patch("subprocess.Popen") as popen:
-            with self.assertRaises(launcher.LauncherError):
+            with self.assertRaises(launcher.LauncherError) as error:
                 launcher.start_standalone(
                     config,
                     profile_path=path,
                     registry_path=self.registry,
                     popen=popen,
                 )
+            self.assertIn("inherited credential descriptor is unavailable", str(error.exception))
             popen.assert_not_called()
+        self.assertEqual(self.resolutions, [])
 
     def test_spawn_failure_closes_descriptors(self):
         path, config = self.load_enabled()
@@ -482,6 +562,16 @@ print('ok', file=sys.stderr)
         with self.assertRaises(launcher.LauncherError) as error:
             launcher.start(config, config_path=path, popen=fake_popen)
         self.assertIn("standalone start", str(error.exception))
+        foreign = dict(config)
+        foreign["profile_id"] = "fixture-other-generalized"
+        self.resolutions.clear()
+        with patch.object(launcher, "bootstrap_status", return_value={"result": "ready"}), \
+             patch.object(launcher, "resolve_runtime_value", side_effect=self.resolve):
+            with self.assertRaises(launcher.LauncherError) as other:
+                launcher.start(foreign, config_path=path, popen=fake_popen)
+        self.assertIn("standalone start", str(other.exception))
+        self.assertEqual(self.resolutions, [])
+        self.assertEqual(len(calls), 2)
 
     def test_main_standalone_start_uses_the_selected_profile_and_registry(self):
         path, config = self.load_enabled()
@@ -513,6 +603,81 @@ print('ok', file=sys.stderr)
         self.assertEqual(observed["profile_path"], path.resolve())
         self.assertEqual(observed["registry_path"], self.registry)
 
+    def test_changed_profile_credential_refs_cannot_redirect_resolution(self):
+        path, config = self.load_enabled()
+        self.write_registry()
+        attacker = "/tmp/attacker-op-must-not-run"
+        mutated = copy.deepcopy(config)
+        mutated["onepassword"]["op_path"] = attacker
+        for domain in mutated["onepassword"]["domains"].values():
+            domain["runtime_reference"] = "op://attacker/vault/secret"
+            domain["runtime_vault"] = "attacker-vault"
+            domain["runtime_item"] = "attacker-item"
+            domain["runtime_field"] = "attacker-field"
+        calls = []
+
+        def popen(command, **kwargs):
+            process = legacy.FakeProcess(command, kwargs)
+            calls.append(process)
+            webhook_fd, github_fd = kwargs["pass_fds"]
+            with os.fdopen(os.dup(webhook_fd), "rb") as stream:
+                self.assertEqual(stream.read(), WEBHOOK)
+            with os.fdopen(os.dup(github_fd), "rb") as stream:
+                self.assertEqual(stream.read(), PRIVATE_KEY)
+            serialized = json.dumps(command) + json.dumps(kwargs["env"])
+            self.assertNotIn(attacker, serialized)
+            self.assertNotIn("op://attacker/vault/secret", serialized)
+            self.assertNotIn(WEBHOOK.decode(), serialized)
+            self.assertNotIn(PRIVATE_KEY.decode(), serialized)
+            return process
+
+        self.assertEqual(self.start(mutated, path, popen), 0)
+        self.assertEqual(self.resolutions, [])
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn(attacker, json.dumps(os.environ.copy()))
+        self.assertNotIn(WEBHOOK.decode(), self.tracked.read_text())
+        self.assertNotIn(PRIVATE_KEY.decode(), self.tracked.read_text())
+
+    def test_command_behavior_docs_and_proof_are_consistent(self):
+        files = {
+            ROOT / "README.md": (
+                "standalone preflight` only validates",
+                "standalone start` forwards inherited",
+                "standalone health` only queries",
+            ),
+            ROOT / "docs/integration-contract.md": (
+                "does not resolve credentials or invoke",
+                "forwards already-prepared webhook",
+                "only queries the supervisor",
+            ),
+            ROOT / "docs/migration.md": (
+                "preflight` validates registry/bootstrap only",
+                "start` forwards inherited",
+                "health` only queries",
+            ),
+            ROOT / "docs/smcbd-pilot-handoff.md": (
+                "preflight` reports registry and",
+                "forwards already-prepared webhook",
+                "health` only queries",
+            ),
+            ROOT / "proof/smcbd-suite-activation-launcher-20260914/PROOF.md": (
+                "preflight only validates",
+                "start forwards already-prepared",
+                "health only queries",
+                "direct supervisor health",
+            ),
+        }
+        forbidden = (
+            "standalone {preflight,start,health}` invokes the SMCBD supervisor",
+            "The committed profile remains inactive, so these commands fail closed",
+        )
+        for path, phrases in files.items():
+            text = path.read_text()
+            for phrase in phrases:
+                self.assertIn(phrase, text, f"{path.name} missing {phrase!r}")
+            for phrase in forbidden:
+                self.assertNotIn(phrase, text, f"{path.name} still overstates {phrase!r}")
+
 
 class SuiteActivationLauncherMutationTests(unittest.TestCase):
     MUTANTS = (
@@ -537,11 +702,14 @@ class SuiteActivationLauncherMutationTests(unittest.TestCase):
             "test_suite_activation_launcher.SuiteActivationLauncherTests.test_inactive_or_absent_enrollment_rejects_before_any_resolution",
         ),
         (
-            "resolve the Cloudflare tunnel capability during standalone start",
+            "resolve standalone credentials from reviewed-profile selectors",
             "tools/review_conductor_userland_launcher.py",
-            "        for capability in standalone_capabilities(config):\n",
-            "        for capability in profiles.capabilities(config):\n",
-            "test_suite_activation_launcher.SuiteActivationLauncherTests.test_standalone_start_invokes_supervisor_with_inherited_descriptors_only",
+            "        webhook_fd, github_fd = inherit_standalone_credentials(config, descriptors)\n",
+            "        webhook_fd, github_fd = [\n"
+            "            credential_descriptor(resolve_runtime_value(config, capability))\n"
+            "            for capability in standalone_capabilities(config)\n"
+            "        ]\n",
+            "test_suite_activation_launcher.SuiteActivationLauncherTests.test_changed_profile_credential_refs_cannot_redirect_resolution",
         ),
         (
             "omit inherited credential descriptors from supervisor pass_fds",
@@ -570,34 +738,59 @@ class SuiteActivationLauncherMutationTests(unittest.TestCase):
         (
             "couple standalone source readiness to an invented tunnel ID",
             "tools/review_conductor_userland.py",
+            "            if not tunnel[\"tunnel_name\"]:\n"
+            "                raise UserlandError(\"enabled profile requires an isolated tunnel name\")\n"
             "            if ingress[\"public_hostname\"].endswith(\".invalid\"):\n"
             "                raise UserlandError(\"enabled profile requires an isolated public hostname\")\n",
+            "            if not tunnel[\"tunnel_name\"]:\n"
+            "                raise UserlandError(\"enabled profile requires an isolated tunnel name\")\n"
             "            if (not tunnel[\"tunnel_id\"] or ingress[\"public_hostname\"].endswith(\".invalid\")):\n"
             "                raise UserlandError(\"enabled profile requires an isolated public hostname\")\n",
             "test_review_conductor_profiles.ProfilesTest.test_enabled_standalone_profile_does_not_require_a_tunnel_id",
         ),
         (
+            "admit an enabled generalized profile without a tunnel name",
+            "tools/review_conductor_userland.py",
+            "            if not tunnel[\"tunnel_name\"]:\n"
+            "                raise UserlandError(\"enabled profile requires an isolated tunnel name\")\n"
+            "            if ingress[\"public_hostname\"].endswith(\".invalid\"):\n",
+            "            if ingress[\"public_hostname\"].endswith(\".invalid\"):\n",
+            "test_review_conductor_profiles.ProfilesTest.test_enabled_standalone_profile_rejects_empty_tunnel_name",
+        ),
+        (
             "omit immediate descriptor cleanup after standalone preparation",
             "tools/review_conductor_userland_launcher.py",
-            "            descriptors.callback(os.close, descriptor)\n"
-            "            prepared.append(descriptor)\n"
-            "        webhook_fd, github_fd = prepared\n",
-            "            prepared.append(descriptor)\n"
-            "        webhook_fd, github_fd = prepared\n",
+            "            stack.callback(os.close, copied)\n"
+            "            prepared.append(copied)\n",
+            "            prepared.append(copied)\n",
             "test_suite_activation_launcher.SuiteActivationLauncherTests.test_partial_resolution_and_preparation_cleanup",
         ),
         (
-            "allow legacy start of the SMCBD suite profile",
+            "allow legacy start of any generalized profile",
             "tools/review_conductor_userland_launcher.py",
+            "    if config.get(\"profile_id\"):\n"
+            "        raise LauncherError(\n"
+            "            \"generalized profiles use standalone start; legacy start remains the Blocks 9443 consumer\"\n"
+            "        )\n",
             "    if config.get(\"profile_id\") == STANDALONE_PROFILE_ID:\n"
             "        raise LauncherError(\n"
-            "            \"SMCBD suite uses standalone start; legacy start remains the Blocks 9443 consumer\"\n"
-            "        )\n",
-            "    if False:\n"
-            "        raise LauncherError(\n"
-            "            \"SMCBD suite uses standalone start; legacy start remains the Blocks 9443 consumer\"\n"
+            "            \"generalized profiles use standalone start; legacy start remains the Blocks 9443 consumer\"\n"
             "        )\n",
             "test_suite_activation_launcher.SuiteActivationLauncherTests.test_legacy_start_keeps_blocks_9443_and_rejects_suite",
+        ),
+        (
+            "report standalone preflight ready while bootstrap is waiting",
+            "tools/review_conductor_userland_launcher.py",
+            "        \"result\": bootstrap[\"result\"],\n",
+            "        \"result\": \"ready\",\n",
+            "test_suite_activation_launcher.SuiteActivationLauncherTests.test_preflight_validates_enrollment_without_resolving_or_starting_a_tunnel",
+        ),
+        (
+            "hard-code three-account auth metadata for standalone capabilities",
+            "tools/review_conductor_userland_launcher.py",
+            "        \"auth_mode\": selected_auth_mode(tuple(selected)),\n",
+            "        \"auth_mode\": \"three_distinct_service_accounts\",\n",
+            "test_suite_activation_launcher.SuiteActivationLauncherTests.test_preflight_validates_enrollment_without_resolving_or_starting_a_tunnel",
         ),
     )
 

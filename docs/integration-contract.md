@@ -43,9 +43,13 @@ qualified source behavior, not live admission.
 
 The source-only launcher command
 `tools/review_conductor_userland_launcher.py standalone` validates an external
-mode-0600 registry against the SMCBD profile before resolving only the webhook
-secret and GitHub App key, then invokes `tools/standalone_supervisor.py` with
-inherited descriptors. It does not resolve or start cloudflared. Legacy
+mode-0600 registry against the SMCBD profile. `preflight` reports that
+registry/bootstrap status and does not resolve credentials or invoke
+`tools/standalone_supervisor.py`. `start` forwards already-prepared webhook
+and GitHub App descriptors into the supervisor and never treats reviewed-profile
+`onepassword.op_path` or runtime selectors as live secret sources. `health`
+only queries the supervisor. None of these verbs resolve or start cloudflared.
+Legacy
 `start` remains the Blocks 9443 consumer. The supervisor invokes
 `tools/service_entrypoint.py` for one exact SMCBD profile. Its child argv carries
 only the profile and external-registry paths plus fixed command words; webhook

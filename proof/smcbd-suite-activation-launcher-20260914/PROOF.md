@@ -10,8 +10,11 @@
 - Head: the commit that contains this proof and
   `candidate-manifest.json`.
 - Captured: `2026-09-14`.
-- Mutation authority: local source-only implementation, commit, non-force
-  push of this branch, and one draft PR to `main`.
+- Mutation authority: local source-only Copilot review `5200085128`
+  round 1/2 repair, commit, and non-force push of this branch. Ledger
+  remains 1/2; no Copilot or reviewer request.
+- Starting exact head before this repair:
+  `340c60e1c7c86a652d46a9339b60f7dd905fd132`.
 - Not authorized: merge, deploy, authenticate, read live secrets, provision
   registry/tunnel, start/stop any service, change webhook/protection/account
   settings, edit PR #8/#11/#12 or product repos, create another PR, or later
@@ -33,15 +36,18 @@ deployment-only tunnel ID. An isolated public hostname is still required.
 The committed profile keeps `tunnel.tunnel_id` null.
 
 `tools/review_conductor_userland_launcher.py standalone` validates an
-external same-user mode-0600 registry against the SMCBD profile before any
-credential resolution. It then resolves only webhook-secret and GitHub App
-key capabilities, copies them into verified unlinked mode-0600 anonymous
-regular files bounded to 1 MiB, and invokes
+external same-user mode-0600 registry against the SMCBD profile.
+`preflight` only validates that registry and bootstrap status; it does not
+resolve credentials or invoke the supervisor. `start` forwards
+already-prepared webhook and GitHub App descriptors into verified unlinked
+mode-0600 anonymous regular files bounded to 1 MiB, then invokes
 `tools/standalone_supervisor.py` with explicit `pass_fds` and
-descriptor-number environment values. Argv, environment, logs, and tracked
-files never receive credential values. The command does not resolve or
+descriptor-number environment values. Reviewed-profile
+`onepassword.op_path` and runtime selectors are not live secret sources.
+`health` only queries the supervisor. Argv, environment, logs, and tracked
+files never receive credential values. None of these verbs resolve or
 start cloudflared. Legacy `start` remains the Blocks 9443 consumer and
-refuses the suite profile.
+rejects any generalized `profile_id` before credential resolution.
 
 The launcher/supervisor fail closed on inactive, absent, foreign,
 permission-wrong, or profile-mismatched external enrollment. Tests use
@@ -50,36 +56,38 @@ subprocesses, and disposable paths only.
 
 ## Direct tests and mutants
 
-Focused `SuiteActivationLauncherTests` (12) plus two profile regressions
-and seven precise disposable-copy mutants:
+Focused `SuiteActivationLauncherTests` plus profile regressions and
+precise disposable-copy mutants:
 
 1. no credential resolution before absent/mismatched/inactive enrollment
    rejection;
 2. wrong repo/App/install/actor/policy profile mismatch;
-3. descriptors absent from argv/env/log/tracked files;
-4. partial resolution/preparation/spawn cleanup;
+3. changed profile `onepassword.op_path`/runtime selectors cannot redirect
+   resolution; descriptors and secret-like values stay out of
+   argv/env/log/tracked files;
+4. partial inherited-descriptor preparation/spawn cleanup;
 5. launcher → standalone supervisor argv/`pass_fds`/environment
-   integration without a tunnel capability;
-6. Blocks legacy 9443 compatibility and suite rejection by legacy `start`;
-7. enabled standalone source readiness without a tunnel ID.
+   integration without a tunnel capability or profile-selector resolve;
+6. Blocks legacy 9443 compatibility and rejection of any generalized
+   `profile_id` before resolver;
+7. enabled standalone source readiness without a tunnel ID, while empty
+   `tunnel_name` is rejected;
+8. standalone preflight top-level `waiting_for_human` when bootstrap is
+   not ready, and `auth_mode` bound to the selected capability set.
 
-Mutants killed:
-
-1. resolve credentials before enrollment validation;
-2. resolve the Cloudflare tunnel capability during standalone start;
-3. omit inherited credential descriptors from supervisor `pass_fds`;
-4. launch the legacy userland consumer instead of the standalone
-   supervisor;
-5. couple standalone source readiness to an invented tunnel ID;
-6. omit immediate descriptor cleanup after standalone preparation;
-7. allow legacy start of the SMCBD suite profile.
+Mutants killed include enrollment-before-inherit, profile-selector
+resolve, omitted `pass_fds`, legacy consumer launch, invented tunnel ID,
+missing tunnel-name guard, omitted descriptor cleanup, literal-SMCBD-only
+legacy rejection, preflight `ready` while waiting, and hard-coded
+three-account auth metadata.
 
 ## Verification
 
 Locally exercised interpreter: CPython 3.14.6 on macOS.
 
-- Focused new suites and mutants — PASS (12 launcher tests, 7 mutants,
-  plus the two profile regressions).
+- Focused new suites and mutants — PASS (16 launcher tests, including 10
+  precise mutants, plus the two profile regressions and empty-tunnel-name
+  rejection).
 - `make check` — PASS, including Blocks/userland/launcher/supervisor
   suites and the new suite-activation launcher file.
 - `make build` — PASS.
@@ -126,10 +134,14 @@ python3 tools/standalone_supervisor.py \
   --registry /absolute/external/registry.json health
 ```
 
-The committed profile remains inactive, so these commands fail closed
-until a later authorized deployment enables the profile and supplies a
-matching external registry. They do not start a tunnel or activate
-webhooks.
+Launcher preflight only validates registry/bootstrap, start forwards already-prepared inherited descriptors, and health only queries. The
+committed profile remains inactive, so those launcher commands fail
+closed until a later authorized deployment enables the profile and
+supplies a matching external registry. The direct supervisor health path is a
+local query: when no lock/socket exists it can return a successful
+`stopped` payload without enrollment validation and must not be
+overstated as the launcher fail-closed gate. These commands do not
+start a tunnel or activate webhooks.
 
 ## Next safe action
 

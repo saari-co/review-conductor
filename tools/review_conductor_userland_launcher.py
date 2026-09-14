@@ -139,16 +139,25 @@ def validate_standalone_enrollment(config: dict[str, Any], registry_path: Path) 
         raise LauncherError(str(exc)) from exc
 
 
+def selected_auth_mode(capabilities: tuple[str, ...]) -> str:
+    """Describe the selected capability set; never invent a larger contract."""
+    roles = tuple(capability.rsplit(".", 1)[-1] for capability in capabilities)
+    if roles == ("webhook-verify", "github-installation", "cloudflare-tunnel"):
+        return "three_distinct_service_accounts"
+    return "selected_" + "_and_".join(role.replace("-", "_") for role in roles)
+
+
 def bootstrap_status(
     config: dict[str, Any],
     *,
     capabilities: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
+    selected = capabilities or profiles.capabilities(config)
     if config.get("enrollment", {}).get("enabled") is False:
         return {"schema": "smoky.review-conductor.userland-bootstrap-status.v1", "result": "waiting_for_human", "domains": {}, "blockers": config["enrollment"]["blockers"], "values_exposed": False, "merge_authorized": False}
     domains: dict[str, dict[str, str]] = config["onepassword"]["domains"]
     states: dict[str, str] = {}
-    for capability in capabilities or profiles.capabilities(config):
+    for capability in selected:
         try:
             bootstrap_bytes(Path(domains[capability]["bootstrap_file"]))
         except core.ContractError:
@@ -159,7 +168,7 @@ def bootstrap_status(
     return {
         "schema": "smoky.review-conductor.userland-bootstrap-status.v1",
         "result": "ready" if ready else "waiting_for_human",
-        "auth_mode": "three_distinct_service_accounts",
+        "auth_mode": selected_auth_mode(tuple(selected)),
         "domains": states,
         "desktop_authorization_required_per_pr": False,
         "merge_authorized": False,
@@ -421,9 +430,9 @@ def start(
     config_path: Path,
     popen: Any = subprocess.Popen,
 ) -> int:
-    if config.get("profile_id") == STANDALONE_PROFILE_ID:
+    if config.get("profile_id"):
         raise LauncherError(
-            "SMCBD suite uses standalone start; legacy start remains the Blocks 9443 consumer"
+            "generalized profiles use standalone start; legacy start remains the Blocks 9443 consumer"
         )
     profiles.require_enabled(config)
     if bootstrap_status(config)["result"] != "ready":
@@ -498,15 +507,70 @@ def start(
     return conductor_code if conductor_code != 0 else tunnel_code
 
 
+def inherit_standalone_credentials(
+    config: dict[str, Any], stack: contextlib.ExitStack
+) -> tuple[int, int]:
+    """Copy caller-prepared webhook/App descriptors; never read profile selectors.
+
+    Standalone start does not treat reviewed-profile ``onepassword.op_path`` or
+    runtime references as live secret sources. Deployment prepares the two
+    inherited descriptors; this consumer only copies them into anonymous files.
+    """
+    keys = ("webhook_secret_fd_env", "github_private_key_fd_env")
+    prepared: list[int] = []
+    with contextlib.ExitStack() as incoming:
+        sources: list[int] = []
+        for key in keys:
+            env_name = config["credentials"][key]
+            raw = os.environ.get(env_name)
+            if raw is None or not raw.isascii() or not raw.isdigit() or int(raw) < 3:
+                raise LauncherError(
+                    "required inherited credential descriptor is unavailable"
+                )
+            descriptor = int(raw)
+            if descriptor in sources:
+                raise LauncherError("standalone credentials require distinct descriptors")
+            incoming.callback(os.close, descriptor)
+            sources.append(descriptor)
+        for descriptor in sources:
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = os.read(descriptor, min(65536, 1024 * 1024 + 1 - total))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > 1024 * 1024:
+                    raise LauncherError("inherited credential exceeds its bounded size")
+            value = b"".join(chunks)
+            if not value or b"\x00" in value:
+                raise LauncherError("inherited credential has an invalid bounded shape")
+            try:
+                value.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise LauncherError("inherited credential is not UTF-8") from exc
+            try:
+                copied = credential_descriptor(value)
+            finally:
+                value = b""
+            stack.callback(os.close, copied)
+            prepared.append(copied)
+    return prepared[0], prepared[1]
+
+
 def standalone_preflight(
     config: dict[str, Any],
     profile_path: Path,
     registry_path: Path,
 ) -> dict[str, Any]:
     enrolled = validate_standalone_enrollment(config, registry_path)
+    bootstrap = bootstrap_status(
+        config, capabilities=standalone_capabilities(config)
+    )
     return {
         "schema": "smoky.review-conductor.standalone-launcher-preflight.v1",
-        "result": "ready",
+        "result": bootstrap["result"],
         "profile_id": config["profile_id"],
         "profile_path": str(profile_path),
         "registry_path": str(registry_path),
@@ -515,9 +579,7 @@ def standalone_preflight(
         "app_id": enrolled.app_id,
         "installation_id": enrolled.installation_id,
         "reviewers": enrolled.reviewers,
-        "bootstrap": bootstrap_status(
-            config, capabilities=standalone_capabilities(config)
-        ),
+        "bootstrap": bootstrap,
         "credentials_resolved": False,
         "tunnel_started": False,
         "values_exposed": False,
@@ -580,16 +642,7 @@ def start_standalone(
         raise LauncherError("current-user service-account bootstrap is not ready")
     child = None
     with contextlib.ExitStack() as descriptors:
-        prepared = []
-        for capability in standalone_capabilities(config):
-            value = resolve_runtime_value(config, capability)
-            try:
-                descriptor = credential_descriptor(value)
-            finally:
-                value = b""
-            descriptors.callback(os.close, descriptor)
-            prepared.append(descriptor)
-        webhook_fd, github_fd = prepared
+        webhook_fd, github_fd = inherit_standalone_credentials(config, descriptors)
         try:
             child = popen(
                 [

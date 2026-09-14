@@ -512,6 +512,8 @@ def load_config(
             # Connector identity is deployment-only. Standalone source
             # readiness keeps the proposed hostname isolated and does not
             # invent or require a tunnel ID.
+            if not tunnel["tunnel_name"]:
+                raise UserlandError("enabled profile requires an isolated tunnel name")
             if ingress["public_hostname"].endswith(".invalid"):
                 raise UserlandError("enabled profile requires an isolated public hostname")
         profiles.validate_isolation([result])

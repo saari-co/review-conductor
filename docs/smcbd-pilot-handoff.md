@@ -110,9 +110,11 @@ Non-secret credential selectors are already isolated in the inactive profile:
 
 The source-only launcher command
 `tools/review_conductor_userland_launcher.py standalone` validates an external
-mode-0600 registry against this profile before resolving only the webhook
-secret and GitHub App key. It then invokes `tools/standalone_supervisor.py`
-with inherited descriptors and does not resolve or start cloudflared. Legacy
+mode-0600 registry against this profile. `preflight` reports registry and
+bootstrap status only. `start` forwards already-prepared webhook and GitHub
+App descriptors into `tools/standalone_supervisor.py` and does not read live
+secrets from reviewed-profile `onepassword` selectors. `health` only queries
+the supervisor. None of these verbs resolve or start cloudflared. Legacy
 `start` remains the Blocks 9443 consumer and refuses this profile. The
 supervisor passes those two credentials to `tools/service_entrypoint.py`
 through inherited file descriptors while supplying only the non-secret profile

@@ -6,18 +6,18 @@
   "captured_date": "2026-09-14",
   "files": {
     "Makefile": "e41951b54eb40beeb9cc2234e2e11e3af11955ad62b88d720538dbc365c9f958",
-    "README.md": "faaad4631abb8574fa05d7dc1e139ba0869188668381bf036fb52341f4120dfc",
+    "README.md": "6a6f7b9db50d5af01ee5bfb7a62cfd562987f68a9f9517792675dfd51815eedc",
     "SECURITY.md": "25f81e7aae97c42b8b485e28ae6d48c43485467872cd6be363ffdc39c6db3aa2",
     "contracts/review-conductor/openclaw-smcbd-suite-userland.json": "6fa30c74761df9b4622b701fba341b6d907ef281c0a2f133bcb51fabf69cea6a",
     "contracts/review-conductor/openclaw-smcbd-suite.json": "fee5c0e2f27d3e48daa4a0adf4202d5acfde8b82b895985da2fd8fca44b7c118",
-    "docs/integration-contract.md": "885e44460df0ac9f419abcbef6cc710ba75f423df48491fbf033cb3a6e979537",
-    "docs/migration.md": "b958da38cae29aa6e1248c7b51466220aa8583e8105272647fc748925f599136",
-    "docs/provenance.json": "042791e5028ec278bc5f8f645eda8bef23f0bb1f7bdc1e86819e5f84808adb07",
-    "docs/smcbd-pilot-handoff.md": "16ecbe20e1a3734d95a3bf6885d0fd954f1174f742d2a906d9e98c8de7f3da33",
+    "docs/integration-contract.md": "1a2a74bb977e6cc153a8a8555ee8d30d433309492ccf4fd4416d3a8e77312ff4",
+    "docs/migration.md": "d964a026b38235fcde41c6937e457253016ac539728c899a426318551b143d6d",
+    "docs/provenance.json": "9c7136b5c9cd79a561dfd1effe62b3fffa04656c77f12ad2fad9161c17cc44e0",
+    "docs/smcbd-pilot-handoff.md": "1efdaac71f7fbf317f41517b13ed0a2e9dcc1fe36ab0c47d251e713d9f066608",
     "docs/trusted-admission.md": "e81e2d837b188a3940519787d3d05e49533e1ffa8d1cda8ac7e4965fbdf86336",
-    "tests/test_review_conductor_profiles.py": "859a62dd6b3fdb4022441b0d9f8828cb89e44b23f3df7027aed873c2e46f30ab",
-    "tests/test_suite_activation_launcher.py": "6b80f41f75f10b28388daf0a03cd06d40f8453beb3e033c3568304d42bb74d16",
-    "tools/review_conductor_userland.py": "6a21ade40251eb04acd70b7c5ab434ee38a592d2b7ca9bbd992bd90eac01447a",
-    "tools/review_conductor_userland_launcher.py": "85d5b130dcb0b5227f9c45bd2cdc9630412069da296718b4246339738aae958e"
+    "tests/test_review_conductor_profiles.py": "842f440a704ec2f0437c9014a3190f767a4d963e10b96ed0ad7b28af56a30279",
+    "tests/test_suite_activation_launcher.py": "08ae92693a2a85a7cfaee6f590e6310147ecb864dfa2065e34ecd07ba5cf610e",
+    "tools/review_conductor_userland.py": "c9ff05251ca40de09e0d3972b29346ebc141adea169e9925d92b6e1a16ddb394",
+    "tools/review_conductor_userland_launcher.py": "2708b9313db752700feff8c4926021d28c709df3e2a17b2b75d03262ac03911b"
   }
 }

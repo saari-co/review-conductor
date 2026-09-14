@@ -25,9 +25,10 @@
   environment, an inherited generation-lifetime descriptor, an entrypoint-verified
   exact SMCBD config/state identity and fail-closed
   health/start/stop/restart behavior. The 1Password-aware launcher now has a
-  source-only `standalone` preflight/start/health path that feeds that
-  supervisor inherited descriptors after enrollment validation. Neither path
-  is installed, and neither starts a tunnel.
+  source-only `standalone` path: `preflight` validates registry/bootstrap only,
+  `start` forwards inherited webhook/App descriptors into that supervisor, and
+  `health` only queries it. Neither path is installed, and neither starts a
+  tunnel.
 - `provenance.json` is a versioned extraction/provenance ledger: it records
   `source_branch`, the source commit, original hashes and current destination
   hashes/adaptations. Recording a branch name does not push that branch. The
