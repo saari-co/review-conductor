@@ -12,12 +12,12 @@
     "contracts/review-conductor/openclaw-smcbd-suite.json": "fee5c0e2f27d3e48daa4a0adf4202d5acfde8b82b895985da2fd8fca44b7c118",
     "docs/integration-contract.md": "1a2a74bb977e6cc153a8a8555ee8d30d433309492ccf4fd4416d3a8e77312ff4",
     "docs/migration.md": "d964a026b38235fcde41c6937e457253016ac539728c899a426318551b143d6d",
-    "docs/provenance.json": "9c7136b5c9cd79a561dfd1effe62b3fffa04656c77f12ad2fad9161c17cc44e0",
+    "docs/provenance.json": "20f09b99ec2f3458316a9f93df960be7de3181a7e0f7a6948a52f088fe351c1e",
     "docs/smcbd-pilot-handoff.md": "1efdaac71f7fbf317f41517b13ed0a2e9dcc1fe36ab0c47d251e713d9f066608",
     "docs/trusted-admission.md": "e81e2d837b188a3940519787d3d05e49533e1ffa8d1cda8ac7e4965fbdf86336",
     "tests/test_review_conductor_profiles.py": "842f440a704ec2f0437c9014a3190f767a4d963e10b96ed0ad7b28af56a30279",
-    "tests/test_suite_activation_launcher.py": "08ae92693a2a85a7cfaee6f590e6310147ecb864dfa2065e34ecd07ba5cf610e",
+    "tests/test_suite_activation_launcher.py": "e7df4ea2e81e42f8bd6faf711852a11e3c3c00bcf55675bf0c6450f52beeb8cf",
     "tools/review_conductor_userland.py": "c9ff05251ca40de09e0d3972b29346ebc141adea169e9925d92b6e1a16ddb394",
-    "tools/review_conductor_userland_launcher.py": "2708b9313db752700feff8c4926021d28c709df3e2a17b2b75d03262ac03911b"
+    "tools/review_conductor_userland_launcher.py": "25b315a2c20f634fe439eb32a2b6d74d5c8c8720c8ba65f77f2915f476f1dd95"
   }
 }

@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -32,6 +33,36 @@ PRIVATE_KEY = (
 TUNNEL = b"synthetic-suite-tunnel-must-not-resolve"
 POLICY_COMMIT = "a" * 40
 POLICY_BYTES = b'{"schema":"review-conductor.synthetic-policy.v1"}'
+
+
+class LiveChild:
+    """Stay running until the launcher stop path terminates and reaps it."""
+
+    def __init__(self, command=None, kwargs=None):
+        self.command = command
+        self.kwargs = kwargs
+        self.returncode = None
+        self.terminated = False
+        self.killed = False
+        self.waits = 0
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+        if self.returncode is None:
+            self.returncode = -signal.SIGTERM
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -signal.SIGKILL
+
+    def wait(self, timeout):
+        self.waits += 1
+        if self.returncode is None:
+            raise subprocess.TimeoutExpired("synthetic-standalone-child", timeout)
+        return self.returncode
 
 
 def write_json(path: Path, value) -> Path:
@@ -58,6 +89,16 @@ class SuiteActivationLauncherTests(unittest.TestCase):
         self.resolutions: list[str] = []
         self.tracked = self.root / "tracked-proof.txt"
         self.tracked.write_text("source-only tracked fixture\n")
+        previous_handlers = {
+            signal.SIGINT: signal.getsignal(signal.SIGINT),
+            signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+        }
+
+        def restore_handlers():
+            for signum, handler in previous_handlers.items():
+                signal.signal(signum, handler)
+
+        self.addCleanup(restore_handlers)
 
     def enable_suite_source(self, *, reviewers=None, app_id=4916376, installation_id=161027021):
         core_path = self.contracts / "openclaw-smcbd-suite.json"
@@ -638,6 +679,137 @@ print('ok', file=sys.stderr)
         self.assertNotIn(WEBHOOK.decode(), self.tracked.read_text())
         self.assertNotIn(PRIVATE_KEY.decode(), self.tracked.read_text())
 
+    def test_signal_during_popen_stops_and_reaps_child(self):
+        path, config = self.load_enabled()
+        self.write_registry()
+        previous = {
+            signal.SIGINT: signal.getsignal(signal.SIGINT),
+            signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+        }
+        events = []
+        child = LiveChild()
+        real_signal = launcher.signal.signal
+
+        def install(signum, handler):
+            events.append(("signal", signum, handler))
+            return real_signal(signum, handler)
+
+        def popen(command, **kwargs):
+            events.append(("spawn",))
+            handler = signal.getsignal(signal.SIGTERM)
+            self.assertTrue(callable(handler))
+            self.assertNotIn(handler, (signal.SIG_DFL, signal.SIG_IGN, None))
+            handler(signal.SIGTERM, None)
+            child.command = command
+            child.kwargs = kwargs
+            return child
+
+        with patch.object(launcher.signal, "signal", side_effect=install):
+            self.assertEqual(self.start(config, path, popen), -signal.SIGTERM)
+        self.assertEqual(
+            [event[0] for event in events],
+            ["signal", "signal", "spawn", "signal", "signal"],
+        )
+        self.assertTrue(child.terminated)
+        self.assertEqual(child.waits, 1)
+        self.assertFalse(child.killed)
+        self.assertEqual(signal.getsignal(signal.SIGINT), previous[signal.SIGINT])
+        self.assertEqual(signal.getsignal(signal.SIGTERM), previous[signal.SIGTERM])
+
+    def test_signal_immediately_after_popen_stops_child_before_wait(self):
+        path, config = self.load_enabled()
+        self.write_registry()
+        previous = {
+            signal.SIGINT: signal.getsignal(signal.SIGINT),
+            signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+        }
+        child = LiveChild()
+        spawned = []
+        real_stack = contextlib.ExitStack
+
+        class PostSpawnStack(real_stack):
+            def __exit__(self, *exc):
+                result = super().__exit__(*exc)
+                if spawned and child.returncode is None:
+                    handler = signal.getsignal(signal.SIGINT)
+                    if callable(handler) and handler not in (signal.SIG_DFL, signal.SIG_IGN):
+                        handler(signal.SIGINT, None)
+                return result
+
+        def popen(command, **kwargs):
+            child.command = command
+            child.kwargs = kwargs
+            spawned.append(child)
+            return child
+
+        with patch.object(launcher.contextlib, "ExitStack", PostSpawnStack):
+            self.assertEqual(self.start(config, path, popen), -signal.SIGTERM)
+        self.assertTrue(child.terminated)
+        self.assertEqual(child.waits, 1)
+        self.assertFalse(child.killed)
+        self.assertEqual(signal.getsignal(signal.SIGINT), previous[signal.SIGINT])
+        self.assertEqual(signal.getsignal(signal.SIGTERM), previous[signal.SIGTERM])
+
+    def test_spawn_exception_restores_handlers(self):
+        path, config = self.load_enabled()
+        self.write_registry()
+        previous = {
+            signal.SIGINT: signal.getsignal(signal.SIGINT),
+            signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+        }
+        events = []
+        real_signal = launcher.signal.signal
+
+        def install(signum, handler):
+            events.append(("signal", signum, handler))
+            return real_signal(signum, handler)
+
+        def fail_spawn(*_args, **_kwargs):
+            events.append(("spawn",))
+            raise OSError("synthetic spawn failure")
+
+        with patch.object(launcher.signal, "signal", side_effect=install):
+            with self.assertRaises(OSError):
+                self.start(config, path, fail_spawn)
+        self.assertEqual(
+            [event[0] for event in events],
+            ["signal", "signal", "spawn", "signal", "signal"],
+        )
+        self.assertEqual(events[3][2], previous[signal.SIGINT])
+        self.assertEqual(events[4][2], previous[signal.SIGTERM])
+        self.assertEqual(signal.getsignal(signal.SIGINT), previous[signal.SIGINT])
+        self.assertEqual(signal.getsignal(signal.SIGTERM), previous[signal.SIGTERM])
+
+    def test_normal_exit_restores_handlers_and_reaps_child_once(self):
+        path, config = self.load_enabled()
+        self.write_registry()
+        previous = {
+            signal.SIGINT: signal.getsignal(signal.SIGINT),
+            signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+        }
+        child = LiveChild()
+        stops = []
+        real_stop = launcher.stop_child
+
+        def stop(process):
+            stops.append(process)
+            return real_stop(process)
+
+        def popen(command, **kwargs):
+            child.command = command
+            child.kwargs = kwargs
+            child.returncode = 0
+            return child
+
+        with patch.object(launcher, "stop_child", side_effect=stop):
+            self.assertEqual(self.start(config, path, popen), 0)
+        self.assertEqual(stops, [child])
+        self.assertEqual(child.waits, 1)
+        self.assertFalse(child.terminated)
+        self.assertFalse(child.killed)
+        self.assertEqual(signal.getsignal(signal.SIGINT), previous[signal.SIGINT])
+        self.assertEqual(signal.getsignal(signal.SIGTERM), previous[signal.SIGTERM])
+
     def test_command_behavior_docs_and_proof_are_consistent(self):
         files = {
             ROOT / "README.md": (
@@ -690,15 +862,13 @@ class SuiteActivationLauncherMutationTests(unittest.TestCase):
             "        != \"ready\"\n"
             "    ):\n"
             "        raise LauncherError(\"current-user service-account bootstrap is not ready\")\n"
-            "    child = None\n"
-            "    with contextlib.ExitStack() as descriptors:\n",
+            "    child = None\n",
             "    if (\n"
             "        bootstrap_status(config, capabilities=standalone_capabilities(config))[\"result\"]\n"
             "        != \"ready\"\n"
             "    ):\n"
             "        raise LauncherError(\"current-user service-account bootstrap is not ready\")\n"
-            "    child = None\n"
-            "    with contextlib.ExitStack() as descriptors:\n",
+            "    child = None\n",
             "test_suite_activation_launcher.SuiteActivationLauncherTests.test_inactive_or_absent_enrollment_rejects_before_any_resolution",
         ),
         (
@@ -791,6 +961,53 @@ class SuiteActivationLauncherMutationTests(unittest.TestCase):
             "        \"auth_mode\": selected_auth_mode(tuple(selected)),\n",
             "        \"auth_mode\": \"three_distinct_service_accounts\",\n",
             "test_suite_activation_launcher.SuiteActivationLauncherTests.test_preflight_validates_enrollment_without_resolving_or_starting_a_tunnel",
+        ),
+        (
+            "install standalone stop handlers after supervisor spawn",
+            "tools/review_conductor_userland_launcher.py",
+            "        for signum in (signal.SIGINT, signal.SIGTERM):\n"
+            "            previous_handlers[signum] = signal.signal(signum, request_stop)\n"
+            "        # Own stop handlers before spawn so a startup-time signal cannot\n"
+            "        # leave the supervisor child running without its foreground launcher.\n"
+            "        with contextlib.ExitStack() as descriptors:\n"
+            "            webhook_fd, github_fd = inherit_standalone_credentials(config, descriptors)\n"
+            "            child = popen(\n"
+            "                [\n"
+            "                    sys.executable,\n"
+            "                    str(STANDALONE_SUPERVISOR),\n"
+            "                    \"--profile\",\n"
+            "                    str(profile_path),\n"
+            "                    \"--registry\",\n"
+            "                    str(registry_path),\n"
+            "                    \"start\",\n"
+            "                    \"--apply\",\n"
+            "                ],\n"
+            "                cwd=config[\"source_root\"],\n"
+            "                env=child_environment(config, webhook_fd, github_fd),\n"
+            "                pass_fds=(webhook_fd, github_fd),\n"
+            "            )\n"
+            "        assert child is not None\n",
+            "        with contextlib.ExitStack() as descriptors:\n"
+            "            webhook_fd, github_fd = inherit_standalone_credentials(config, descriptors)\n"
+            "            child = popen(\n"
+            "                [\n"
+            "                    sys.executable,\n"
+            "                    str(STANDALONE_SUPERVISOR),\n"
+            "                    \"--profile\",\n"
+            "                    str(profile_path),\n"
+            "                    \"--registry\",\n"
+            "                    str(registry_path),\n"
+            "                    \"start\",\n"
+            "                    \"--apply\",\n"
+            "                ],\n"
+            "                cwd=config[\"source_root\"],\n"
+            "                env=child_environment(config, webhook_fd, github_fd),\n"
+            "                pass_fds=(webhook_fd, github_fd),\n"
+            "            )\n"
+            "        assert child is not None\n"
+            "        for signum in (signal.SIGINT, signal.SIGTERM):\n"
+            "            previous_handlers[signum] = signal.signal(signum, request_stop)\n",
+            "test_suite_activation_launcher.SuiteActivationLauncherTests.test_signal_during_popen_stops_and_reaps_child",
         ),
     )
 

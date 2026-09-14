@@ -641,9 +641,22 @@ def start_standalone(
     ):
         raise LauncherError("current-user service-account bootstrap is not ready")
     child = None
-    with contextlib.ExitStack() as descriptors:
-        webhook_fd, github_fd = inherit_standalone_credentials(config, descriptors)
-        try:
+    previous_handlers: dict[int, Any] = {}
+    stopping = False
+
+    def request_stop(_signum: int, _frame: Any) -> None:
+        nonlocal stopping
+        stopping = True
+        if child is not None and child.poll() is None:
+            child.terminate()
+
+    try:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signum] = signal.signal(signum, request_stop)
+        # Own stop handlers before spawn so a startup-time signal cannot
+        # leave the supervisor child running without its foreground launcher.
+        with contextlib.ExitStack() as descriptors:
+            webhook_fd, github_fd = inherit_standalone_credentials(config, descriptors)
             child = popen(
                 [
                     sys.executable,
@@ -659,25 +672,13 @@ def start_standalone(
                 env=child_environment(config, webhook_fd, github_fd),
                 pass_fds=(webhook_fd, github_fd),
             )
-        except BaseException:
-            if child is not None:
-                stop_child(child)
-            raise
-    assert child is not None
-    previous_handlers: dict[int, Any] = {}
-
-    def request_stop(_signum: int, _frame: Any) -> None:
-        if child.poll() is None:
-            child.terminate()
-
-    for signum in (signal.SIGINT, signal.SIGTERM):
-        previous_handlers[signum] = signal.signal(signum, request_stop)
-    try:
-        while child.poll() is None:
+        assert child is not None
+        while not stopping and child.poll() is None:
             time.sleep(1)
     finally:
-        request_stop(signal.SIGTERM, None)
-        stop_child(child)
+        if child is not None:
+            request_stop(signal.SIGTERM, None)
+            stop_child(child)
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
     return child.returncode or 0

@@ -10,15 +10,15 @@
 - Head: the commit that contains this proof and
   `candidate-manifest.json`.
 - Captured: `2026-09-14`.
-- Mutation authority: local source-only Copilot review `5200085128`
-  round 1/2 repair, commit, and non-force push of this branch. Ledger
-  remains 1/2; no Copilot or reviewer request.
+- Mutation authority: owner-authorized frozen post-cap repair of
+  Copilot review `5200380692` inline `4007417174` only. Ledger remains
+  terminal **2/2**; no Copilot or reviewer request.
 - Starting exact head before this repair:
-  `340c60e1c7c86a652d46a9339b60f7dd905fd132`.
+  `21285c7cadcfa5f22dbda7d1bc00a14b1a75e3ac`.
 - Not authorized: merge, deploy, authenticate, read live secrets, provision
   registry/tunnel, start/stop any service, change webhook/protection/account
-  settings, edit PR #8/#11/#12 or product repos, create another PR, or later
-  placeholder-writer fencing.
+  settings, edit PR #8/#11/#12 or product repos, create another PR, mark
+  ready, or later placeholder-writer fencing.
 
 ## Qualified boundary
 
@@ -44,15 +44,41 @@ mode-0600 anonymous regular files bounded to 1 MiB, then invokes
 `tools/standalone_supervisor.py` with explicit `pass_fds` and
 descriptor-number environment values. Reviewed-profile
 `onepassword.op_path` and runtime selectors are not live secret sources.
-`health` only queries the supervisor. Argv, environment, logs, and tracked
-files never receive credential values. None of these verbs resolve or
-start cloudflared. Legacy `start` remains the Blocks 9443 consumer and
-rejects any generalized `profile_id` before credential resolution.
+Standalone start owns SIGINT/SIGTERM before supervisor spawn; the outer
+cleanup path stops and reaps that child across the spawn and immediate
+post-spawn window and restores prior handlers. `health` only queries the
+supervisor. Argv, environment, logs, and tracked files never receive
+credential values. None of these verbs resolve or start cloudflared.
+Legacy `start` remains the Blocks 9443 consumer and rejects any
+generalized `profile_id` before credential resolution.
 
 The launcher/supervisor fail closed on inactive, absent, foreign,
 permission-wrong, or profile-mismatched external enrollment. Tests use
 synthetic resolver bytes, synthetic mode-0600 registry files, injected
 subprocesses, and disposable paths only.
+
+## Frozen 2/2 lifecycle repair
+
+Required fix, Copilot review `5200380692` inline `4007417174`:
+`start_standalone` previously spawned the supervisor child before
+SIGINT/SIGTERM handlers were installed. Handlers are now installed and
+owned before `Popen`. An outer cleanup path covers the full spawn and
+immediate post-spawn window so a signal during startup or after `Popen`
+returns deterministically stops/reaps the child and restores every prior
+handler. The credential-descriptor `ExitStack` boundary and no-secret-leak
+guarantees are unchanged.
+
+## Deferred dispositions (review 5200380692)
+
+These findings remain deferred and were not implemented:
+
+- inline `4007417115`: health duplicate response validation;
+- inline `4007417218`: generalized `tunnel_name` type/bounds;
+- suppressed inherited-descriptor `OSError` normalization;
+- suppressed migration wording.
+
+Round 1/2 review `5200085128` remains repaired at starting head
+`21285c7cadcfa5f22dbda7d1bc00a14b1a75e3ac`.
 
 ## Direct tests and mutants
 
@@ -73,29 +99,37 @@ precise disposable-copy mutants:
 7. enabled standalone source readiness without a tunnel ID, while empty
    `tunnel_name` is rejected;
 8. standalone preflight top-level `waiting_for_human` when bootstrap is
-   not ready, and `auth_mode` bound to the selected capability set.
+   not ready, and `auth_mode` bound to the selected capability set;
+9. SIGINT/SIGTERM during the `Popen`/startup call stops and reaps the
+   child and restores prior handlers;
+10. SIGINT/SIGTERM immediately after `Popen` returns and before the wait
+    loop stops and reaps the child and restores prior handlers;
+11. spawn exception restores prior handlers;
+12. successful/normal exit restores handlers and reaps the child once.
 
 Mutants killed include enrollment-before-inherit, profile-selector
 resolve, omitted `pass_fds`, legacy consumer launch, invented tunnel ID,
 missing tunnel-name guard, omitted descriptor cleanup, literal-SMCBD-only
-legacy rejection, preflight `ready` while waiting, and hard-coded
-three-account auth metadata.
+legacy rejection, preflight `ready` while waiting, hard-coded
+three-account auth metadata, and handler-after-spawn / missing outer
+startup cleanup ordering.
 
 ## Verification
 
 Locally exercised interpreter: CPython 3.14.6 on macOS.
 
-- Focused new suites and mutants — PASS (16 launcher tests, including 10
+- Focused new suites and mutants — PASS (20 launcher tests, including 11
   precise mutants, plus the two profile regressions and empty-tunnel-name
   rejection).
 - `make check` — PASS, including Blocks/userland/launcher/supervisor
-  suites and the new suite-activation launcher file.
+  suites and the standalone start lifecycle regressions.
 - `make build` — PASS.
 - `python3 -m compileall -q tools tests scripts` — PASS.
 - `scripts/check_provenance.py` — PASS for the 14 extracted files after
   destination-hash and adaptation updates.
 - `actionlint` — not required; workflow bytes were unchanged.
-- `git diff --check` — PASS on the unstaged source diff.
+- `git diff --check` — PASS on the unstaged source diff and on
+  `f42875beeeab4cc1e82b701a692ff38ec8ac4a64`...working-tree.
 
 ## Live limitations and untouched boundaries
 
@@ -108,7 +142,8 @@ Locally exercised interpreter: CPython 3.14.6 on macOS.
   erasure.
 - GitHub App settings, webhooks, subscriptions, credentials, Cloudflare,
   branch protection, required checks, x-api, the live Dinkus service,
-  SMCBD and Blocks product repositories, and PR #8/#11/#12 were untouched.
+  SMCBD and Blocks product repositories, and PR #8/#11/#12 runtime or
+  protection state were untouched.
 - Fixture PASS is not a deployed review PASS.
 
 ## Exact supported commands
@@ -145,7 +180,7 @@ start a tunnel or activate webhooks.
 
 ## Next safe action
 
-Publish this source slice as one draft PR. Do not request review, merge,
-deploy, authenticate, provision registry/tunnel, or start any service.
-After source lands, separately derive and promote the owner-approved
-SMCBD target-policy commit/hash into the external registry.
+Do not request review, merge, deploy, authenticate, provision
+registry/tunnel, or start any service. After this exact head's hosted CI
+is observed, separately derive and promote the owner-approved SMCBD
+target-policy commit/hash into the external registry.
