@@ -27,8 +27,8 @@
     "clawsweeper_requires_ready": true,
     "comprehensive": true,
     "reviewers": {
-      "openclaw": null,
-      "clawsweeper": null
+      "openclaw": "spark-openclaw",
+      "clawsweeper": "saari-clawsweeper"
     }
   }
 }

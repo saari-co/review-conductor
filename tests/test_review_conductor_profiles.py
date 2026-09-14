@@ -513,10 +513,52 @@ class ProfilesTest(unittest.TestCase):
         with self.assertRaises(core.ContractError):core.load_config(path)
         self.assertEqual(profiles.capabilities(config)[0],'review-conductor.openclaw-smcbd-suite.webhook-verify')
         candidate=json.loads((ROOT/'contracts/review-conductor/openclaw-smcbd-suite-userland.json').read_text())
+        core_candidate=json.loads((ROOT/'contracts/review-conductor/openclaw-smcbd-suite.json').read_text())
+        self.assertEqual(core_candidate['review_policy']['reviewers'],{'openclaw':'spark-openclaw','clawsweeper':'saari-clawsweeper'})
+        self.assertFalse(core_candidate['review_policy']['enabled'])
         self.assertEqual(candidate['github_app']['app_id'],4916376)
         self.assertEqual(candidate['github_app']['installation_id'],161027021)
         self.assertEqual(candidate['github_app']['permissions']['contents'],'read')
         self.assertFalse(candidate['enrollment']['enabled'])
+        self.assertNotIn('Authoritative repository-specific reviewer identities are not enrolled.', candidate['enrollment']['blockers'])
+        self.assertIsNone(candidate['tunnel']['tunnel_id'])
+
+    def test_enabled_standalone_profile_does_not_require_a_tunnel_id(self):
+        cp = self.contracts / 'openclaw-smcbd-suite.json'
+        rp = self.contracts / 'openclaw-smcbd-suite-userland.json'
+        core_profile, runtime_profile = json.loads(cp.read_text()), json.loads(rp.read_text())
+        core_profile['review_policy']['enabled'] = True
+        runtime_profile['enrollment'] = {'enabled': True, 'blockers': []}
+        self.assertIsNone(runtime_profile['tunnel']['tunnel_id'])
+        write(cp, core_profile)
+        write(rp, runtime_profile)
+        config = userland.load_config(rp, home=self.home, source_root=self.source)
+        self.assertEqual(config['review_policy']['reviewers'], {'openclaw': 'spark-openclaw', 'clawsweeper': 'saari-clawsweeper'})
+        self.assertIsNone(config['tunnel']['tunnel_id'])
+        self.assertTrue(config['tunnel']['tunnel_name'])
+        runtime_profile['ingress']['public_hostname'] = 'fixture.invalid'
+        write(rp, runtime_profile)
+        with self.assertRaises(core.ContractError):
+            userland.load_config(rp, home=self.home, source_root=self.source)
+
+    def test_enabled_standalone_profile_rejects_empty_tunnel_name(self):
+        cp = self.contracts / 'openclaw-smcbd-suite.json'
+        rp = self.contracts / 'openclaw-smcbd-suite-userland.json'
+        core_profile, runtime_profile = json.loads(cp.read_text()), json.loads(rp.read_text())
+        core_profile['review_policy']['enabled'] = True
+        runtime_profile['enrollment'] = {'enabled': True, 'blockers': []}
+        write(cp, core_profile)
+        for name in ('', None):
+            runtime_profile['tunnel']['tunnel_name'] = name
+            write(rp, runtime_profile)
+            with self.assertRaises(core.ContractError):
+                userland.load_config(rp, home=self.home, source_root=self.source)
+        runtime_profile['tunnel']['tunnel_name'] = 'fixture-suite-only'
+        runtime_profile['tunnel']['tunnel_id'] = None
+        write(rp, runtime_profile)
+        config = userland.load_config(rp, home=self.home, source_root=self.source)
+        self.assertIsNone(config['tunnel']['tunnel_id'])
+        self.assertEqual(config['tunnel']['tunnel_name'], 'fixture-suite-only')
 
 
 class OpenClawTerminalMutationTests(unittest.TestCase):

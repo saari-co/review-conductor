@@ -7,9 +7,15 @@
   `openclaw/review-conductor-generalization-managed`.
 - Five Python engine/adapter modules and four profiles were initially copied
   byte-for-byte. The launcher now has a standalone anonymous-descriptor
-  transport/cleanup repair. The runtime, userland loader and inactive SMCBD
-  profile are now explicitly adapted for trusted policy transport and the
-  verified App/installation candidate; the Blocks profiles remain unchanged.
+  transport/cleanup repair and a narrow SMCBD `standalone` command that
+  validates an external registry, resolves only webhook and GitHub App
+  capabilities, and invokes `tools/standalone_supervisor.py`. Legacy `start`
+  still launches the Blocks 9443 consumer and cloudflared. The runtime,
+  userland loader and inactive SMCBD profile are now explicitly adapted for
+  trusted policy transport, the verified App/installation candidate, and
+  source-bound reviewer actors `spark-openclaw` / `saari-clawsweeper`; the
+  Blocks profiles remain unchanged. An enabled standalone profile no longer
+  invents or requires a deployment-only tunnel ID.
 - Four regression suites relocated, with root/fixture path adjustments; one
   synthetic key marker is assembled from bytes with the same runtime value for
   source hygiene. The versioned extraction/provenance ledger records these adaptations.
@@ -18,8 +24,11 @@
   entrypoint with inherited webhook/App descriptors, an allowlisted child
   environment, an inherited generation-lifetime descriptor, an entrypoint-verified
   exact SMCBD config/state identity and fail-closed
-  health/start/stop/restart behavior. It is source-only, uninstalled and never
-  starts a tunnel.
+  health/start/stop/restart behavior. The 1Password-aware launcher now has a
+  source-only `standalone` path: `preflight` validates registry/bootstrap only,
+  `start` forwards inherited webhook/App descriptors into that supervisor, and
+  `health` only queries it. Neither path is installed, and neither starts a
+  tunnel.
 - `provenance.json` is a versioned extraction/provenance ledger: it records
   `source_branch`, the source commit, original hashes and current destination
   hashes/adaptations. Recording a branch name does not push that branch. The
@@ -69,8 +78,10 @@ source.
 4. Obtain exact-head external reviews of this new repo. It is not self-enrolled;
    CI success is not OpenClaw/ClawSweeper clearance.
 5. Separately authorize each target's manifest commit, installation and isolated
-   credential/proof/state provisioning. SMCBD's missing identities/producers and
-   PR #3 CI/rail ownership blockers remain unresolved.
+   credential/proof/state provisioning. SMCBD's source-bound reviewer actors are
+   now named; the external registry, owner-approved target-policy commit/hash
+   (including any later `POST12_MAIN` value), live App Contents permission,
+   producers, and PR #8/#11/#12 CI/rail ownership blockers remain unresolved.
 6. Provision isolated credential storage, then transfer credentials through the
    approved protected path. Start and qualify the service and HTTPS endpoint with
    GitHub webhooks disabled. Obtain a separate webhook-activation go/no-go, run

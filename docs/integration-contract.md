@@ -41,7 +41,16 @@ and tick. See [trusted admission](trusted-admission.md).
 No live registry, credential, HTTPS edge or deployment exists, so this is
 qualified source behavior, not live admission.
 
-The source-only `tools/standalone_supervisor.py` invokes
+The source-only launcher command
+`tools/review_conductor_userland_launcher.py standalone` validates an external
+mode-0600 registry against the SMCBD profile. `preflight` reports that
+registry/bootstrap status and does not resolve credentials or invoke
+`tools/standalone_supervisor.py`. `start` forwards already-prepared webhook
+and GitHub App descriptors into the supervisor and never treats reviewed-profile
+`onepassword.op_path` or runtime selectors as live secret sources. `health`
+only queries the supervisor. None of these verbs resolve or start cloudflared.
+Legacy
+`start` remains the Blocks 9443 consumer. The supervisor invokes
 `tools/service_entrypoint.py` for one exact SMCBD profile. Its child argv carries
 only the profile and external-registry paths plus fixed command words; webhook
 and GitHub App credentials move only through explicitly inherited descriptors.
@@ -78,8 +87,12 @@ must be isolated. A target cannot
 request another target's installation, read its evidence, or supply its reviewers.
 No credentials or live deployment files are included. The inactive SMCBD
 candidate pins App `4916376`, installation `161027021`, repository
-`saari-co/openclaw-smcbd-suite` and repository ID `1366416798` while retaining
-explicit activation blockers.
+`saari-co/openclaw-smcbd-suite`, repository ID `1366416798`, and authoritative
+reviewer actors `spark-openclaw` / `saari-clawsweeper`. Enrollment remains
+disabled. The owner-approved target-policy commit/hash (including any later
+`POST12_MAIN` value) is derived during later deployment into an external
+registry and is not invented here. Remaining activation blockers are live
+GitHub/App, credential, registry, tunnel, producer, and protection work.
 
 The dedicated SMCBD pilot App remains restricted to the `saari-co` account and
 installed only on `openclaw-smcbd-suite`. The pilot does not require public or

@@ -28,6 +28,8 @@ if str(TOOLS) not in sys.path:
 import review_conductor as core  # noqa: E402
 import review_conductor_userland as userland  # noqa: E402
 import review_conductor_profiles as profiles  # noqa: E402
+import service_entrypoint as entrypoint  # noqa: E402
+import service_runtime as service  # noqa: E402
 
 
 BOOTSTRAP_CONFIRMATION = "cp1-userland-three-domain-bootstrap-v1"
@@ -36,6 +38,9 @@ CAPABILITIES = (
     "review-conductor.blocks.github-installation",
     "review-conductor.blocks.cloudflare-tunnel",
 )
+STANDALONE_PROFILE_ID = "openclaw-smcbd-suite"
+STANDALONE_ROLES = ("webhook-verify", "github-installation")
+STANDALONE_SUPERVISOR = ROOT / "tools/standalone_supervisor.py"
 SERVICE_TOKEN_RE = re.compile(r"^[^\x00-\x20\x7f]{20,4096}$")
 ACCOUNT_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
@@ -107,12 +112,52 @@ def bootstrap_bytes(path: Path) -> bytes:
     return token
 
 
-def bootstrap_status(config: dict[str, Any]) -> dict[str, Any]:
+def standalone_capabilities(config: dict[str, Any]) -> tuple[str, ...]:
+    namespace = config.get("profile_id", "blocks")
+    return tuple(f"review-conductor.{namespace}.{role}" for role in STANDALONE_ROLES)
+
+
+def require_standalone_profile(config: dict[str, Any]) -> None:
+    if config.get("profile_id") != STANDALONE_PROFILE_ID:
+        raise LauncherError("standalone launcher accepts only the isolated SMCBD profile")
+
+
+def validate_standalone_enrollment(config: dict[str, Any], registry_path: Path) -> Any:
+    """Fail closed on inactive, absent, foreign, or mismatched enrollment."""
+    try:
+        require_standalone_profile(config)
+        profiles.require_enabled(config)
+        if not isinstance(registry_path, Path) or not registry_path.is_absolute():
+            raise LauncherError("standalone registry path must be absolute")
+        registry = entrypoint.read_service_registry(
+            registry_path, entrypoint.forbidden_registry_roots(config)
+        )
+        return service.require_profile_enrolled(config, registry)
+    except core.ContractError as exc:
+        if isinstance(exc, LauncherError):
+            raise
+        raise LauncherError(str(exc)) from exc
+
+
+def selected_auth_mode(capabilities: tuple[str, ...]) -> str:
+    """Describe the selected capability set; never invent a larger contract."""
+    roles = tuple(capability.rsplit(".", 1)[-1] for capability in capabilities)
+    if roles == ("webhook-verify", "github-installation", "cloudflare-tunnel"):
+        return "three_distinct_service_accounts"
+    return "selected_" + "_and_".join(role.replace("-", "_") for role in roles)
+
+
+def bootstrap_status(
+    config: dict[str, Any],
+    *,
+    capabilities: tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    selected = capabilities or profiles.capabilities(config)
     if config.get("enrollment", {}).get("enabled") is False:
         return {"schema": "smoky.review-conductor.userland-bootstrap-status.v1", "result": "waiting_for_human", "domains": {}, "blockers": config["enrollment"]["blockers"], "values_exposed": False, "merge_authorized": False}
     domains: dict[str, dict[str, str]] = config["onepassword"]["domains"]
     states: dict[str, str] = {}
-    for capability in profiles.capabilities(config):
+    for capability in selected:
         try:
             bootstrap_bytes(Path(domains[capability]["bootstrap_file"]))
         except core.ContractError:
@@ -123,7 +168,7 @@ def bootstrap_status(config: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema": "smoky.review-conductor.userland-bootstrap-status.v1",
         "result": "ready" if ready else "waiting_for_human",
-        "auth_mode": "three_distinct_service_accounts",
+        "auth_mode": selected_auth_mode(tuple(selected)),
         "domains": states,
         "desktop_authorization_required_per_pr": False,
         "merge_authorized": False,
@@ -385,6 +430,10 @@ def start(
     config_path: Path,
     popen: Any = subprocess.Popen,
 ) -> int:
+    if config.get("profile_id"):
+        raise LauncherError(
+            "generalized profiles use standalone start; legacy start remains the Blocks 9443 consumer"
+        )
     profiles.require_enabled(config)
     if bootstrap_status(config)["result"] != "ready":
         raise LauncherError("current-user service-account bootstrap is not ready")
@@ -458,6 +507,183 @@ def start(
     return conductor_code if conductor_code != 0 else tunnel_code
 
 
+def inherit_standalone_credentials(
+    config: dict[str, Any], stack: contextlib.ExitStack
+) -> tuple[int, int]:
+    """Copy caller-prepared webhook/App descriptors; never read profile selectors.
+
+    Standalone start does not treat reviewed-profile ``onepassword.op_path`` or
+    runtime references as live secret sources. Deployment prepares the two
+    inherited descriptors; this consumer only copies them into anonymous files.
+    """
+    keys = ("webhook_secret_fd_env", "github_private_key_fd_env")
+    prepared: list[int] = []
+    with contextlib.ExitStack() as incoming:
+        sources: list[int] = []
+        for key in keys:
+            env_name = config["credentials"][key]
+            raw = os.environ.get(env_name)
+            if raw is None or not raw.isascii() or not raw.isdigit() or int(raw) < 3:
+                raise LauncherError(
+                    "required inherited credential descriptor is unavailable"
+                )
+            descriptor = int(raw)
+            if descriptor in sources:
+                raise LauncherError("standalone credentials require distinct descriptors")
+            incoming.callback(os.close, descriptor)
+            sources.append(descriptor)
+        for descriptor in sources:
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = os.read(descriptor, min(65536, 1024 * 1024 + 1 - total))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > 1024 * 1024:
+                    raise LauncherError("inherited credential exceeds its bounded size")
+            value = b"".join(chunks)
+            if not value or b"\x00" in value:
+                raise LauncherError("inherited credential has an invalid bounded shape")
+            try:
+                value.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise LauncherError("inherited credential is not UTF-8") from exc
+            try:
+                copied = credential_descriptor(value)
+            finally:
+                value = b""
+            stack.callback(os.close, copied)
+            prepared.append(copied)
+    return prepared[0], prepared[1]
+
+
+def standalone_preflight(
+    config: dict[str, Any],
+    profile_path: Path,
+    registry_path: Path,
+) -> dict[str, Any]:
+    enrolled = validate_standalone_enrollment(config, registry_path)
+    bootstrap = bootstrap_status(
+        config, capabilities=standalone_capabilities(config)
+    )
+    return {
+        "schema": "smoky.review-conductor.standalone-launcher-preflight.v1",
+        "result": bootstrap["result"],
+        "profile_id": config["profile_id"],
+        "profile_path": str(profile_path),
+        "registry_path": str(registry_path),
+        "repository": enrolled.repository,
+        "repository_id": enrolled.repository_id,
+        "app_id": enrolled.app_id,
+        "installation_id": enrolled.installation_id,
+        "reviewers": enrolled.reviewers,
+        "bootstrap": bootstrap,
+        "credentials_resolved": False,
+        "tunnel_started": False,
+        "values_exposed": False,
+        "merge_authorized": False,
+        "activation_authorized": False,
+    }
+
+
+def standalone_health(
+    config: dict[str, Any],
+    profile_path: Path,
+    registry_path: Path,
+    *,
+    runner: Runner = subprocess.run,
+) -> dict[str, Any]:
+    validate_standalone_enrollment(config, registry_path)
+    try:
+        result = runner(
+            [
+                sys.executable,
+                str(STANDALONE_SUPERVISOR),
+                "--profile",
+                str(profile_path),
+                "--registry",
+                str(registry_path),
+                "health",
+            ],
+            cwd=config["source_root"],
+            env=clean_environment(config),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise LauncherError("standalone supervisor health request failed") from exc
+    if result.returncode != 0:
+        raise LauncherError("standalone supervisor health request failed")
+    try:
+        payload = json.loads(result.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise LauncherError("standalone supervisor health response was invalid") from exc
+    if not isinstance(payload, dict):
+        raise LauncherError("standalone supervisor health response was invalid")
+    return payload
+
+
+def start_standalone(
+    config: dict[str, Any],
+    *,
+    profile_path: Path,
+    registry_path: Path,
+    popen: Any = subprocess.Popen,
+) -> int:
+    validate_standalone_enrollment(config, registry_path)
+    if (
+        bootstrap_status(config, capabilities=standalone_capabilities(config))["result"]
+        != "ready"
+    ):
+        raise LauncherError("current-user service-account bootstrap is not ready")
+    child = None
+    previous_handlers: dict[int, Any] = {}
+    stopping = False
+
+    def request_stop(_signum: int, _frame: Any) -> None:
+        nonlocal stopping
+        stopping = True
+        if child is not None and child.poll() is None:
+            child.terminate()
+
+    try:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signum] = signal.signal(signum, request_stop)
+        # Own stop handlers before spawn so a startup-time signal cannot
+        # leave the supervisor child running without its foreground launcher.
+        with contextlib.ExitStack() as descriptors:
+            webhook_fd, github_fd = inherit_standalone_credentials(config, descriptors)
+            child = popen(
+                [
+                    sys.executable,
+                    str(STANDALONE_SUPERVISOR),
+                    "--profile",
+                    str(profile_path),
+                    "--registry",
+                    str(registry_path),
+                    "start",
+                    "--apply",
+                ],
+                cwd=config["source_root"],
+                env=child_environment(config, webhook_fd, github_fd),
+                pass_fds=(webhook_fd, github_fd),
+            )
+        assert child is not None
+        while not stopping and child.poll() is None:
+            time.sleep(1)
+    finally:
+        if child is not None:
+            request_stop(signal.SIGTERM, None)
+            stop_child(child)
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+    return child.returncode or 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=userland.DEFAULT_CONFIG)
@@ -471,6 +697,15 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap_parser.add_argument("--confirm")
     start_parser = subparsers.add_parser("start")
     start_parser.add_argument("--apply", action="store_true", required=True)
+    standalone_parser = subparsers.add_parser("standalone")
+    standalone_parser.add_argument("--registry", type=Path, required=True)
+    standalone_commands = standalone_parser.add_subparsers(
+        dest="standalone_command", required=True
+    )
+    standalone_commands.add_parser("preflight")
+    standalone_commands.add_parser("health")
+    standalone_start = standalone_commands.add_parser("start")
+    standalone_start.add_argument("--apply", action="store_true", required=True)
     return parser
 
 
@@ -499,6 +734,20 @@ def main(argv: list[str] | None = None) -> int:
                 attended=args.attended,
                 confirmation=args.confirm,
             )
+        elif args.command == "standalone":
+            registry_path = args.registry
+            if not registry_path.is_absolute():
+                raise LauncherError("standalone registry path must be absolute")
+            if args.standalone_command == "preflight":
+                result = standalone_preflight(config, config_path, registry_path)
+            elif args.standalone_command == "health":
+                result = standalone_health(config, config_path, registry_path)
+            else:
+                return start_standalone(
+                    config,
+                    profile_path=config_path,
+                    registry_path=registry_path,
+                )
         else:
             return start(config, config_path=config_path)
         print(json.dumps(result, indent=2, sort_keys=True))

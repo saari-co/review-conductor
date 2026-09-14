@@ -82,6 +82,11 @@ This repairs a legacy transport deadlock; it does not qualify live cloudflared,
 1Password, service lifecycle, credentials or deployment. Historical 1Password
 bootstrap/resolver code remains regression-only, including its service-account
 environment flow; the standalone package still excludes all launcher code.
+The launcher `standalone` command is source-only qualification of that same
+descriptor contract into `tools/standalone_supervisor.py`. It validates the
+external registry before any resolver call, inherits only webhook and GitHub
+App descriptors, and never starts cloudflared. It is not installed and does
+not activate the profile.
 
 ## Standalone supervisor boundary (offline qualification only)
 

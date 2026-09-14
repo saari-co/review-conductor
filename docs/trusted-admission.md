@@ -45,7 +45,11 @@ Rules enforced by `load_registry`:
   `github_app.installation_account` must be the
   repository owner segment. A Saari installation cannot serve a Dinkus repository
   or vice versa. The inactive SMCBD profile records the non-secret App and
-  installation IDs; the illustrative `0` above is invalid and would be rejected.
+  installation IDs and source-binds reviewer actors `spark-openclaw` and
+  `saari-clawsweeper`. A later external registry must name those same actors
+  and an owner-promoted target-policy commit/hash; this source does not invent
+  `POST12_MAIN` or that hash. The illustrative `0` above is invalid and would
+  be rejected.
 - `approved_policy` is the approved default-branch commit plus the SHA-256 of the
   exact manifest bytes at that commit. Both are required.
 - Repository names, numeric IDs and installation IDs must be unique across the

@@ -509,9 +509,13 @@ def load_config(
     if generalized:
         result.update({key: config[key] for key in ("profile_id", "enrollment", "adapter")})
         if config["enrollment"]["enabled"]:
-            if (not tunnel["tunnel_id"] or not tunnel["tunnel_name"]
-                or ingress["public_hostname"].endswith(".invalid")):
-                raise UserlandError("enabled profile requires an isolated tunnel")
+            # Connector identity is deployment-only. Standalone source
+            # readiness keeps the proposed hostname isolated and does not
+            # invent or require a tunnel ID.
+            if not tunnel["tunnel_name"]:
+                raise UserlandError("enabled profile requires an isolated tunnel name")
+            if ingress["public_hostname"].endswith(".invalid"):
+                raise UserlandError("enabled profile requires an isolated public hostname")
         profiles.validate_isolation([result])
         if _check_peers:
             peers = [load_config(peer, home=resolved_home, source_root=resolved_source, _check_peers=False)

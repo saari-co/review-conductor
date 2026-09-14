@@ -28,15 +28,15 @@
       "source_path": "tools/review_conductor_userland.py",
       "destination_path": "tools/review_conductor_userland.py",
       "source_sha256": "0f19c2143f568117fa44b29bd56cb652df511f6e19c6ea8d100389dc2605a106",
-      "destination_sha256": "c27d8c45e45ffa2b10c6f1680f425b7453775ef5af72d5e801d0048a937126a2",
-      "adaptation": "generalized standalone profiles require Contents read and the trusted service entrypoint; legacy Blocks permissions and CLI route remain accepted unchanged; checkout fetches and review-result notifications use fresh exact-tuple admission-authority fences, with revocation preserved as recoverable pending work; every notification is durably claimed uncertain before transport so an interrupted outcome cannot be retried without operator reconciliation; notification subprocesses receive only an allowlisted runtime identity/locale environment and use the shared generation-preserving adapter-command boundary; explicit retry and notification reconciliation accept a transaction-bound authority callback; generalized review_policy OpenClaw terminals require Spark status native_max_priority=P3, applied_max_priority=P3, and exact_tuple_qualified is True compared by type and value before any artifact write, persist those qualification fields on the artifact, and keep legacy profiles without review_policy compatible"
+      "destination_sha256": "c9ff05251ca40de09e0d3972b29346ebc141adea169e9925d92b6e1a16ddb394",
+      "adaptation": "generalized standalone profiles require Contents read and the trusted service entrypoint; legacy Blocks permissions and CLI route remain accepted unchanged; checkout fetches and review-result notifications use fresh exact-tuple admission-authority fences, with revocation preserved as recoverable pending work; every notification is durably claimed uncertain before transport so an interrupted outcome cannot be retried without operator reconciliation; notification subprocesses receive only an allowlisted runtime identity/locale environment and use the shared generation-preserving adapter-command boundary; explicit retry and notification reconciliation accept a transaction-bound authority callback; generalized review_policy OpenClaw terminals require Spark status native_max_priority=P3, applied_max_priority=P3, and exact_tuple_qualified is True compared by type and value before any artifact write, persist those qualification fields on the artifact, and keep legacy profiles without review_policy compatible; enabled standalone source readiness requires a non-empty isolated tunnel name and public hostname while a deployment-only tunnel ID may remain missing"
     },
     {
       "source_path": "tools/review_conductor_userland_launcher.py",
       "destination_path": "tools/review_conductor_userland_launcher.py",
       "source_sha256": "9de97341e8f2343b70e46458586d04ce58e711ef2dc94b0ef4f046fd0a4e0256",
-      "destination_sha256": "0e6f0f6296516c6e32726332514c09a041a3d2996bc47d39219fe04398fdc511",
-      "adaptation": "standalone review repair: bounded verified-unlinked descriptor transport replaces pre-reader pipe writes; partial acquisition cleanup and kill/reap on spawn failure"
+      "destination_sha256": "25b315a2c20f634fe439eb32a2b6d74d5c8c8720c8ba65f77f2915f476f1dd95",
+      "adaptation": "standalone review repair: bounded verified-unlinked descriptor transport replaces pre-reader pipe writes; partial acquisition cleanup and kill/reap on spawn failure; SMCBD standalone preflight validates an external mode-0600 registry and bootstrap only; start forwards already-prepared webhook and GitHub App descriptors into standalone_supervisor without treating reviewed-profile onepassword.op_path or runtime selectors as live secret sources; start owns SIGINT/SIGTERM before supervisor spawn and the outer cleanup path reaps that child across the spawn and post-spawn window; health only queries; legacy start remains the Blocks 9443 consumer and rejects any generalized profile_id before resolver; preflight result follows bootstrap status and auth_mode names the selected capability set"
     },
     {
       "source_path": "contracts/review-conductor/dinkuskit-blocks-userland.json",
@@ -56,15 +56,15 @@
       "source_path": "contracts/review-conductor/openclaw-smcbd-suite-userland.json",
       "destination_path": "contracts/review-conductor/openclaw-smcbd-suite-userland.json",
       "source_sha256": "f603f8b53e6ac4dcb49fba0cfdaa4336af21550ba0d53e6948ab75ba7cab7e7b",
-      "destination_sha256": "e9775049f4498831e9f7f548b06a157a2396be86c6c0a881dd598649fdecd36d",
-      "adaptation": "inactive SMCBD candidate: verified App 4916376/installation 161027021, proposed isolated hostname/tunnel name, Contents-read requirement, promoted-policy and shadow-pilot blockers, and no activation"
+      "destination_sha256": "6fa30c74761df9b4622b701fba341b6d907ef281c0a2f133bcb51fabf69cea6a",
+      "adaptation": "inactive SMCBD candidate: verified App 4916376/installation 161027021, proposed isolated hostname/tunnel name, Contents-read requirement, source-bound reviewers spark-openclaw/saari-clawsweeper, remaining live App/credential/registry/tunnel/producer/protection blockers, null tunnel_id, and no activation"
     },
     {
       "source_path": "contracts/review-conductor/openclaw-smcbd-suite.json",
       "destination_path": "contracts/review-conductor/openclaw-smcbd-suite.json",
       "source_sha256": "7459a2be7e3348f2f81d231509d36e8573d81c62a3dbb9b01a2c3f3f897c1b48",
-      "destination_sha256": "b1df89f563f24801b3be9829f384018a47a44c32fc8000d37e2848f717eb7caa",
-      "adaptation": "inactive SMCBD candidate migrated to head-state scheduling: CI and OpenClaw on every head, ClawSweeper gated on ready state, no fixed quiet period; OpenClaw adapter declares pinned exact_tuple_contract review-conductor-openclaw-v1"
+      "destination_sha256": "fee5c0e2f27d3e48daa4a0adf4202d5acfde8b82b895985da2fd8fca44b7c118",
+      "adaptation": "inactive SMCBD candidate migrated to head-state scheduling: CI and OpenClaw on every head, ClawSweeper gated on ready state, no fixed quiet period; OpenClaw adapter declares pinned exact_tuple_contract review-conductor-openclaw-v1; review_policy remains disabled and now source-binds authoritative reviewers spark-openclaw and saari-clawsweeper"
     },
     {
       "source_path": "tonight-lab/tests/test_review_conductor.py",
@@ -84,8 +84,8 @@
       "source_path": "tonight-lab/tests/test_review_conductor_profiles.py",
       "destination_path": "tests/test_review_conductor_profiles.py",
       "source_sha256": "b166648b7b0139b718d82ced0911d670475e0885d0aba20a7eb26f257f527462",
-      "destination_sha256": "d3f7e1b661e5144317a877d1ce6eb53c83bd4bc46fb03ba1c83e9c6f0336a28c",
-      "adaptation": "test root and archived lane location; standalone SMCBD candidate App/installation/Contents-read pins remain inactive; immutable head-incarnation CI freshness, first-event draft status, replay-safe draft/ready action resumption, draft-aware adjudication, closed projection filtering and completed/in-flight ClawSweeper draft demotion are regression checked; generalized OpenClaw collect_openclaw_terminals consumers require type-strict applied-P3 exact-tuple status fields, persist them, reject collector/bridge/internal-event bypasses, and kill precise disposable-copy mutants that omit native_max_priority, applied_max_priority, or exact_tuple_qualified identity"
+      "destination_sha256": "842f440a704ec2f0437c9014a3190f767a4d963e10b96ed0ad7b28af56a30279",
+      "adaptation": "test root and archived lane location; standalone SMCBD candidate App/installation/Contents-read pins remain inactive; source-bound reviewers spark-openclaw/saari-clawsweeper are pinned and an enabled standalone profile loads without a tunnel ID while empty tunnel_name is rejected; immutable head-incarnation CI freshness, first-event draft status, replay-safe draft/ready action resumption, draft-aware adjudication, closed projection filtering and completed/in-flight ClawSweeper draft demotion are regression checked; generalized OpenClaw collect_openclaw_terminals consumers require type-strict applied-P3 exact-tuple status fields, persist them, reject collector/bridge/internal-event bypasses, and kill precise disposable-copy mutants that omit native_max_priority, applied_max_priority, or exact_tuple_qualified identity"
     },
     {
       "source_path": "tonight-lab/tests/test_review_conductor_userland.py",
