@@ -108,11 +108,15 @@ Non-secret credential selectors are already isolated in the inactive profile:
 | GitHub App private key | `op://Review Conductor SMCBD Suite GitHub App Runtime/Review Conductor SMCBD Suite GitHub App/private-key.pem` |
 | Cloudflare connector | `op://Smoky Review Conductor SMCBD Suite Cloudflare Tunnel/SMCBD Suite Cloudflare Tunnel/connector-token` |
 
-The source-only `tools/standalone_supervisor.py` now invokes the registry-aware
-entrypoint. It passes the webhook secret and App key to
-`tools/service_entrypoint.py` through inherited file descriptors while
-supplying only the non-secret profile and registry paths plus fixed lifecycle
-verbs as arguments. It binds local health/stop/restart control to the complete
+The source-only launcher command
+`tools/review_conductor_userland_launcher.py standalone` validates an external
+mode-0600 registry against this profile before resolving only the webhook
+secret and GitHub App key. It then invokes `tools/standalone_supervisor.py`
+with inherited descriptors and does not resolve or start cloudflared. Legacy
+`start` remains the Blocks 9443 consumer and refuses this profile. The
+supervisor passes those two credentials to `tools/service_entrypoint.py`
+through inherited file descriptors while supplying only the non-secret profile
+and registry paths plus fixed lifecycle verbs as arguments. It binds local health/stop/restart control to the complete
 validated profile, registry path, tenant roots and loopback port; a crashed
 service remains failed pending explicit restart. Explicit stop/restart also
 holds inherited leader and generation descriptors while signaling the owned
@@ -150,9 +154,11 @@ artifacts.
 5. Create the three least-privileged 1Password service accounts and place only
    their recovery tokens in protected bootstrap locations outside source, state
    and proof roots. Operators verify access with `op whoami` without reading
-   secret values into logs. Do not use the legacy userland launcher for the
-   standalone profile. A later deployment procedure must connect the protected
-   resolver output to the qualified supervisor's inherited descriptor inputs.
+   secret values into logs. Do not use legacy `start` for the standalone
+   profile; that command remains the Blocks 9443 consumer. The source-qualified
+   `standalone` launcher command is the later deployment entry that connects
+   the protected resolver output to the supervisor's inherited descriptor
+   inputs. It is uninstalled and unstarted here.
 
 ## HTTPS ingress and source qualification
 
@@ -229,14 +235,14 @@ Activation remains blocked until all are true:
 - standalone source changes are reviewed and landed;
 - App Contents permission is corrected;
 - SMCBD `main` contains an owner-approved `.review-conductor.json`, and its exact
-  commit/hash is promoted into the external registry;
-- authoritative OpenClaw and ClawSweeper reviewer actor identities are recorded
-  in the external registry's `reviewers` block and the engine profile agrees
-  exactly;
+  commit/hash — including any later `POST12_MAIN` value — is derived and
+  promoted into the external registry during deployment, not invented here;
+- the external registry's `reviewers` block names the source-bound actors
+  `spark-openclaw` and `saari-clawsweeper` exactly;
 - dedicated 1Password service accounts, private key, webhook secret and tunnel
   connector are provisioned;
-- the registry-aware standalone supervisor source is independently reviewed and
-  an exact landed revision is selected for deployment;
+- the registry-aware standalone supervisor and launcher source are independently
+  reviewed and an exact landed revision is selected for deployment;
 - the isolated HTTPS edge and local service health are verified;
 - a human explicitly authorizes deployment and SMCBD shadow-mode activation.
 

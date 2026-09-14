@@ -38,6 +38,7 @@ merge, or credential commands.
 | `tools/trusted_admission.py` | Inert service-owned enrollment and policy-binding library |
 | `tools/service_runtime.py`, `tools/service_entrypoint.py` | Inactive authenticated ingress, policy transport/binding and guarded worker entrypoint; not packaged or deployed |
 | `tools/standalone_supervisor.py` | Source-only foreground supervisor with inherited-descriptor credential transport and identity-bound local lifecycle control; not installed or started |
+| `tools/review_conductor_userland_launcher.py` | Approved 1Password-aware launcher: legacy `start` remains the Blocks 9443 consumer; `standalone {preflight,start,health}` invokes the SMCBD supervisor after external-registry validation. Source-only, uninstalled, and it does not start a tunnel |
 | `contracts/target-manifest.schema.json` | Versioned repository manifest schema |
 | `contracts/review-conductor/` | Unchanged historical Blocks profile fixtures plus the inactive SMCBD candidate profile; not deployment configuration |
 | `tests/` | Blocks compatibility, isolated SMCBD, manifest and packaged-build coverage |

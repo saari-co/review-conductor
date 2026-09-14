@@ -127,7 +127,6 @@
   "enrollment": {
     "enabled": false,
     "blockers": [
-      "Authoritative repository-specific reviewer identities are not enrolled.",
       "GitHub App 4916376 installation 161027021 lacks the required Contents: read permission for approved-policy retrieval.",
       "Dedicated webhook, GitHub App private-key and external-review credentials are not provisioned.",
       "The owner-approved target .review-conductor.json commit/hash is not yet promoted into the external enrollment registry.",
