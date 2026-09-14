@@ -54,6 +54,17 @@ LABEL_FOR_CONTENT = {kind: name for name, kind in OWNED_LABELS.items()}
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+HTTP_URL_RE = re.compile(r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/.+")
+MARKER_RE = re.compile(
+    rf"^{re.escape(MARKER_PREFIX)} "
+    r"repo=(?P<repository>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+) "
+    r"pr=(?P<pr_number>[1-9][0-9]*) "
+    r"base=(?P<base_sha>[0-9a-f]{40}) "
+    r"head=(?P<head_sha>[0-9a-f]{40}) "
+    r"epoch=(?P<review_epoch>0|[1-9][0-9]*) "
+    r"issuer=(?P<issuer_app_id>[1-9][0-9]*) "
+    r"artifact=sha256:(?P<artifact_digest>[0-9a-f]{64}) -->$"
+)
 
 
 class ProjectionError(ValueError):
@@ -142,7 +153,8 @@ def classify_native_review(
     no findings, no execution failure, no genuine proof deficiency, and no
     explicit maintainer question can be review-success while merge stays
     human-only. The reviewer's own in-flight rail check is a typed process
-    gate, not a content defect.
+    gate, not a content defect. Missing or empty typed process evidence
+    cannot waive a non-ready rating or invent the reason for keep_open.
     """
     if review_status != "complete":
         raise ProjectionError("native review is not complete")
@@ -163,16 +175,18 @@ def classify_native_review(
         raise ProjectionError("proof_status is not a validated non-blocking or deficient value")
 
     content_ready = overall_tier in READY_OVERALL_TIERS
-    if not content_ready and typed_gates is None and decision != "keep_open":
+    if not content_ready:
+        if typed_gates and PROCESS_OWN_CHECK in typed_gates:
+            gates = typed_gates
+            if PROCESS_OWNER_MERGE not in gates:
+                gates = tuple(sorted({*gates, PROCESS_OWNER_MERGE}))
+            return _classification(CONTENT_CLEAN, gates, "clean", decision)
         return _classification(CONTENT_HUMAN_POLICY, (), "human_gate", decision)
 
     if typed_gates is not None:
         gates = typed_gates
     else:
-        inferred = [PROCESS_OWNER_MERGE]
-        if decision == "keep_open":
-            inferred.append(PROCESS_OWN_CHECK)
-        gates = tuple(sorted(set(inferred)))
+        gates = ()
     if PROCESS_OWNER_MERGE not in gates:
         gates = tuple(sorted({*gates, PROCESS_OWNER_MERGE}))
     return _classification(CONTENT_CLEAN, gates, "clean", decision)
@@ -262,6 +276,16 @@ def pull_request_url(repository: str, pr_number: int) -> str:
     return f"https://github.com/{require_repository(repository)}/pull/{require_pr_number(pr_number)}"
 
 
+def require_report_url(value: Any, *, repository: str, pr_number: int) -> str:
+    if not isinstance(value, str) or HTTP_URL_RE.fullmatch(value) is None:
+        raise ProjectionError("report_url must be an https GitHub artifact or run URL")
+    if value == pull_request_url(repository, pr_number) or value.rstrip("/") == pull_request_url(
+        repository, pr_number
+    ):
+        raise ProjectionError("report_url cannot be the reviewed pull request")
+    return value
+
+
 def check_output(
     name: str,
     state: str,
@@ -275,6 +299,8 @@ def check_output(
     reason: str | None = None,
     workflow_run_id: Any = None,
     artifact_digest: str | None = None,
+    report_url: str | None = None,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
     if name not in CHECK_NAMES:
         raise ProjectionError("check name is outside the fixed allowlist")
@@ -299,19 +325,31 @@ def check_output(
         if "\n" in reason or len(reason) > 240:
             raise ProjectionError("check reason must be one bounded line")
         lines.append(f"Decision: {reason}")
+    if request_id:
+        if not isinstance(request_id, str) or not request_id or "\n" in request_id or len(request_id) > 200:
+            raise ProjectionError("request_id must be one bounded identity")
+        lines.append(f"Original report: {request_id}.")
     run_url = workflow_run_url(repository, workflow_run_id)
     if run_url:
         lines.append(f"Workflow run: {run_url}.")
     if artifact_digest:
         digest = require_digest(artifact_digest, "artifact_digest")
         lines.append(f"Accepted artifact: sha256:{digest}.")
-    details = run_url or pull_request_url(repository, pr_number)
-    return {
+    details = None
+    if report_url:
+        details = require_report_url(report_url, repository=repository, pr_number=pr_number)
+        if details != run_url:
+            lines.append(f"Accepted report: {details}.")
+    elif run_url:
+        details = run_url
+    output = {
         "title": title,
         "summary": " ".join(lines),
         "text": "\n".join(lines),
-        "details_url": details,
     }
+    if details:
+        output["details_url"] = details
+    return output
 
 
 def _stage_for_check_state(state: str) -> str:
@@ -397,7 +435,7 @@ def plan_github_publication(
         identity, classification, stage=stage, reason=reason, workflow_run_id=workflow_run_id
     )
     marker = comment_marker(identity)
-    owned = [item for item in existing_comments if marker_matches_tuple(item.get("body", ""), identity)]
+    owned = owned_projection_comments(existing_comments, identity)
     if len(owned) > 1:
         raise ProjectionError("duplicate Conductor projection comments exist")
     comment_action = "create"
@@ -432,28 +470,100 @@ def plan_github_publication(
     }
 
 
-def marker_matches_tuple(body: str, identity: dict[str, Any]) -> bool:
-    if not isinstance(body, str) or MARKER_PREFIX not in body:
+def parse_projection_marker(body: str) -> dict[str, Any] | None:
+    if not isinstance(body, str):
+        return None
+    matches = [MARKER_RE.fullmatch(line.strip()) for line in body.splitlines()]
+    found = [match for match in matches if match is not None]
+    if len(found) != 1:
+        return None
+    match = found[0]
+    return {
+        "repository": match.group("repository"),
+        "pr_number": int(match.group("pr_number")),
+        "base_sha": match.group("base_sha"),
+        "head_sha": match.group("head_sha"),
+        "review_epoch": int(match.group("review_epoch")),
+        "issuer_app_id": int(match.group("issuer_app_id")),
+        "artifact_digest": match.group("artifact_digest"),
+    }
+
+
+def trusted_app_author(comment: dict[str, Any], issuer_app_id: int) -> bool:
+    app = comment.get("performed_via_github_app")
+    if not isinstance(app, dict):
         return False
-    required = (
-        f"repo={identity['repository']}",
-        f"pr={identity['pr_number']}",
-        f"base={identity['base_sha']}",
-        f"head={identity['head_sha']}",
-        f"epoch={identity['review_epoch']}",
-        f"issuer={identity['issuer_app_id']}",
+    app_id = app.get("id")
+    return app_id == issuer_app_id or (isinstance(app_id, str) and app_id.isdigit() and int(app_id) == issuer_app_id)
+
+
+def marker_matches_tuple(body: str, identity: dict[str, Any]) -> bool:
+    parsed = parse_projection_marker(body)
+    if parsed is None:
+        return False
+    return (
+        parsed["repository"] == identity["repository"]
+        and parsed["pr_number"] == identity["pr_number"]
+        and parsed["issuer_app_id"] == identity["issuer_app_id"]
     )
-    return all(token in body for token in required)
+
+
+def owned_projection_comments(
+    existing_comments: list[dict[str, Any]], identity: dict[str, Any]
+) -> list[dict[str, Any]]:
+    owned: list[dict[str, Any]] = []
+    for item in existing_comments:
+        if not isinstance(item, dict):
+            continue
+        if not trusted_app_author(item, identity["issuer_app_id"]):
+            continue
+        if marker_matches_tuple(item.get("body", ""), identity):
+            owned.append(item)
+    return owned
 
 
 def publication_body_digest(body: str) -> str:
     return hashlib.sha256(body.encode()).hexdigest()
 
 
-def apply_github_publication(client: Any, plan: dict[str, Any]) -> dict[str, Any]:
+def _publication_kwargs(authority_kwargs: dict[str, Any] | None) -> dict[str, Any]:
+    if authority_kwargs is None:
+        return {}
+    if not isinstance(authority_kwargs, dict):
+        raise ProjectionError("publication authority must be a mapping")
+    return dict(authority_kwargs)
+
+
+def _reconcile_uncertain_create(
+    client: Any,
+    identity: dict[str, Any],
+    comment: dict[str, Any],
+    kwargs: dict[str, Any],
+) -> int:
+    if not callable(getattr(client, "list_issue_comments", None)):
+        raise ProjectionError("uncertain comment create cannot be reconciled")
+    comments = client.list_issue_comments(identity["pr_number"], **kwargs)
+    owned = owned_projection_comments(comments, identity)
+    if len(owned) != 1:
+        raise ProjectionError("uncertain comment create did not reconcile to one owned summary")
+    comment_id = owned[0].get("id")
+    if not isinstance(comment_id, int) or comment_id < 1:
+        raise ProjectionError("reconciled projection comment id is invalid")
+    if owned[0].get("body") != comment["body"]:
+        client.update_issue_comment(comment_id, comment["body"], **kwargs)
+    return comment_id
+
+
+def apply_github_publication(
+    client: Any,
+    plan: dict[str, Any],
+    *,
+    authority_kwargs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Apply a previously validated plan through an injected GitHub client."""
     if plan.get("schema") != "smoky.review-conductor.github-publication.v1":
         raise ProjectionError("publication plan schema is unsupported")
+    kwargs = _publication_kwargs(authority_kwargs)
     identity = plan["identity"]
     comment = plan["comment"]
     labels = plan["labels"]
@@ -461,16 +571,23 @@ def apply_github_publication(client: Any, plan: dict[str, Any]) -> dict[str, Any
         if name not in OWNED_LABELS:
             raise ProjectionError("publication attempted to alter an unowned label")
     if comment["action"] == "create":
-        comment_id = client.create_issue_comment(identity["pr_number"], comment["body"])
+        try:
+            comment_id = client.create_issue_comment(
+                identity["pr_number"], comment["body"], **kwargs
+            )
+        except Exception as exc:
+            if type(exc).__name__ != "GitHubTransientError":
+                raise
+            comment_id = _reconcile_uncertain_create(client, identity, comment, kwargs)
     elif comment["action"] == "update":
         comment_id = comment["id"]
-        client.update_issue_comment(comment_id, comment["body"])
+        client.update_issue_comment(comment_id, comment["body"], **kwargs)
     else:
         comment_id = comment["id"]
     for name in labels["add"]:
-        client.add_owned_label(identity["pr_number"], name)
+        client.add_owned_label(identity["pr_number"], name, **kwargs)
     for name in labels["remove"]:
-        client.remove_owned_label(identity["pr_number"], name)
+        client.remove_owned_label(identity["pr_number"], name, **kwargs)
     return {
         "schema": "smoky.review-conductor.github-publication-receipt.v1",
         "comment_id": comment_id,

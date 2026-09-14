@@ -73,6 +73,7 @@ API_VERSION = "2022-11-28"
 # GitHub statuses that describe a transient upstream condition rather than a
 # rejected operation; callers may retry without changing the request.
 TRANSIENT_STATUSES = frozenset({429, 500, 502, 503, 504})
+MAX_LIST_PAGES = 10
 FIXED_GIT = Path("/usr/bin/git")
 
 
@@ -418,8 +419,8 @@ class GitHubAppClient:
             ),
             ("POST", rf"/repos/{repository}/issues/[1-9][0-9]*/labels", "label-add"),
             ("DELETE", rf"/repos/{repository}/issues/[1-9][0-9]*/labels/.+", "label-remove"),
-            ("GET", rf"/repos/{repository}/issues/[1-9][0-9]*/labels(?:\?per_page=100)?", "label-list"),
-            ("GET", rf"/repos/{repository}/issues/[1-9][0-9]*/comments(?:\?per_page=100)?", "comment-list"),
+            ("GET", rf"/repos/{repository}/issues/[1-9][0-9]*/labels(?:\?per_page=100(?:&page=[1-9][0-9]*)?)?", "label-list"),
+            ("GET", rf"/repos/{repository}/issues/[1-9][0-9]*/comments(?:\?per_page=100(?:&page=[1-9][0-9]*)?)?", "comment-list"),
             ("POST", rf"/repos/{repository}/issues/[1-9][0-9]*/comments", "comment-create"),
             ("PATCH", rf"/repos/{repository}/issues/comments/[1-9][0-9]*", "comment-update"),
             (
@@ -481,6 +482,26 @@ class GitHubAppClient:
         app_jwt: str | None = None,
         authority: dict[str, Any] | None = None,
     ) -> tuple[str, bytes]:
+        operation, _response_headers, raw = self._call_raw_response(
+            method,
+            path,
+            payload,
+            expected=expected,
+            app_jwt=app_jwt,
+            authority=authority,
+        )
+        return operation, raw
+
+    def _call_raw_response(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+        *,
+        expected: set[int],
+        app_jwt: str | None = None,
+        authority: dict[str, Any] | None = None,
+    ) -> tuple[str, dict[str, str], bytes]:
         operation = self._allow(method, path)
         token = app_jwt if operation == "installation-token" else self._installation_token()
         headers = {
@@ -526,7 +547,7 @@ class GitHubAppClient:
                     f"allowlisted GitHub API operation failed transiently ({operation})"
                 )
             raise GitHubApiError(f"allowlisted GitHub API operation failed ({operation})")
-        return operation, raw
+        return operation, response_headers, raw
 
     def _installation_token(self) -> str:
         if self._token is not None and self._clock() < self._token_expires - 60:
@@ -642,16 +663,68 @@ class GitHubAppClient:
         *,
         authority: dict[str, Any] | None = None,
     ) -> list[Any]:
-        _operation, raw = self._call_raw(
-            method, path, None, expected={200}, authority=authority
-        )
+        items: list[Any] = []
+        current = path
+        seen: set[str] = set()
+        for _page in range(MAX_LIST_PAGES + 1):
+            if current in seen:
+                raise GitHubApiError("GitHub list pagination looped")
+            seen.add(current)
+            operation, response_headers, raw = self._call_raw_response(
+                method, current, None, expected={200}, authority=authority
+            )
+            del operation
+            try:
+                decoded = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise GitHubApiError("GitHub API returned malformed JSON") from exc
+            if not isinstance(decoded, list):
+                raise GitHubApiError("GitHub API returned an unexpected payload shape")
+            items.extend(decoded)
+            nxt = self._next_list_path(current, response_headers)
+            if nxt is None:
+                return items
+            if _page == MAX_LIST_PAGES - 1:
+                raise GitHubApiError("GitHub list pagination exceeded the bounded page count")
+            current = nxt
+        raise GitHubApiError("GitHub list pagination exceeded the bounded page count")
+
+    def _next_list_path(self, current_path: str, response_headers: dict[str, str]) -> str | None:
+        link = header_value(response_headers, "Link")
+        if not link:
+            return None
+        next_url = None
+        for part in link.split(","):
+            piece = part.strip()
+            if 'rel="next"' not in piece:
+                continue
+            match = re.fullmatch(r"<([^>]+)>;\s*rel=\"next\"", piece)
+            if match is None:
+                raise GitHubApiError("GitHub list pagination Link header is malformed")
+            if next_url is not None:
+                raise GitHubApiError("GitHub list pagination Link header is ambiguous")
+            next_url = match.group(1)
+        if next_url is None:
+            return None
         try:
-            decoded = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise GitHubApiError("GitHub API returned malformed JSON") from exc
-        if not isinstance(decoded, list):
-            raise GitHubApiError("GitHub API returned an unexpected payload shape")
-        return decoded
+            parsed = urllib.parse.urlsplit(next_url)
+        except ValueError as exc:
+            raise GitHubApiError("GitHub list pagination URL is invalid") from exc
+        api = urllib.parse.urlsplit(self._app["api_base"])
+        if (
+            parsed.scheme != api.scheme
+            or parsed.netloc != api.netloc
+            or parsed.fragment
+            or not parsed.path
+        ):
+            raise GitHubApiError("GitHub list pagination left the allowlisted API origin")
+        path = parsed.path
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+        self._allow("GET", path)
+        if path == current_path:
+            raise GitHubApiError("GitHub list pagination looped")
+        return path
 
     def list_issue_comments(
         self, pr_number: int, *, authority: dict[str, Any] | None = None
@@ -888,9 +961,12 @@ def check_payload(
             reason=report.get("reason"),
             workflow_run_id=report.get("workflow_run_id"),
             artifact_digest=report.get("artifact_digest"),
+            report_url=report.get("report_url"),
+            request_id=report.get("request_id"),
         )
         output = {"title": rendered["title"], "summary": rendered["summary"], "text": rendered["text"]}
-        payload["details_url"] = rendered["details_url"]
+        if rendered.get("details_url"):
+            payload["details_url"] = rendered["details_url"]
     if state == "queued":
         payload["status"] = "queued"
         payload["output"] = output
@@ -927,21 +1003,111 @@ def accepted_quality_row(connection: sqlite3.Connection, row: sqlite3.Row) -> sq
     ).fetchone()
 
 
+def accepted_openclaw_terminal(
+    connection: sqlite3.Connection, row: sqlite3.Row
+) -> dict[str, Any] | None:
+    tables = {
+        name
+        for (name,) in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    if "events" not in tables:
+        return None
+    found = connection.execute(
+        """
+        SELECT payload_json FROM events
+        WHERE kind = 'openclaw.terminal'
+          AND repository = ? AND pr_number = ? AND base_sha = ? AND head_sha = ?
+          AND stale = 0
+        ORDER BY sequence DESC LIMIT 1
+        """,
+        (
+            row["repository"], row["pr_number"], row["base_sha"], row["head_sha"],
+        ),
+    ).fetchone()
+    if found is None:
+        return None
+    payload = json.loads(found["payload_json"])
+    if not isinstance(payload, dict):
+        return None
+    terminal: dict[str, Any] = {}
+    request_id = payload.get("request_id")
+    if isinstance(request_id, str) and request_id:
+        terminal["request_id"] = request_id
+    result = payload.get("result")
+    if isinstance(result, str) and result:
+        terminal["result"] = result
+    proof_sha = payload.get("proof_sha256")
+    if isinstance(proof_sha, str) and proof_sha:
+        terminal["proof_sha256"] = proof_sha
+    artifact_digest = payload.get("artifact_digest") or payload.get("artifact_sha256")
+    if isinstance(artifact_digest, str) and artifact_digest:
+        terminal["artifact_digest"] = artifact_digest
+    report_url = payload.get("report_url")
+    if isinstance(report_url, str) and report_url:
+        terminal["report_url"] = report_url
+    return terminal or None
+
+
 def projection_check_report(
-    row: sqlite3.Row, quality: sqlite3.Row | None = None
+    row: sqlite3.Row,
+    quality: sqlite3.Row | None = None,
+    *,
+    check_name: str,
+    check_state: str | None = None,
+    openclaw_terminal: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if check_name not in CHECK_NAMES:
+        raise RuntimeError("check name is outside the fixed allowlist")
     report: dict[str, Any] = {
         "repository": row["repository"],
         "pr_number": row["pr_number"],
-        "stage": row["state"],
+        "stage": check_state or row["state"],
         "reason": row["blocker"] or f"state {row['state']}",
     }
+    if check_name == "OpenClaw Review Rail":
+        report["stage"] = (
+            "openclaw_completed"
+            if check_state == "success"
+            else (check_state or row["state"])
+        )
+        if openclaw_terminal:
+            if openclaw_terminal.get("request_id"):
+                report["request_id"] = openclaw_terminal["request_id"]
+                report["reason"] = (
+                    f"OpenClaw {openclaw_terminal.get('result') or check_state} "
+                    f"for {openclaw_terminal['request_id']}"
+                )
+            digest = openclaw_terminal.get("artifact_digest") or openclaw_terminal.get("proof_sha256")
+            if digest:
+                report["artifact_digest"] = digest
+            if openclaw_terminal.get("report_url"):
+                report["report_url"] = openclaw_terminal["report_url"]
+            result = openclaw_terminal.get("result")
+            if result == "clean":
+                report["content_verdict"] = result_projection.CONTENT_CLEAN
+            elif result == "findings":
+                report["content_verdict"] = result_projection.CONTENT_FINDINGS
+            elif result == "failed":
+                report["content_verdict"] = result_projection.CONTENT_FAILED
+            elif result == "human_gate":
+                report["content_verdict"] = result_projection.CONTENT_HUMAN_POLICY
+        return report
     request_id = row["review_request_id"]
     if row["rail"] == "clawsweeper" and request_id and str(request_id).isdigit():
         report["workflow_run_id"] = str(request_id)
+        report["report_url"] = result_projection.workflow_run_url(
+            row["repository"], str(request_id)
+        )
     if quality is not None:
         report["artifact_digest"] = quality["report_sha256"]
         report["workflow_run_id"] = quality["workflow_run_id"]
+        run_url = result_projection.workflow_run_url(
+            row["repository"], quality["workflow_run_id"]
+        )
+        if run_url:
+            report["report_url"] = run_url
         if quality["content_verdict"]:
             report["content_verdict"] = quality["content_verdict"]
         if quality["process_gates_json"]:
@@ -1032,7 +1198,9 @@ def publish_accepted_github_projection(
     )
     if not plan["writes"]:
         return {**plan, "result": "unchanged"}
-    receipt = result_projection.apply_github_publication(client, plan)
+    receipt = result_projection.apply_github_publication(
+        client, plan, authority_kwargs=authority_kwargs
+    )
     return {**plan, "result": "published", "receipt": receipt}
 
 
@@ -1324,8 +1492,15 @@ def reconcile_projection(
                 ),
             }
             quality = accepted_quality_row(connection, row)
-            check_report = projection_check_report(row, quality)
+            openclaw_terminal = accepted_openclaw_terminal(connection, row)
             for name, check_state in state["checks"].items():
+                check_report = projection_check_report(
+                    row,
+                    quality,
+                    check_name=name,
+                    check_state=check_state,
+                    openclaw_terminal=openclaw_terminal,
+                )
                 column, create_state_column = check_columns[name]
                 check_id = projection[column]
                 external_id = projection_external_id(row, name)
