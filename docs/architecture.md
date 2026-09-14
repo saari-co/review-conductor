@@ -37,8 +37,12 @@ exhaust automatic repair; reviewers never become mutation owners.
 
 The Conductor is the sole writer of the authoritative `OpenClaw Review Rail`
 and `ClawSweeper Review Rail` checks after it validates reviewer-native evidence.
-OpenClaw and ClawSweeper retain ownership of their detailed findings/comments.
-Dashboard projections are read-only, and merge authority remains human-only.
+A completed exact-head review can project review-success while merge stays
+human-only. Check output names the current stage, decision reason, exact head,
+workflow run, and accepted artifact digest. The Conductor may publish one
+idempotent projection comment and only ClawSweeper status labels it owns;
+reviewers retain native detailed findings. Dashboard projections are read-only,
+and merge authority remains human-only.
 
 ## Practical transition
 

@@ -246,12 +246,12 @@ class FakeGitHub:
         self.next_check_id = 500
         self.label_present = label_present
 
-    def create_check(self, name: str, head: str, external_id: str, state: str) -> int:
+    def create_check(self, name: str, head: str, external_id: str, state: str, **kwargs: Any) -> int:
         self.calls.append(("create_check", name, head, external_id, state))
         self.next_check_id += 1
         return self.next_check_id
 
-    def update_check(self, check_id: int, name: str, head: str, external_id: str, state: str) -> None:
+    def update_check(self, check_id: int, name: str, head: str, external_id: str, state: str, **kwargs: Any) -> None:
         self.calls.append(("update_check", check_id, name, head, external_id, state))
 
     def add_ready_label(self, pr: int) -> None:
@@ -267,8 +267,8 @@ class FakeGitHub:
 
 
 class FailAfterCheckCreate(FakeGitHub):
-    def create_check(self, name: str, head: str, external_id: str, state: str) -> int:
-        super().create_check(name, head, external_id, state)
+    def create_check(self, name: str, head: str, external_id: str, state: str, **kwargs: Any) -> int:
+        super().create_check(name, head, external_id, state, **kwargs)
         raise RuntimeError("fixture transport outcome is uncertain")
 
 
