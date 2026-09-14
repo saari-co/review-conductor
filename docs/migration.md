@@ -31,15 +31,19 @@ is not an executable adapter or proof of an installed Spark producer. Regression
 fixtures preserve public/non-secret deployment metadata but are not runtime
 configuration. The build excludes all historical profiles and legacy launchers.
 
-OpenClaw `command_preview` now includes the source-owned exact-tuple contract
-selector and the persisted review epoch on every queue command. Generalized
+OpenClaw `command_preview` includes the source-owned exact-tuple contract
+selector and the persisted review epoch only when the OpenClaw adapter declares
+the pinned `exact_tuple_contract` capability. Legacy profiles omit those flags
+so the tracked Spark fixture parser still accepts the queue vector. Generalized
 `review_policy` consumers in `collect_openclaw_terminals` require Spark status
 `native_max_priority=P3`, `applied_max_priority=P3`, and
-`exact_tuple_qualified is True` before any terminal artifact write; legacy
-profiles without `review_policy` stay compatible. That is a Conductor adapter
-command and evidence-consumer dependency only. It does not attach, pin,
-publish, install, or activate the x-api transport or a spark-dgx applied-P3
-attestation source.
+`exact_tuple_qualified is True` with type-and-value identity comparison before
+any terminal artifact write; those fields are persisted and enforced again at
+the OpenClaw bridge and internal terminal-event acceptance. Legacy profiles
+without `review_policy` stay compatible. That is a Conductor adapter command
+and evidence-consumer dependency only. It does not attach, pin, publish,
+install, or activate the x-api transport or a spark-dgx applied-P3 attestation
+source.
 
 ## Not completed / prerequisites for migration
 

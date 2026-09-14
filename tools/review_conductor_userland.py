@@ -690,8 +690,8 @@ def collect_openclaw_terminals(
         ):
             raise UserlandError("Spark terminal status does not match the exact action")
         if config.get("review_policy"):
-            expected = {"repository": action["repository"], "base_sha": action["base_sha"], "head_sha": action["head_sha"], "pr_number": action["pr_number"], "review_epoch": action["review_epoch"], "review_scope": "comprehensive", "reviewer_actor": config["review_policy"]["reviewers"]["openclaw"], "native_max_priority": "P3", "applied_max_priority": "P3"}
-            if any(status.get(key) != value for key, value in expected.items()) or status.get("exact_tuple_qualified") is not True:
+            expected = {"repository": action["repository"], "base_sha": action["base_sha"], "head_sha": action["head_sha"], "pr_number": action["pr_number"], "review_epoch": action["review_epoch"], "review_scope": "comprehensive", "reviewer_actor": config["review_policy"]["reviewers"]["openclaw"], "native_max_priority": "P3", "applied_max_priority": "P3", "exact_tuple_qualified": True}
+            if any(not core.same_typed_value(status.get(key), value) for key, value in expected.items()):
                 raise UserlandError("Spark proof lacks trusted comprehensive exact-tuple identity")
         finding_count = status.get("review_finding_count")
         if finding_count is None and receipt["result"] in {"failed", "needs-human"}:
@@ -722,6 +722,9 @@ def collect_openclaw_terminals(
         }
         if config.get("review_policy"):
             artifact["review_scope"] = status["review_scope"]
+            artifact["native_max_priority"] = status["native_max_priority"]
+            artifact["applied_max_priority"] = status["applied_max_priority"]
+            artifact["exact_tuple_qualified"] = status["exact_tuple_qualified"]
         artifact_path = Path(config["spark"]["terminal_inbox"]) / f"{request_id}.terminal.json"
         write_json_atomic(artifact_path, artifact)
         outcomes.append({"request_id": request_id, "result": "terminal_materialized"})

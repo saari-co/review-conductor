@@ -117,3 +117,55 @@ This packet does not attach or pin the x-api exact-tuple transport, and it does
 not provide or install a spark-dgx applied-P3 attestation source. Those remain
 explicit later source/install gates. Naming the adapter command dependency is
 not publication, installation, or activation.
+
+## Repair — 2026-09-13 (Copilot review 5192995503)
+
+Local repair on isolated branch
+`openclaw/review-conductor-openclaw-exact-contract-flags-v1` from
+`proof_source_head` `88aed1d8824f480134728e8f442f9a9aac5f92e7`. A commit cannot
+contain its own SHA, so `candidate-manifest.json` records that source head,
+per-file sha256 hashes of the changed source/test files at finalize, and
+`final_head_receipt` as pending coordinator recording against the committed
+head.
+
+### Per-finding disposition
+
+| Finding | Disposition | Location |
+| --- | --- | --- |
+| 4001479555 | required_fix applied | `tools/review_conductor_userland.py:694` via `tools/review_conductor.py:163` `same_typed_value` |
+| 4001479572 | required_fix applied | persist at `tools/review_conductor_userland.py:724-727`; enforce at `tools/review_conductor_runtime.py:1860-1878` and `tools/review_conductor.py:1481-1498` |
+| 4001479530 | required_fix applied | `tools/review_conductor.py:1893` gated by `openclaw.exact_tuple_contract` |
+| 4001479583 | required_fix applied | `proof/.../candidate-manifest.json` `proof_source_head` + pending `final_head_receipt` |
+
+### Binding scheme
+
+`proof_source_head` is the pre-repair commit the repair was captured against.
+File hashes are working-tree sha256 values of the changed source/test files
+after the repair edits. `final_head_receipt` is explicitly pending so the
+coordinator can bind the committed head without asking this packet to contain
+its own SHA.
+
+### Companion admission evidence (finding 4001479530)
+
+The tracked legacy Spark parser
+`tests/fixtures/upstream-spark-openclaw-autoreview.txt` L34-57 exits `2` on
+`--exact-tuple-contract` / `--review-epoch`. That fixture is the
+incompatibility proof for un-gated emission. The companion parser that accepts
+the new flags is the x-api lane in saari-co/x-api PR #670,
+`lanes/spark-openclaw-autoreview/run.sh`. This repository does not contain or
+run that companion lane. Legacy Blocks profiles omit
+`openclaw.exact_tuple_contract` and keep the legacy argv. The inactive SMCBD
+profile declares `exact_tuple_contract=review-conductor-openclaw-v1` and emits
+the new flags.
+
+### Commands and results
+
+- `python3 tests/test_review_conductor.py test_legacy_openclaw_queue_omits_exact_tuple_flags test_openclaw_queue_command_binds_exact_tuple_contract test_openclaw_queue_rejects_unbound_payload_review_epoch` — PASS
+- `python3 tests/test_review_conductor.py test_precise_openclaw_exact_contract_mutants` — PASS (3 killed)
+- `python3 tests/test_review_conductor_profiles.py` focused collector/bridge/type-coercion/capability tests — PASS
+- `python3 tests/test_review_conductor_profiles.py OpenClawTerminalMutationTests.test_precise_openclaw_applied_p3_mutants` — PASS (3 killed)
+- `python3 tests/test_review_conductor_userland.py` — PASS (19), including legacy artifact bridge
+- `make check` — PASS (governance, all test suites, provenance, `git diff --check`)
+- `make build` — PASS (`dist/review-conductor.pyz` generated, not tracked)
+- `git diff --check` — PASS on the working tree
+- Interpreter: CPython 3.14.6 on macOS; no x-api, OpenClaw, Smoky, or live credentials

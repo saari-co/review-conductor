@@ -86,8 +86,17 @@ class ProfilesTest(unittest.TestCase):
     def terminal(self, config, action, **overrides):
         path = adapters.openclaw_artifact(self.root,config,action)
         value=json.loads(path.read_text())
-        value.update(review_scope='comprehensive',reviewer_actor='fixture-suite-openclaw')
+        drop = overrides.pop('_drop', ())
+        value.update(
+            review_scope='comprehensive',
+            reviewer_actor='fixture-suite-openclaw',
+            native_max_priority='P3',
+            applied_max_priority='P3',
+            exact_tuple_qualified=True,
+        )
         value.update(overrides)
+        for key in drop:
+            value.pop(key, None)
         return write(path,value)
 
     def write_openclaw_status(self, run, action, config, **overrides):
@@ -301,6 +310,19 @@ class ProfilesTest(unittest.TestCase):
         finally:connection.close()
         self.assertEqual(outcome['state'],'clawsweeper_clean_draft')
 
+    def test_capability_declared_profile_emits_exact_tuple_queue_flags(self):
+        config=self.config(); action=self.enqueue(config)
+        checkout=self.root/'source-checkout'
+        checkout.mkdir()
+        core_config=core.load_config(Path(config['core_config']))
+        self.assertTrue(core.declares_openclaw_exact_tuple_contract(core_config))
+        commands=core.command_preview(action, core_config, checkout)
+        queue=commands[1]
+        self.assertEqual(
+            queue[-4:],
+            ['--exact-tuple-contract', 'review-conductor-openclaw-v1', '--review-epoch', str(action['review_epoch'])],
+        )
+
     def test_generalized_openclaw_terminal_requires_applied_p3_qualification(self):
         config=self.config(); action=self.enqueue(config)
         request_id=json.loads(action['payload_json'])['queue_request_id']
@@ -317,6 +339,9 @@ class ProfilesTest(unittest.TestCase):
                 self.assertTrue(proof.is_file())
                 value=json.loads(artifact.read_text())
                 self.assertEqual(value['review_scope'], 'comprehensive')
+                self.assertEqual(value['native_max_priority'], 'P3')
+                self.assertEqual(value['applied_max_priority'], 'P3')
+                self.assertIs(value['exact_tuple_qualified'], True)
                 self.assertEqual(value['review_finding_count'], 1 if findings else 0)
                 self.assertEqual(value['review_clean'], not findings)
 
@@ -348,6 +373,73 @@ class ProfilesTest(unittest.TestCase):
                         userland.collect_openclaw_terminals(config, dry_run=False, runner=legacy.SparkStatusRunner(run))
                     self.assertEqual(list(inbox.glob('*.terminal.json')) if inbox.exists() else [], [])
                     self.assertFalse(proof.exists())
+
+    def test_generalized_openclaw_status_rejects_json_type_coercions(self):
+        config=self.config(); action=self.enqueue(config, pr=1)
+        request_id=json.loads(action['payload_json'])['queue_request_id']
+        run=legacy.openclaw_run_fixture(self.root, request_id)
+        inbox=Path(config['spark']['terminal_inbox'])
+        self.assertEqual(action['pr_number'], 1)
+        self.assertEqual(action['review_epoch'], 0)
+        cases=(
+            ('false_vs_0', {'review_epoch': False}),
+            ('true_vs_1', {'pr_number': True}),
+            ('float_vs_int', {'pr_number': 1.0}),
+            ('string_vs_int', {'pr_number': '1'}),
+        )
+        for label, overrides in cases:
+            with self.subTest(label=label):
+                self.write_openclaw_status(run, action, config, **overrides)
+                with self.assertRaises(core.ContractError):
+                    userland.collect_openclaw_terminals(config, dry_run=False, runner=legacy.SparkStatusRunner(run))
+                self.assertEqual(list(inbox.glob('*.terminal.json')) if inbox.exists() else [], [])
+
+    def test_bridge_rejects_direct_artifact_and_internal_event_without_qualification(self):
+        config=self.config(); action=self.enqueue(config)
+        for override in (
+            {'_drop': ('native_max_priority', 'applied_max_priority', 'exact_tuple_qualified')},
+            {'applied_max_priority': 'P0'},
+            {'native_max_priority': 'P0'},
+            {'exact_tuple_qualified': False},
+            {'exact_tuple_qualified': 1},
+        ):
+            with self.subTest(artifact=override):
+                with self.assertRaises(core.ContractError):
+                    runtime.bridge_openclaw(config, self.terminal(config, action, **override))
+                self.assertEqual(self.state(config)['state'], 'openclaw_queued')
+        request_id=json.loads(action['payload_json'])['queue_request_id']
+        proof = Path(config['paths']['proof_root']) / 'openclaw-internal.md'
+        proof.parent.mkdir(parents=True, exist_ok=True)
+        proof.write_text('internal terminal proof\n', encoding='utf-8')
+        base_event={
+            'schema':core.INTERNAL_EVENT_SCHEMA,
+            'event_id':'direct-openclaw-terminal',
+            'type':'openclaw.terminal',
+            'repository':REPO,
+            'pr_number':7,
+            'base_sha':BASE,
+            'head_sha':HEAD,
+            'review_epoch':action['review_epoch'],
+            'request_id':request_id,
+            'result':'clean',
+            'finding_count':0,
+            'reviewer_actor':'fixture-suite-openclaw',
+            'proof_ref':str(proof),
+            'review_scope':'comprehensive',
+        }
+        for fields in (
+            {},
+            {'native_max_priority':'P3','applied_max_priority':'P0','exact_tuple_qualified':True},
+            {'native_max_priority':'P3','applied_max_priority':'P3','exact_tuple_qualified':1},
+        ):
+            with self.subTest(event=fields):
+                with self.assertRaises(core.ContractError):
+                    core.ingest_internal_event(
+                        config_path=Path(config['core_config']),
+                        state_root=Path(config['paths']['state_root']),
+                        event_payload={**base_event, **fields},
+                    )
+                self.assertEqual(self.state(config)['state'], 'openclaw_queued')
 
     def test_cross_repo_stale_epoch_head_base_actor_and_p0_artifacts_fail_closed(self):
         config=self.config();action=self.enqueue(config)
@@ -434,22 +526,22 @@ class OpenClawTerminalMutationTests(unittest.TestCase):
         (
             "omit native_max_priority P3",
             'tools/review_conductor_userland.py',
-            ', "native_max_priority": "P3", "applied_max_priority": "P3"}',
-            ', "applied_max_priority": "P3"}',
+            ', "native_max_priority": "P3", "applied_max_priority": "P3", "exact_tuple_qualified": True}',
+            ', "applied_max_priority": "P3", "exact_tuple_qualified": True}',
             'test_review_conductor_profiles.ProfilesTest.test_generalized_openclaw_unqualified_status_writes_zero_artifacts',
         ),
         (
             "omit applied_max_priority P3",
             'tools/review_conductor_userland.py',
-            ', "native_max_priority": "P3", "applied_max_priority": "P3"}',
-            ', "native_max_priority": "P3"}',
+            ', "native_max_priority": "P3", "applied_max_priority": "P3", "exact_tuple_qualified": True}',
+            ', "native_max_priority": "P3", "exact_tuple_qualified": True}',
             'test_review_conductor_profiles.ProfilesTest.test_generalized_openclaw_unqualified_status_writes_zero_artifacts',
         ),
         (
             "omit exact_tuple_qualified identity",
             'tools/review_conductor_userland.py',
-            'if any(status.get(key) != value for key, value in expected.items()) or status.get("exact_tuple_qualified") is not True:',
-            'if any(status.get(key) != value for key, value in expected.items()):',
+            ', "native_max_priority": "P3", "applied_max_priority": "P3", "exact_tuple_qualified": True}',
+            ', "native_max_priority": "P3", "applied_max_priority": "P3"}',
             'test_review_conductor_profiles.ProfilesTest.test_generalized_openclaw_unqualified_status_writes_zero_artifacts',
         ),
     )

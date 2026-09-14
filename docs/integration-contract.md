@@ -110,22 +110,27 @@ The legacy direct notification adapter is preserved as compatibility code only.
 
 ## OpenClaw exact-tuple adapter command dependency (source-qualified)
 
-`tools/review_conductor.py` `command_preview` emits every `openclaw.enqueue`
-queue command with the source-owned x-api transport flags
-`--exact-tuple-contract review-conductor-openclaw-v1` and
+`tools/review_conductor.py` `command_preview` emits the source-owned x-api
+transport flags `--exact-tuple-contract review-conductor-openclaw-v1` and
 `--review-epoch <bound non-negative review epoch>` exactly once, in that order,
-taken from the already-persisted action identity. Epoch 0 is the first valid
-generation. Payload JSON cannot select a different generation. The x-api
-source-owned contract, not Conductor caller or target policy, fixes
-`review_scope=comprehensive`, `reviewer_actor=spark-openclaw`, and
-`native_max_priority=P3`; Conductor does not pass actor, scope, or priority.
+only when the OpenClaw adapter declares `exact_tuple_contract` as that pinned
+companion contract. Legacy profiles omit the field and keep the legacy queue
+vector. Epoch 0 is the first valid generation. Payload JSON cannot select a
+different generation. The x-api source-owned contract, not Conductor caller or
+target policy, fixes `review_scope=comprehensive`,
+`reviewer_actor=spark-openclaw`, and `native_max_priority=P3`; Conductor does
+not pass actor, scope, or priority.
 Generalized `review_policy` profiles materialize an OpenClaw terminal only when
 Spark `REQUEST_STATUS.json` also carries `native_max_priority=P3`,
 `applied_max_priority=P3`, and `exact_tuple_qualified` is `True` together with
-the trusted comprehensive exact-tuple identity. Copied request `review_scope`
-while native execution remains P0 is rejected. Missing, P0, conflicting, or
-false fields fail closed with no artifact write for clean and findings results.
-Legacy profiles without `review_policy` stay compatible. Review prose and
-adapter exit code are not applied-P3 evidence.
+the trusted comprehensive exact-tuple identity compared by type and value.
+Those qualification fields are persisted on the terminal artifact and enforced
+again at `runtime.bridge_openclaw` and `openclaw.terminal` internal-event
+acceptance. Copied request `review_scope` while native execution remains P0 is
+rejected. Missing, P0, conflicting, or false fields fail closed with no
+artifact write for clean and findings results. JSON `false`/`true`/`1.0`/`"1"`
+do not match integer identity fields. Legacy profiles without `review_policy`
+stay compatible. Review prose and adapter exit code are not applied-P3
+evidence.
 This names an adapter command dependency only. It is not x-api or spark-dgx
 publication, installation, attachment, source pin, or activation.

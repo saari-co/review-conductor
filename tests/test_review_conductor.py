@@ -279,7 +279,14 @@ def queue_openclaw_action(temp: Path, state: Path, pr: int, head: str, *, run_id
     return actions[0]
 
 
-def expected_openclaw_commands(smoky: str, checkout: Path, action: dict, epoch: int) -> list[list[str]]:
+def expected_openclaw_commands(
+    smoky: str,
+    checkout: Path,
+    action: dict,
+    epoch: int,
+    *,
+    exact_tuple: bool = False,
+) -> list[list[str]]:
     payload = action["payload"]
     materialize = [
         smoky,
@@ -317,12 +324,46 @@ def expected_openclaw_commands(smoky: str, checkout: Path, action: dict, epoch: 
         payload["remote_worktree"],
         "--pr-url",
         payload["pr_url"],
-        "--exact-tuple-contract",
-        "review-conductor-openclaw-v1",
-        "--review-epoch",
-        str(epoch),
     ]
+    if exact_tuple:
+        queue.extend(
+            [
+                "--exact-tuple-contract",
+                "review-conductor-openclaw-v1",
+                "--review-epoch",
+                str(epoch),
+            ]
+        )
     return [materialize, queue]
+
+
+def exact_tuple_config(temp: Path) -> Path:
+    value = json.loads(CONFIG.read_text(encoding="utf-8"))
+    value["openclaw"]["exact_tuple_contract"] = "review-conductor-openclaw-v1"
+    return write_json(temp, "exact-tuple-blocks.json", value)
+
+
+def spark_legacy_parser_script() -> str:
+    lane = (ROOT / "tests" / "fixtures" / "upstream-spark-openclaw-autoreview.txt").read_text(
+        encoding="utf-8"
+    )
+    start = lane.index("require_value() {")
+    end = lane.index('\nif [ "$ACTIVATION_PREFLIGHT" = "1" ]; then')
+    return "#!/usr/bin/env bash\nset -uo pipefail\n" + lane[start:end] + "exit 0\n"
+
+
+def parse_spark_legacy_queue(temp: Path, queue: list[str]) -> subprocess.CompletedProcess[str]:
+    script = temp / "legacy-spark-parser.sh"
+    script.write_text(spark_legacy_parser_script(), encoding="utf-8")
+    script.chmod(0o755)
+    lane_index = queue.index("spark-openclaw-autoreview")
+    return subprocess.run(
+        ["bash", str(script), *queue[lane_index + 1 :]],
+        cwd=temp,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
 
 
 def overwrite_action_payload(state: Path, action_id: str, **overrides: object) -> None:
@@ -349,11 +390,12 @@ def plan_openclaw(
     head: str,
     expected: int = 0,
     apply: bool = False,
+    config: Path | None = None,
 ) -> dict:
     args = [
         "dispatch-action",
         "--config",
-        str(CONFIG),
+        str(CONFIG if config is None else config),
         "--state-root",
         str(state),
         "--action-id",
@@ -1210,6 +1252,34 @@ def test_openclaw_clean_dispatches_clawsweeper_and_never_merge(temp: Path) -> No
     assert all(item["kind"] != "merge" for item in final["actions"])
 
 
+def test_legacy_openclaw_queue_omits_exact_tuple_flags(temp: Path) -> None:
+    state = temp / "state-legacy-queue"
+    head = "c" * 40
+    action = queue_openclaw_action(temp, state, 203, head, run_id=9203)
+    adapter_root = temp / "legacy-queue-adapters"
+    adapter_root.mkdir()
+    fake_smoky, _, log = create_fake_adapters(adapter_root)
+    checkout = temp / "legacy-queue-checkout"
+    checkout.mkdir()
+    planned = plan_openclaw(
+        state, action["action_id"], checkout, smoky=fake_smoky, log=log, head=head
+    )
+    assert planned["result"] == "planned"
+    expected = expected_openclaw_commands(str(fake_smoky), checkout, action, 0)
+    assert planned["commands"] == expected
+    materialize, queue = planned["commands"]
+    assert "--exact-tuple-contract" not in materialize
+    assert "--review-epoch" not in materialize
+    assert "--exact-tuple-contract" not in queue
+    assert "--review-epoch" not in queue
+    parsed = parse_spark_legacy_queue(temp, queue)
+    assert parsed.returncode == 0, parsed.stderr
+    ungated = list(queue) + ["--exact-tuple-contract", "review-conductor-openclaw-v1", "--review-epoch", "0"]
+    rejected = parse_spark_legacy_queue(temp, ungated)
+    assert rejected.returncode == 2
+    assert "unknown arg: --exact-tuple-contract" in rejected.stderr
+
+
 def test_openclaw_queue_command_binds_exact_tuple_contract(temp: Path) -> None:
     state = temp / "state-exact-contract"
     head = "c" * 40
@@ -1221,11 +1291,20 @@ def test_openclaw_queue_command_binds_exact_tuple_contract(temp: Path) -> None:
     fake_smoky, _, log = create_fake_adapters(adapter_root)
     checkout = temp / "exact-contract-checkout"
     checkout.mkdir()
+    config = exact_tuple_config(temp)
     planned = plan_openclaw(
-        state, action["action_id"], checkout, smoky=fake_smoky, log=log, head=head
+        state,
+        action["action_id"],
+        checkout,
+        smoky=fake_smoky,
+        log=log,
+        head=head,
+        config=config,
     )
     assert planned["result"] == "planned"
-    expected = expected_openclaw_commands(str(fake_smoky), checkout, action, 0)
+    expected = expected_openclaw_commands(
+        str(fake_smoky), checkout, action, 0, exact_tuple=True
+    )
     assert planned["commands"] == expected
     materialize, queue = planned["commands"]
     assert materialize == expected[0]
@@ -1245,11 +1324,25 @@ def test_openclaw_queue_command_binds_exact_tuple_contract(temp: Path) -> None:
     assert not log.exists()
 
     dispatched = plan_openclaw(
-        state, action["action_id"], checkout, smoky=fake_smoky, log=log, head=head, apply=True
+        state,
+        action["action_id"],
+        checkout,
+        smoky=fake_smoky,
+        log=log,
+        head=head,
+        apply=True,
+        config=config,
     )
     assert dispatched["result"] == "dispatched"
     again = plan_openclaw(
-        state, action["action_id"], checkout, smoky=fake_smoky, log=log, head=head, apply=True
+        state,
+        action["action_id"],
+        checkout,
+        smoky=fake_smoky,
+        log=log,
+        head=head,
+        apply=True,
+        config=config,
     )
     assert again["result"] == "already_dispatched"
     calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
@@ -1295,10 +1388,11 @@ def test_openclaw_queue_command_binds_exact_tuple_contract(temp: Path) -> None:
         smoky=fake_smoky,
         log=log,
         head=head,
+        config=config,
     )
     assert reopened_planned["result"] == "planned"
     reopened_expected = expected_openclaw_commands(
-        str(fake_smoky), reopened_checkout, pending, 1
+        str(fake_smoky), reopened_checkout, pending, 1, exact_tuple=True
     )
     assert reopened_planned["commands"] == reopened_expected
     reopened_queue = reopened_planned["commands"][1]
@@ -1358,14 +1452,14 @@ def test_precise_openclaw_exact_contract_mutants() -> None:
     mutants = (
         (
             "omit exact-tuple-contract flag",
-            '            "--exact-tuple-contract", OPENCLAW_EXACT_TUPLE_CONTRACT,\n            "--review-epoch", str(review_epoch),\n',
-            '            "--review-epoch", str(review_epoch),\n',
+            '                "--exact-tuple-contract", OPENCLAW_EXACT_TUPLE_CONTRACT,\n                "--review-epoch", str(review_epoch),\n',
+            '                "--review-epoch", str(review_epoch),\n',
             "test_openclaw_queue_command_binds_exact_tuple_contract",
         ),
         (
             "omit review-epoch flag",
-            '            "--exact-tuple-contract", OPENCLAW_EXACT_TUPLE_CONTRACT,\n            "--review-epoch", str(review_epoch),\n',
-            '            "--exact-tuple-contract", OPENCLAW_EXACT_TUPLE_CONTRACT,\n',
+            '                "--exact-tuple-contract", OPENCLAW_EXACT_TUPLE_CONTRACT,\n                "--review-epoch", str(review_epoch),\n',
+            '                "--exact-tuple-contract", OPENCLAW_EXACT_TUPLE_CONTRACT,\n',
             "test_openclaw_queue_command_binds_exact_tuple_contract",
         ),
         (
@@ -1414,6 +1508,7 @@ def main() -> int:
         "test_legacy_database_migrates_review_epoch": test_legacy_database_migrates_review_epoch,
         "test_repair_owner_and_two_cycle_governor": test_repair_owner_and_two_cycle_governor,
         "test_openclaw_clean_dispatches_clawsweeper_and_never_merge": test_openclaw_clean_dispatches_clawsweeper_and_never_merge,
+        "test_legacy_openclaw_queue_omits_exact_tuple_flags": test_legacy_openclaw_queue_omits_exact_tuple_flags,
         "test_openclaw_queue_command_binds_exact_tuple_contract": test_openclaw_queue_command_binds_exact_tuple_contract,
         "test_openclaw_queue_rejects_unbound_payload_review_epoch": test_openclaw_queue_rejects_unbound_payload_review_epoch,
         "test_precise_openclaw_exact_contract_mutants": lambda _temp: test_precise_openclaw_exact_contract_mutants(),

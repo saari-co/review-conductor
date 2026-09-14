@@ -741,6 +741,12 @@ def test_legacy_openclaw_terminal_without_review_policy_does_not_require_applied
         assert result == [{"request_id": request_id, "result": "terminal_materialized"}]
         artifact = Path(config["spark"]["terminal_inbox"]) / f"{request_id}.terminal.json"
         assert artifact.is_file()
+        value = json.loads(artifact.read_text(encoding="utf-8"))
+        assert "native_max_priority" not in value
+        assert "applied_max_priority" not in value
+        assert "exact_tuple_qualified" not in value
+        runtime.drain_bridge_inboxes(config)
+        assert current(config, pr)["state"] == "clawsweeper_queued"
 
 
 def test_exact_artifacts_drive_ready_notification_once_without_merge() -> None:

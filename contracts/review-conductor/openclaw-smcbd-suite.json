@@ -10,7 +10,8 @@
   "openclaw": {
     "operator_id": "review-conductor-smcbd-suite",
     "remote_worktree_shelf": "/home/smoky/Developer/_machine-runs/smcbd-suite-review-worktrees",
-    "transport": "bundle"
+    "transport": "bundle",
+    "exact_tuple_contract": "review-conductor-openclaw-v1"
   },
   "clawsweeper": {
     "workflow_id": "clawsweeper-exact-tuple.yml",
