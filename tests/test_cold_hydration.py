@@ -365,6 +365,68 @@ class ColdHydrationTest(unittest.TestCase):
         self.assertEqual(self.fetches, 1)
         self.assertNotEqual(self.git(self.checkout, "cat-file", "-e", self.head, check=False).returncode, 0)
 
+    def pending_fixture(self, name):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import test_review_conductor_userland as fixture
+        root = self.root / name
+        root.mkdir()
+        config = fixture.config_fixture(root)
+        config["paths"]["blocks_checkout"] = str(self.checkout)
+        self.git(self.checkout, "remote", "set-url", "origin", "https://github.com/dinkuskit/blocks.git")
+        pr = fixture.pr_payload(4, self.head)
+        pr["pull_request"]["base"]["sha"] = self.base
+        fixture.ingress(config, "pull_request", "fixture-pr", pr)
+        ci = fixture.ci_payload(4, 101, self.head)
+        ci["workflow_run"]["pull_requests"][0]["base"]["sha"] = self.base
+        fixture.ingress(config, "workflow_run", "fixture-ci", ci)
+        client_config = copy.deepcopy(self.config)
+        client_config["github_app"]["repository"] = "dinkuskit/blocks"
+        return fixture, config, client_config
+
+    def test_credential_guard_contract_errors_preserve_pending_action(self):
+        for fence in ("credential", "credential-ready"):
+            with self.subTest(fence=fence):
+                fixture, config, client_config = self.pending_fixture(fence)
+                client = runtime.GitHubAppClient(client_config, "synthetic-key",
+                    signer=lambda *_: "synthetic-jwt")
+                def guard(method, operation, authority):
+                    if operation == "checkout-hydration:" + fence:
+                        raise core.ContractError("synthetic stale binding")
+                client.set_authority_guard(guard)
+                with patch.object(client, "_installation_token", return_value=SYNTHETIC) as token:
+                    with self.assertRaises(core.AuthorityDenied):
+                        userland.hydrate_pending_openclaw_heads(
+                            config, authority_client=client, dry_run=False)
+                    self.assertEqual(token.call_count, int(fence == "credential-ready"))
+                saved = fixture.action(config, 4, "openclaw.enqueue")
+                self.assertEqual((saved["status"], saved["attempts"], saved["last_error"]),
+                                 ("pending", 0, None))
+                self.assertNotEqual(self.git(self.checkout, "cat-file", "-e", self.head, check=False).returncode, 0)
+
+    def test_transient_installation_errors_preserve_pending_action_across_ticks(self):
+        for failure in (429, 503, "transport"):
+            with self.subTest(failure=failure):
+                fixture, config, client_config = self.pending_fixture(str(failure))
+                calls = []
+                def transport(*args):
+                    calls.append(args[0])
+                    if failure == "transport":
+                        raise runtime.GitHubTransientError("synthetic transport timeout")
+                    return failure, b"{}"
+                client = runtime.GitHubAppClient(client_config, "synthetic-key",
+                    transport=transport, signer=lambda *_: "synthetic-jwt")
+                client.set_authority_guard(lambda *_: None)
+                # Two explicit normal tick attempts: no inline retry loop.
+                for attempt in range(2):
+                    with self.assertRaises(runtime.GitHubTransientError):
+                        userland.hydrate_pending_openclaw_heads(
+                            config, authority_client=client, dry_run=False)
+                    saved = fixture.action(config, 4, "openclaw.enqueue")
+                    self.assertEqual((saved["status"], saved["attempts"], saved["last_error"]),
+                                     ("pending", 0, None))
+                    self.assertEqual(len(calls), attempt + 1)
+                self.assertNotEqual(self.git(self.checkout, "cat-file", "-e", self.head, check=False).returncode, 0)
+
     def test_pending_failures_persist_once_and_revocation_stays_pending(self):
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         import test_review_conductor_userland as fixture

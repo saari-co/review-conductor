@@ -1516,6 +1516,8 @@ def fetch_hydration_pack(
         _fetch_hydration_pack(checkout, action, client, runner=runner)
     except OSError:
         raise HydrationFailure("local_resource_unavailable") from None
+    except runtime.GitHubTransientError:
+        raise
     except runtime.GitHubApiError:
         raise HydrationFailure("service_auth_unavailable") from None
 
@@ -1789,7 +1791,9 @@ def hydrate_pending_openclaw_heads(
                     config, row, authority_client=authority_client
                 )
             )
-        except core.AuthorityDenied:
+        except (core.AuthorityDenied, runtime.GitHubTransientError):
+            # Leave the action pending. The existing service worker catches the
+            # contract error and waits for its next configured tick.
             raise
         except core.ContractError as exc:
             reason = exc.reason if isinstance(exc, HydrationFailure) else "checkout_validation_failed"

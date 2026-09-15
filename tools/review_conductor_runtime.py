@@ -608,11 +608,11 @@ class GitHubAppClient:
             raise core.ContractError("authenticated hydration capability unavailable")
         if self._authority_guard is None:
             raise core.AuthorityDenied("authenticated hydration authority unavailable")
-        self.assert_authority("checkout-hydration:credential", authority)
+        assert_authority(self, "checkout-hydration:credential", authority)
         token = self._installation_token()
         if not re.fullmatch(r"[A-Za-z0-9_.-]{1,2048}", token):
             raise GitHubApiError("hydration credential has invalid bounded shape")
-        self.assert_authority("checkout-hydration:credential-ready", authority)
+        assert_authority(self, "checkout-hydration:credential-ready", authority)
         read_fd = write_fd = -1
         try:
             read_fd, write_fd = os.pipe()

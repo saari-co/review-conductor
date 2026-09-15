@@ -3,7 +3,7 @@
 ## Route and source
 
 - Repository: `saari-co/review-conductor`
-- Owner: `conductor13_round1_repairs`; final coordinator: root.
+- Owner: `conductor13_final_error_fixes`; final coordinator: root.
 - Branch: `codex/authenticated-cold-hydration-20260915`.
 - Fresh remote base: `261f886847f8badfcf1d5affdbdd7a1f4c1e092a`.
 - Mode: mutate source in one isolated worktree; no live service changes.
@@ -37,7 +37,8 @@ A failed action retains a closed reason class instead of raw Git output.
 
 ## Verification
 
-- Eleven cold-hydration regressions PASS: independent object stores, real Git
+- Current cold-hydration suite: 21 regressions PASS (11 initial, eight round-one,
+  two final error-classification regressions): independent object stores, real Git
   fetch/pack/import, actual Git helper exchange using synthetic credential bytes,
   unchanged refs/HEAD/worktree, missing auth, wrong ref, wrong repo, missing
   admission, revoked authority after token resolution and before import,
@@ -109,14 +110,36 @@ and live GitHub fetch are not exercised by these synthetic tests.
 References: [Git fetch unpack limit](https://git-scm.com/docs/git-config),
 [Python resource limits](https://docs.python.org/3/library/resource.html).
 
+## Final capped-review adjudication
+
+Review `5215630489` on `5426a08e88115c3c2ad06157bd50b26069fca74a`:
+all three observations `required_fix → repaired`. Copilot budget is exhausted
+at 2/2. These final fixes are tested, not re-reviewed; root owns promotion.
+
+- Both credential fences use the existing normalizing authority helper. A stale
+  binding reported as `ContractError` becomes `AuthorityDenied`; persisted
+  enqueue state remains pending with zero attempts, and credential resolution
+  does not occur when the first fence rejects.
+- Installation-token rate limits (429), upstream failures (503), and transient
+  transport errors retain `GitHubTransientError` through both the fetch wrapper
+  and the pending-action handler. The existing service worker catches that
+  contract-error subclass and waits its configured tick interval. No inline
+  retry loop, new scheduler, or busy retry is introduced.
+- Two persisted-action regressions (five error scenarios) fail against the
+  pre-fix source and pass repaired source. Explicit successive tick attempts
+  preserve pending/zero attempts/no error, retry the transport once per tick,
+  and leave cold checkout objects absent. Permanent-failure coverage remains.
+- The current verification count is 21 tests; earlier round-one counts below
+  are historical, not the current total.
+
 ## Tested source hashes
 
 | File | SHA-256 |
 | --- | --- |
-| `tools/review_conductor_runtime.py` | `e591aaf37b9f69083a58ba120629d50ce98c6236bc2260a509b1f2a6373aa4e5` |
-| `tools/review_conductor_userland.py` | `a8c463d909481a0d7cd13d51060c625bae64fd7d70210375b5ebfeeda6f4bfd4` |
+| `tools/review_conductor_runtime.py` | `5a84bdf4976e49209a23c9cb5e58acacfe39b1da1bc5756bed7d6cc614ecbd4e` |
+| `tools/review_conductor_userland.py` | `ee8eb09dcb9babcecf9db4da170ba7d2b7d2d1a56bfcb9ed989271f3ae97d6e4` |
 | `tools/git_hydration_credential.py` | `5eb0d630e7f15cdb14e65eab3d1a2aa0dd7a0de7df5cc4e7c224a1092c1bf44d` |
 | `tools/git_hydration_exec.py` | `170b25caefd1a15a7d2315d8449180e6797d203f264cdc9e42bf3fd2d9a6e511` |
-| `tests/test_cold_hydration.py` | `be464356f189f166e406003fa2b526ac2d9741b3f0f5ec41dd211cc87be0e414` |
+| `tests/test_cold_hydration.py` | `d7441586fd8659a2cd43b3ef41a21f6cd19acc718a3638944c97b995bce3a593` |
 | `tests/test_review_conductor_userland.py` | `330fdd909156db433023534bee115b1972778d8c2e63906026bf26c1aae85cb1` |
 | `Makefile` | `f4605ccf13e04577209516ae3183446b126f661f566cf90a25c1f12d559b7341` |
