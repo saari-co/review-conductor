@@ -1055,7 +1055,7 @@ def process_pull_request(
                     if action is None or action["status"] not in {"pending", "dispatching", "dispatched"}:
                         raise ContractError("ClawSweeper action cannot be resumed safely")
             state = "clawsweeper_queued"
-            update_exact_head(connection, identity, state=state, rail="clawsweeper", blocker=None)
+            update_exact_head(connection, identity, state=state, rail="clawsweeper", review_request_id=None, blocker=None)
         insert_event(connection, event_id=event_id, kind=f"pull_request.{original_action}", stale=False, payload=payload, **identity)
         return {"result": "accepted", "state": state, "review_epoch": previous["review_epoch"], "action_id": action_id, "action_created": created, "merge_dispatched": False}
     elif previous is not None and bool(previous["is_draft"]) != event["is_draft"] and original_action != "closed":
