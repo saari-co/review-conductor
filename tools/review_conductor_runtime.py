@@ -19,6 +19,7 @@ import inspect
 import json
 import os
 import re
+import shlex
 import socket
 import sqlite3
 import stat
@@ -592,6 +593,52 @@ class GitHubAppClient:
             self._token = token
             self._token_expires = expiry
             return token
+
+    @contextlib.contextmanager
+    def hydration_credentials(self, authority: dict[str, Any]):
+        """One-use pipe to the fixed Git helper; values never enter argv/env/files.
+
+        Only the admitted standalone service has Contents-read authority. The
+        helper is service source, never a helper selected by the target checkout.
+        """
+        authority = tuple_authority(authority)
+        if authority["repository"] != self.repository:
+            raise core.AuthorityDenied("authenticated hydration authority unavailable")
+        if not self._strict_adapter or self._app["api_base"] != "https://api.github.com":
+            raise core.ContractError("authenticated hydration capability unavailable")
+        if self._authority_guard is None:
+            raise core.AuthorityDenied("authenticated hydration authority unavailable")
+        assert_authority(self, "checkout-hydration:credential", authority)
+        token = self._installation_token()
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,2048}", token):
+            raise GitHubApiError("hydration credential has invalid bounded shape")
+        assert_authority(self, "checkout-hydration:credential-ready", authority)
+        read_fd = write_fd = -1
+        try:
+            read_fd, write_fd = os.pipe()
+            # Below POSIX PIPE_BUF: no writer thread, tempfile, or environment.
+            encoded = token.encode("ascii")
+            if len(encoded) > os.fpathconf(write_fd, "PC_PIPE_BUF"):
+                raise GitHubApiError("hydration credential exceeds atomic pipe bound")
+            if os.write(write_fd, encoded) != len(encoded):
+                raise core.ContractError("hydration credential pipe incomplete")
+            os.close(write_fd)
+            write_fd = -1
+            helper = "!" + " ".join(shlex.quote(item) for item in (
+                sys.executable, "-I", str(TOOLS / "git_hydration_credential.py"),
+                str(read_fd), self.repository,
+            ))
+            yield helper, read_fd
+        except OSError:
+            raise core.ContractError("hydration credential resource unavailable") from None
+        finally:
+            for descriptor in (read_fd, write_fd):
+                if descriptor != -1:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        # Preserve any admission denial already unwinding.
+                        pass
 
     def read_policy(self, repository: str, commit: str) -> bytes:
         if repository != self.repository:

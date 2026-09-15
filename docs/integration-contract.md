@@ -192,3 +192,52 @@ retries creation because a link update failed. ClawSweeper retains its validated
 run/artifact links; the external report-URL allowlist is unchanged. See GitHub's
 [Checks API](https://docs.github.com/en/rest/checks/runs) for the existing
 `output.text` and `html_url` surface.
+
+## Cold exact-object hydration (source-qualified)
+
+An admitted standalone service hydrates uncached PR objects through its existing
+repository-scoped GitHub App client and Contents-read capability. It never uses
+operator `gh` authentication, global Git config, target credential helpers, or
+interactive prompts. Admission is checked before credential resolution, after
+resolution, immediately before authenticated-fetch and object-import subprocess
+launches, and after import. Existing supervisor generation
+descriptors remain inherited throughout. Missing auth or revoked authority fails
+closed without submitting a reviewer request. Legacy clients without this
+capability may reuse already-present objects but cannot perform a cold fetch.
+Unavailable legacy capability and local resource failures close the pending
+action once; actual admission denial remains distinct and stops the tick.
+
+The service-owned credential helper consumes one bounded installation token from
+an anonymous pipe. Only the descriptor number and expected repository enter Git
+configuration/argv. The helper accepts only HTTPS, `github.com`, the exact enrolled
+repository path and `get`; it neither stores credentials nor follows fallback
+authentication modes. Redirects are disabled. The token is never written to a
+named or anonymous file, environment, diagnostic, proof or operator output. Git's
+private credential-protocol pipe is its sole subprocess recipient.
+
+Authenticated fetch runs in a disposable independent bare object store with a
+clean HOME and allowlisted environment, not the target checkout. The current PR
+ref must resolve to the admitted head, and the explicit base must be its ancestor.
+A bounded, validated pack is then imported via `index-pack --strict`; checkout
+HEAD, refs, origin and working tree are rechecked and remain unchanged. Temporary
+files contain repository objects only. Network/fetch failures expose a closed
+reason class, never raw Git output. This source qualification uses synthetic
+credentials and local independent stores; it is not live private-GitHub proof.
+
+Hydration Git subprocesses use a fixed exec wrapper, not `preexec_fn` in the
+threaded service. Inherited `RLIMIT_FSIZE` limits each written file to 256 MiB;
+`fetch.unpackLimit=0` keeps incoming objects packed. CPU time is limited to 180
+seconds per process, alongside the existing 180-second command wall timeout.
+After fetch, total stored object bytes must fit 256 MiB. A bounded-file
+`cat-file --batch-all-objects` inventory rejects more than 100,000 objects or
+512 MiB of aggregate expanded object bytes before repack or checkout import.
+Repack uses one thread and a 64 MiB window; import also enforces Git's
+`--max-input-size`. Linux additionally enforces 2 GiB per-process DATA/AS limits.
+
+These are per-file/per-process and pre-import budgets, not a host quota or an
+aggregate network-byte cap. Git may index/decompress objects in disposable
+staging before the inventory gate. macOS does not consistently support DATA/AS
+limits, so no hard macOS memory bound is claimed; transient staging/indexing
+memory and simultaneous child totals are not bounded by the expanded-object
+inventory. Over-budget repositories fail closed rather than receiving a partial
+review. The limits do not change checkout refs, HEAD or worktree.
