@@ -900,7 +900,7 @@ class GitHubAppClient:
     def _mutate_label(
         self, method: str, path: str, payload: dict[str, Any] | None, *,
         expected: set[int], authority: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> list[str]:
         _operation, raw = self._call_raw(
             method, path, payload, expected=expected, authority=authority,
         )
@@ -913,6 +913,7 @@ class GitHubAppClient:
             for label in labels
         ):
             raise GitHubApiError("GitHub label mutation returned an unexpected payload shape")
+        return [label["name"] for label in labels]
 
     def add_owned_label(
         self,
@@ -921,15 +922,17 @@ class GitHubAppClient:
         *,
         authority: dict[str, Any] | None = None,
     ) -> None:
-        if name not in result_projection.OWNED_LABELS:
+        if name not in result_projection.PUBLICATION_LABELS:
             raise GitHubApiError("label is outside the Conductor-owned vocabulary")
-        self._mutate_label(
+        observed = self._mutate_label(
             "POST",
             f"/repos/{self.repository}/issues/{pr_number}/labels",
             {"labels": [name]},
             expected={200},
             authority=authority,
         )
+        if name in result_projection.native.NATIVE_LABELS and name not in observed:
+            raise GitHubApiError("native label add was not confirmed; repository label may be unavailable")
 
     def remove_owned_label(
         self,
@@ -938,16 +941,18 @@ class GitHubAppClient:
         *,
         authority: dict[str, Any] | None = None,
     ) -> None:
-        if name not in result_projection.OWNED_LABELS:
+        if name not in result_projection.PUBLICATION_LABELS:
             raise GitHubApiError("label is outside the Conductor-owned vocabulary")
         encoded = urllib.parse.quote(name, safe="")
-        self._mutate_label(
+        observed = self._mutate_label(
             "DELETE",
             f"/repos/{self.repository}/issues/{pr_number}/labels/{encoded}",
             None,
             expected={200, 204, 404},
             authority=authority,
         )
+        if name in result_projection.native.NATIVE_LABELS and name in observed:
+            raise GitHubApiError("native label removal was not confirmed")
 
     def add_ready_label(
         self, pr_number: int, *, authority: dict[str, Any] | None = None
@@ -1165,6 +1170,127 @@ def effective_quality(connection: sqlite3.Connection, row: sqlite3.Row, quality:
     return quality
 
 
+def accepted_clawsweeper_presentation(
+    config: dict[str, Any], connection: sqlite3.Connection, row: sqlite3.Row, quality: Any,
+) -> dict[str, Any] | None:
+    """Load only the ingested native report, never a nearby report or PR comment."""
+    # Legacy Blocks has no comprehensive epoch/actor contract. Do not backfill it.
+    if quality is None or not config.get("review_policy"):
+        return None
+    identity = {key: row[key] for key in ("repository", "pr_number", "base_sha", "head_sha", "review_epoch")}
+    if any(not core.same_typed_value(quality[key], value) for key, value in identity.items()):
+        raise RuntimeError("native quality does not match the current exact tuple")
+    events = connection.execute(
+        "SELECT payload_json FROM events WHERE kind='clawsweeper.terminal' "
+        "AND repository=? AND pr_number=? AND base_sha=? AND head_sha=? AND stale=0 ORDER BY sequence DESC",
+        tuple(identity[key] for key in ("repository", "pr_number", "base_sha", "head_sha")),
+    )
+    terminal = next((payload for event in events
+                     if isinstance((payload := json.loads(event["payload_json"])), dict)
+                     and core.same_typed_value(payload.get("review_epoch"), row["review_epoch"])), None)
+    if terminal is None or "proof_sha256" not in terminal:
+        return None  # Older accepted receipts are explicitly presentation-unavailable.
+    run_id = str(quality["workflow_run_id"])
+    result_projection.workflow_run_url(row["repository"], run_id)
+    actor = config["review_policy"]["reviewers"]["clawsweeper"]
+    if (str(terminal.get("workflow_run_id")) != run_id
+            or terminal.get("proof_sha256") != quality["report_sha256"]
+            or terminal.get("reviewer_actor") != actor
+            or terminal.get("review_scope") != "comprehensive"):
+        raise RuntimeError("native accepted receipt conflicts with publication evidence")
+    rail = connection.execute(
+        "SELECT * FROM rail_workflow_runs WHERE rail='clawsweeper' AND workflow_run_id=?", (run_id,),
+    ).fetchone()
+    if (rail is None or rail["status"] != "verdict_ingested"
+            or any(not core.same_typed_value(rail["bound_" + key], value) for key, value in identity.items())
+            or rail["proof_ref"] != terminal["proof_ref"]):
+        raise RuntimeError("native report has no accepted exact-tuple workflow binding")
+    root = Path(config["paths"]["proof_root"]).resolve(strict=True)
+    filename = f"{row['pr_number']}.md"
+    if Path(terminal["proof_ref"]) != root / "clawsweeper" / run_id / filename:
+        raise RuntimeError("native report path is outside the accepted run")
+    limit = result_projection.native.REPORT_MAX_BYTES
+    try:
+        with contextlib.ExitStack() as stack:
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            directory = os.open(root, flags)
+            stack.callback(os.close, directory)
+            for component in ("clawsweeper", run_id):
+                directory = os.open(component, flags, dir_fd=directory)
+                stack.callback(os.close, directory)
+            fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            stack.callback(os.close, fd)
+            metadata = os.fstat(fd)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > limit:
+                raise RuntimeError("native report is not a bounded regular file")
+            with os.fdopen(fd, "rb", closefd=False) as stream:
+                raw = stream.read(limit + 1)
+        text = raw.decode("utf-8")
+        return result_projection.native.parse_report(
+            text, {**identity, "artifact_digest": quality["report_sha256"]}, actor=actor,
+        )
+    except (OSError, UnicodeError, result_projection.native.PresentationError) as exc:
+        raise RuntimeError("native accepted report is missing, malformed, oversized or changed") from exc
+
+
+def journal_native_publication(connection: sqlite3.Connection, row: sqlite3.Row, plan: dict[str, Any]) -> None:
+    """Persist scoped ownership before writes, including interrupted publication."""
+    if result_projection.native.RICH_MARKER not in plan["comment"]["body"]:
+        return
+    identity = {key: row[key] for key in ("repository", "pr_number", "base_sha", "head_sha")}
+    event_id = "native-publication:" + hashlib.sha256(json.dumps(plan["identity"], sort_keys=True).encode()).hexdigest()
+    if not connection.execute("SELECT 1 FROM events WHERE event_id=?", (event_id,)).fetchone():
+        core.insert_event(
+            connection, event_id=event_id, kind="projection.native_publication", stale=False,
+            **identity, payload={"review_epoch": row["review_epoch"],
+                                 "artifact_digest": plan["identity"]["artifact_digest"],
+                                 "families": plan["native_label_families"]},
+        )
+        connection.commit()
+        connection.execute("BEGIN IMMEDIATE")
+    current = core.exact_current_head(connection, **identity)
+    if current is None or any(current[key] != row[key] for key in ("review_epoch", "state")):
+        raise RuntimeError("native publication changed while recording ownership")
+
+
+def retract_native_publication(connection: sqlite3.Connection, row: sqlite3.Row, client: Any) -> None:
+    """Retire only a journaled native projection; legacy/manual labels stay intact."""
+    events = connection.execute(
+        "SELECT payload_json FROM events WHERE kind='projection.native_publication' "
+        "AND repository=? AND pr_number=? AND base_sha=? AND head_sha=?",
+        tuple(row[key] for key in ("repository", "pr_number", "base_sha", "head_sha")),
+    )
+    families: set[str] = set()
+    journaled = False
+    for event in events:
+        payload = json.loads(event["payload_json"])
+        if not core.same_typed_value(payload.get("review_epoch"), row["review_epoch"]):
+            continue
+        journaled = True
+        for family in payload["families"]:
+            if family not in result_projection.native.FAMILIES:
+                raise RuntimeError("native publication ownership is malformed")
+            families.add(family)
+    if not journaled:
+        return
+    labels = set().union(*(result_projection.native.FAMILIES[name] for name in families))
+    # Existing repository maintenance guard remains on every cleanup operation.
+    for name in sorted(labels & set(client.list_issue_labels(row["pr_number"]))):
+        client.remove_owned_label(row["pr_number"], name)
+    issuer = client._app["app_id"] if hasattr(client, "_app") else result_projection.CONDUCTOR_ISSUER_APP_ID
+    for comment in client.list_issue_comments(row["pr_number"]):
+        if not result_projection.trusted_app_author(comment, issuer):
+            continue
+        marker = result_projection.parse_projection_marker(comment.get("body", ""))
+        if marker is None or marker["issuer_app_id"] != issuer or any(
+            marker[key] != row[key] for key in ("repository", "pr_number", "base_sha", "head_sha", "review_epoch")
+        ):
+            continue
+        notice = "> **Historical review — this tuple is closed or superseded, not current clearance.**\n\n"
+        if not comment["body"].startswith(notice):
+            client.update_issue_comment(comment["id"], notice + comment["body"])
+
+
 def accepted_openclaw_terminal(
     connection: sqlite3.Connection, row: sqlite3.Row
 ) -> dict[str, Any] | None:
@@ -1316,6 +1442,8 @@ def publish_accepted_github_projection(
     *,
     dry_run: bool,
     authority_kwargs: dict[str, Any],
+    native_report: dict[str, Any] | None = None,
+    before_apply: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any] | None:
     if not all(
         hasattr(client, name)
@@ -1376,9 +1504,12 @@ def publish_accepted_github_projection(
         reason=(quality["adjudication_reason"] if "adjudication_reason" in quality.keys()
                 else row["blocker"] or f"state {row['state']}"),
         workflow_run_id=quality["workflow_run_id"],
+        native_report=native_report,
     )
     if not plan["writes"]:
         return {**plan, "result": "unchanged"}
+    if before_apply is not None:
+        before_apply(plan)
     receipt = result_projection.apply_github_publication(
         client, plan, authority_kwargs=authority_kwargs
     )
@@ -1523,6 +1654,7 @@ def reconcile_superseded_projection(
             )
     if not ready_label_already_removed:
         remove_projected_status_labels(client, row["pr_number"])
+    retract_native_publication(connection, row, client)
     now = core.utc_now()
     connection.execute(
         """
@@ -1688,6 +1820,8 @@ def reconcile_projection(
                 ),
             }
             quality = effective_quality(connection, row, accepted_quality_row(connection, row))
+            # Validate publication bytes before any check/comment/label side effect.
+            native_report = accepted_clawsweeper_presentation(config, connection, row, quality)
             openclaw_terminal = accepted_openclaw_terminal(connection, row)
             if openclaw_terminal and "original_report" in openclaw_terminal:
                 openclaw_terminal["original_report"] = original_report_output(config, openclaw_terminal)
@@ -1880,6 +2014,8 @@ def reconcile_projection(
                     quality,
                     dry_run=False,
                     authority_kwargs=authority_kwargs,
+                    native_report=native_report,
+                    before_apply=lambda plan: journal_native_publication(connection, row, plan),
                 )
             projected.append(item)
         if dry_run:
@@ -2861,6 +2997,7 @@ def bridge_clawsweeper(config: dict[str, Any], artifact_path: Path) -> dict[str,
             "finding_count": finding_count,
             "reviewer_actor": artifact["reviewer_actor"],
             "proof_ref": str(proof),
+            "proof_sha256": artifact["proof_sha256"],
         }
         if config.get("review_policy"):
             event["review_scope"] = artifact["review_scope"]

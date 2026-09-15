@@ -1,0 +1,12 @@
+{
+  "base_commit": "8cefc3548d40b3868263cacd54a9568d51fbe67f",
+  "files": {
+    "Makefile": "90f27a3025e12ed0bb0a430f148ef339d94419209eea2f8c1a5aea3dd53a03e8",
+    "tools/clawsweeper_presentation.py": "c850abf56c684644cbac23241903b4ce71cefe7fd0540d719050415c92797b5c",
+    "tools/review_conductor.py": "471b51b2e9cf099fcb1931a787f20fad3e134afa236eb672a89178c8cafe1341",
+    "tools/review_conductor_runtime.py": "09254ee46d75d8e4aba1792dcfc2c647d695bc23962f1915c480b77686e95dc6",
+    "tools/review_result_projection.py": "82ee967ea908a40ad4841dfdf7d20b2c7595b73ef0bcd195594f22906e61c983",
+    "tests/test_clawsweeper_presentation.py": "3adae91058e57333a94ab71b0987e442cef2498cc6fbce06615379f501baee70",
+    "tests/fixtures/clawsweeper-rich-report.md": "e3f50107948fb599db190dedc4dfab3f9e36fde9287e7e252606bea002f56611"
+  }
+}

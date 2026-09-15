@@ -1,0 +1,27 @@
+{
+  "synthetic": true,
+  "native_labels": [
+    "P3",
+    "merge-risk: 🚨 automation",
+    "proof: sufficient",
+    "proof: 🎥 video",
+    "rating: 🐚 platinum hermit"
+  ],
+  "conductor_status_labels": [
+    "status: 👀 ready for maintainer look"
+  ],
+  "owned_families": [
+    "media",
+    "priority",
+    "proof",
+    "rating",
+    "risk"
+  ],
+  "preserve_examples": [
+    "docs",
+    "proof: override",
+    "rating: manual",
+    "merge-risk: custom"
+  ],
+  "fixture_sha256": "e3f50107948fb599db190dedc4dfab3f9e36fde9287e7e252606bea002f56611"
+}
