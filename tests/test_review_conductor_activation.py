@@ -613,7 +613,9 @@ def test_github_client_endpoint_and_credential_boundaries(root: Path) -> None:
             return 200, b'{"artifacts":[{"id":801,"name":"dinkuskit-native-review-800-1","expired":false}]}'
         if url.endswith("/actions/artifacts/801/zip") and method == "GET":
             return 200, b"bounded-zip-fixture"
-        if method == "PATCH" or url.endswith("/labels"):
+        if url.endswith("/labels"):
+            return 200, b'[{"name":"ready-for-human"}]'
+        if method == "PATCH":
             return 200, b"{}"
         return 204, b""
 

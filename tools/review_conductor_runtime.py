@@ -549,6 +549,10 @@ class GitHubAppClient:
                     f"allowlisted GitHub API operation failed transiently ({operation})"
                 )
             raise GitHubApiError(f"allowlisted GitHub API operation failed ({operation})")
+        if operation == "label-remove" and status in {204, 404}:
+            # Single-label removal is idempotent when already absent. Normalize
+            # only these statuses, never an object/empty successful HTTP 200.
+            raw = b"[]"
         return operation, response_headers, raw
 
     def _installation_token(self) -> str:
@@ -637,6 +641,36 @@ class GitHubAppClient:
         )
         return core.require_positive_int(response.get("id"), "GitHub check run id")
 
+    def needs_skipped_check_replacement(
+        self, check_id: int, name: str, head_sha: str, external_id: str, *,
+        authority: dict[str, Any] | None = None,
+    ) -> bool:
+        """Read-only migration probe; never reset a terminal conclusion."""
+        if name not in CHECK_NAMES:
+            raise GitHubApiError("check name is outside the fixed allowlist")
+        observed = self._call(
+            "GET", f"/repos/{self.repository}/check-runs/{check_id}", None,
+            expected={200}, authority=authority,
+        )
+        if (
+            type(observed.get("id")) is not int or observed["id"] != check_id
+            or observed.get("name") != name or observed.get("head_sha") != head_sha
+            or observed.get("external_id") != external_id
+            or not isinstance(observed.get("app"), dict)
+            or type(observed["app"].get("id")) is not int
+            or observed["app"]["id"] != self._app["app_id"]
+        ):
+            raise GitHubApiError("migration check does not match the owned exact check")
+        if observed.get("conclusion") == "skipped" and observed.get("status") in {
+            "completed", "queued", "in_progress",
+        }:
+            # A prior partial PATCH may already have changed status while leaving
+            # the terminal skip. It needs the same replacement, not another PATCH.
+            return True
+        if observed.get("status") == "completed" or observed.get("conclusion") is not None:
+            raise GitHubApiError("only a terminal skipped prerequisite check may be replaced")
+        return False
+
     def update_check(
         self,
         check_id: int,
@@ -670,10 +704,17 @@ class GitHubAppClient:
             ):
                 raise GitHubApiError("original report check page does not match the owned exact check")
             payload["details_url"] = url
-        self._call(
+        observed = self._call(
             "PATCH", f"/repos/{self.repository}/check-runs/{check_id}", payload,
             expected={200}, authority=authority,
         )
+        if state in {"queued", "in_progress"} and (
+            observed.get("status") != state or "conclusion" not in observed
+            or observed["conclusion"] is not None
+        ):
+            # An HTTP 200 is not proof that a previously terminal check resumed.
+            # Do not invent null-conclusion support or silently retain a skip.
+            raise GitHubApiError("GitHub did not confirm the requested nonterminal check state; operator recovery required")
 
     def _call_list(
         self,
@@ -809,6 +850,23 @@ class GitHubAppClient:
                 raise GitHubApiError("issue label list is malformed")
         return names
 
+    def _mutate_label(
+        self, method: str, path: str, payload: dict[str, Any] | None, *,
+        expected: set[int], authority: dict[str, Any] | None = None,
+    ) -> None:
+        _operation, raw = self._call_raw(
+            method, path, payload, expected=expected, authority=authority,
+        )
+        try:
+            labels = json.loads(raw)
+        except (ValueError, UnicodeError) as exc:
+            raise GitHubApiError("GitHub label mutation returned malformed JSON") from exc
+        if not isinstance(labels, list) or any(
+            not isinstance(label, dict) or not isinstance(label.get("name"), str)
+            for label in labels
+        ):
+            raise GitHubApiError("GitHub label mutation returned an unexpected payload shape")
+
     def add_owned_label(
         self,
         pr_number: int,
@@ -818,7 +876,7 @@ class GitHubAppClient:
     ) -> None:
         if name not in result_projection.OWNED_LABELS:
             raise GitHubApiError("label is outside the Conductor-owned vocabulary")
-        self._call(
+        self._mutate_label(
             "POST",
             f"/repos/{self.repository}/issues/{pr_number}/labels",
             {"labels": [name]},
@@ -836,7 +894,7 @@ class GitHubAppClient:
         if name not in result_projection.OWNED_LABELS:
             raise GitHubApiError("label is outside the Conductor-owned vocabulary")
         encoded = urllib.parse.quote(name, safe="")
-        self._call(
+        self._mutate_label(
             "DELETE",
             f"/repos/{self.repository}/issues/{pr_number}/labels/{encoded}",
             None,
@@ -847,7 +905,7 @@ class GitHubAppClient:
     def add_ready_label(
         self, pr_number: int, *, authority: dict[str, Any] | None = None
     ) -> None:
-        self._call(
+        self._mutate_label(
             "POST",
             f"/repos/{self.repository}/issues/{pr_number}/labels",
             {"labels": [READY_LABEL]},
@@ -859,7 +917,7 @@ class GitHubAppClient:
         self, pr_number: int, *, authority: dict[str, Any] | None = None
     ) -> None:
         encoded = urllib.parse.quote(READY_LABEL, safe="")
-        self._call(
+        self._mutate_label(
             "DELETE",
             f"/repos/{self.repository}/issues/{pr_number}/labels/{encoded}",
             None,
@@ -1597,6 +1655,38 @@ def reconcile_projection(
                 column, create_state_column = check_columns[name]
                 check_id = projection[column]
                 external_id = projection_external_id(row, name)
+                if (
+                    check_id is not None and check_state in {"queued", "in_progress"}
+                    and hasattr(client, "needs_skipped_check_replacement")
+                    and client.needs_skipped_check_replacement(
+                        check_id, name, row["head_sha"], external_id, **authority_kwargs,
+                    )
+                ):
+                    # Migrate only a verified owned terminal skip, not a verdict.
+                    # Preserve the old ID in durable audit evidence; the existing
+                    # uncertain-create claim fences the single replacement POST.
+                    core.insert_event(
+                        connection, event_id=f"check-skipped-replacement:{external_id}:{check_id}",
+                        kind="projection.skipped_check_replacement", stale=False,
+                        repository=row["repository"], pr_number=row["pr_number"],
+                        base_sha=row["base_sha"], head_sha=row["head_sha"],
+                        payload={"review_epoch": row["review_epoch"], "check_name": name,
+                                 "old_check_run_id": check_id, "external_id": external_id,
+                                 "old_conclusion": "skipped", "desired_state": check_state},
+                    )
+                    migrated = connection.execute(
+                        f"""UPDATE projections SET {column} = NULL,
+                          {create_state_column} = 'pending', updated_at = ?
+                        WHERE repository = ? AND pr_number = ? AND base_sha = ? AND head_sha = ?
+                          AND review_epoch = ? AND {column} = ?
+                          AND {create_state_column} = 'active'""",
+                        (core.utc_now(), row["repository"], row["pr_number"], row["base_sha"],
+                         row["head_sha"], row["review_epoch"], check_id),
+                    )
+                    if migrated.rowcount != 1:
+                        raise RuntimeError("skipped check migration lost its active ownership claim")
+                    check_id = None
+                    projection = ensure_projection_row(connection, row)
                 if check_id is None:
                     if projection[create_state_column] == "creating":
                         raise RuntimeError(
@@ -1666,6 +1756,8 @@ def reconcile_projection(
                             row["base_sha"], row["head_sha"], row["review_epoch"],
                         ),
                     )
+                    connection.commit()
+                    connection.execute("BEGIN IMMEDIATE")
                 else:
                     _invoke_check(
                         client,

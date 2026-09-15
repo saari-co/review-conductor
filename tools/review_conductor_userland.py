@@ -1209,6 +1209,53 @@ def materialize_failed_clawsweeper_terminal(
     }
 
 
+
+def fail_bound_clawsweeper_execution(
+    connection: sqlite3.Connection, rail_run: sqlite3.Row,
+) -> dict[str, Any] | None:
+    """Fail only an already-started exact execution; never infer a PR from time.
+
+    This records transport failure, not a reviewer terminal or content verdict.
+    The caller holds the write transaction used to retire the workflow receipt.
+    """
+    matches = connection.execute(
+        """
+        SELECT heads.* FROM heads JOIN actions
+          ON actions.repository = heads.repository
+         AND actions.pr_number = heads.pr_number
+         AND actions.base_sha = heads.base_sha AND actions.head_sha = heads.head_sha
+         AND actions.review_epoch = heads.review_epoch
+        WHERE heads.is_current = 1 AND heads.rail = 'clawsweeper'
+          AND heads.state = 'clawsweeper_running' AND heads.review_request_id = ?
+          AND actions.kind = 'clawsweeper.dispatch' AND actions.status = 'dispatched'
+        """,
+        (rail_run["workflow_run_id"],),
+    ).fetchall()
+    if len(matches) != 1:
+        return None
+    row = matches[0]
+    identity = {key: row[key] for key in ("repository", "pr_number", "base_sha", "head_sha")}
+    reason = f"ClawSweeper execution {rail_run['conclusion']}; no qualified verdict bundle; operator recovery required"
+    core.update_exact_head(connection, identity, state="clawsweeper_failed", blocker=reason)
+    connection.execute(
+        """
+        UPDATE rail_workflow_runs SET bound_repository = ?, bound_pr_number = ?,
+          bound_base_sha = ?, bound_head_sha = ?, bound_review_epoch = ?
+        WHERE rail = 'clawsweeper' AND workflow_run_id = ?
+          AND status = 'terminal_pending_verdict_bridge'
+        """,
+        (*identity.values(), row["review_epoch"], rail_run["workflow_run_id"]),
+    )
+    core.insert_event(
+        connection, event_id=f"clawsweeper-execution-failed:{rail_run['workflow_run_id']}",
+        kind="clawsweeper.execution_failed", stale=False,
+        payload={"workflow_run_id": rail_run["workflow_run_id"],
+                 "conclusion": rail_run["conclusion"], "review_epoch": row["review_epoch"],
+                 "verdict_available": False}, **identity,
+    )
+    return {**identity, "review_epoch": row["review_epoch"]}
+
+
 def collect_clawsweeper_terminals(
     config: dict[str, Any],
     client: runtime.GitHubAppClient | Any | None,
@@ -1254,6 +1301,8 @@ def collect_clawsweeper_terminals(
             )
             connection = core.open_database(Path(config["paths"]["state_root"]), config["github_app"]["repository"])
             try:
+                connection.execute("BEGIN IMMEDIATE")
+                bound_failure = fail_bound_clawsweeper_execution(connection, rail_run)
                 connection.execute(
                     """
                     UPDATE rail_workflow_runs SET status = 'terminal_attention_required'
@@ -1268,8 +1317,9 @@ def collect_clawsweeper_terminals(
             outcomes.append(
                 {
                     "workflow_run_id": run_id,
-                    "result": "rail_failure_alerted",
+                    "result": "bound_execution_failed" if bound_failure else "rail_failure_alerted",
                     "conclusion": rail_run["conclusion"],
+                    **({"binding": bound_failure} if bound_failure else {}),
                 }
             )
             continue
