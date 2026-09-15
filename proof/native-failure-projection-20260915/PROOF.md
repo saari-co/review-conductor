@@ -3,11 +3,14 @@
 ## Assignment and identity
 
 - Lane/type: bounded check-display and no-bundle execution-failure source repair.
-- Owner: `conductor_native_failure_projection`; closer/mutation handoff: root.
+- Owner: `conductor11_remove_unbound_overlay`; closer/mutation handoff: root.
 - Repository: `saari-co/review-conductor`.
 - Branch: `codex/native-failure-projection-20260915`.
 - Isolated worktree: `review-conductor-codex-openclaw-original-report-20260915-codex-native-failure-projection-20260915`.
-- Fresh fetched base: `84966d938f7b63f044c86ff07a510ac102aa754c`.
+- Original base: `84966d938f7b63f044c86ff07a510ac102aa754c`.
+- Fresh fetched and merged main: `bf44f69c42d75a74c57ab404361b403660d0239b`
+  (accepted PR #12 handoff and evidence-bound recovery preserved).
+- Status: bounded parent-adjudicated repair; source owner holds this branch only.
 - Allowed mode: source mutate only. Parent owns runtime and GitHub state.
 - Stop: tested commit/non-force push/draft PR and exact-head CI receipt. No
   review request, merge, deployment, credential access or protection changes.
@@ -25,13 +28,13 @@ receipt also has no run ID. Timing or a single pending PR does not prove identit
    and moves that head to `clawsweeper_failed`. This is an execution failure, not
    a review verdict. The run retains null verdict/proof fields. No content report,
    finding count, qualification or bridge artifact is manufactured.
-2. Without that binding, collection still must not guess a PR. Reconciliation
-   shows unresolved dispatched/unbound requests as `action_required`, stage
-   `collection_attention_required`, explicitly stating that the failed repository
-   run **is not bound to this PR**. The persisted head/action/verdict are unchanged.
-   This is conservative repository-level collection attention, not a per-PR
-   terminal claim. Pending-undispatched actions and bound/running/terminal heads
-   do not receive this overlay. It does not retry or adjudicate anything.
+2. Without that binding, collection must not guess a PR. The failed run and
+   repository-level alert remain recorded, but **no per-PR overlay is applied**.
+   The parent rejected the first candidate's `unbound_clawsweeper_attention`
+   fallback: any historical failure could put every later unbound dispatched PR
+   into action-required. The helper and both projection overrides are removed.
+   Pending and dispatched requests retain their own state-derived queued checks;
+   no finding, artifact or failed-run association is invented.
 3. Draft prerequisite waiting stays queued, not completed/skipped. A normal
    draft-to-ready transition on the same tuple/epoch therefore does not require
    resurrecting a terminal check. HTTP PATCH success alone is not confirmation:
@@ -40,17 +43,19 @@ receipt also has no run ID. Timing or a single pending PR does not prove identit
 
 The existing owned check IDs, exact-tuple mutation authority, issuer gates,
 uncertain-create fences, accepted-artifact publication and human merge policy
-remain intact. An existing skipped check can be updated terminally to explicit
-collection attention; no second check or invented run is created.
+remain intact. This repair does not revive existing terminal/skipped checks or
+modify stored check conclusions; unconfirmed nonterminal updates still fail closed.
 
 ## Evidence and tests
 
 Synthetic tests exercise real collector/state database, reconciliation and
 production check create/update methods with only GitHub transport replaced:
 
-- Unbound failure remains unbound but no longer projects as queued.
-- Existing skipped check updates to action_required using the same check ID;
-  no accepted artifact/content verdict is rendered.
+- The negative regression fails against the old overlay and passes after removal.
+- An existing request and a later fresh request both retain queued checks after
+  an unrelated unbound failure, in pending and dispatched states. Real projection
+  and injected-transport check output contain no unrelated run, verdict or artifact.
+- The failed run stays unbound, with null verdict/proof, and alerts remain available.
 - Exact started binding becomes failed without a verdict bundle.
 - Wrong run ID and stale epoch cannot terminalize the current request.
 - Repeated collection is idempotent; no reviewer artifacts are synthesized.
@@ -73,15 +78,15 @@ clearance is claimed by these deterministic tests.
 
 The root still owns actual failed-run diagnosis, qualified source deployment,
 explicit runtime recovery, and a genuine successful native review. This change
-cannot create the missing verdict. Unbound collection attention stays explicit
-until the actual request reaches a qualified terminal state or root performs
-supported recovery; the source does not silently discard an unresolved run.
+cannot create the missing verdict or attribute an unbound workflow to a PR.
+Repository-level failure records/alerts are retained. No dispatch correlation
+mechanism, live recovery, reviewer invocation, merge or deployment is added.
 
 ## Source hashes
 
-- `tools/review_conductor.py`: `b6bcfbeb124cb577acb0805109f99a99b741bee5882c9bcbae7da3289730807e`
-- `tools/review_conductor_runtime.py`: `af2452ed1d760cd5d99afd574b9825b9148df9e8b13c9b9720d8dae3cd310715`
+- `tools/review_conductor.py`: `4ac7aa2e911c97fdb7391f7ce46d8f16db8c783ce10208ed14fcad8348b8cfd7`
+- `tools/review_conductor_runtime.py`: `769a800d5a9afb65063d853fabcf5c9d8e1ea69155c18b672763300af6d6c1c1`
 - `tools/review_conductor_userland.py`: `37e5a2769089308c770a9488bde65978339093f1778741eed175655c9bee417b`
-- `tests/test_review_conductor_userland.py`: `8e84c5096f1b450650b33c0b8784ac762d03c2eb8df03745f7b626821c197230`
-- `tests/test_review_conductor_profiles.py`: `cb10897cc83936a5c28726c742d68311fb2b981c1e127e6ce8b335097d70ea50`
+- `tests/test_review_conductor_userland.py`: `7db248f2223192caf6653583b6bc93c28fb63e0d6f1b3d0df1a6c4290ba2d4df`
+- `tests/test_review_conductor_profiles.py`: `49efc0fb646f11e549263cc954ced0399592cab32597039968dda4372ec385d4`
 - `tests/test_openclaw_report_publication.py`: `1f3aad1793903a857511c5132e05930d8c4222980bb94722cf958c4d2373ab4c`

@@ -926,34 +926,55 @@ def test_unbound_clawsweeper_workflow_failure_alerts_without_guessing_a_pr() -> 
                 "conclusion": "failure",
             }
         ]
-        # Do not guess a terminal PR verdict, but do not tell GitHub it is
-        # still happily queued either: project explicitly unbound attention.
-        assert current(config, pr)["state"] == "clawsweeper_queued"
-        projected = runtime.reconcile_projection(config, None, pr_number=pr, dry_run=True)["projected"][0]
-        assert projected["visible_state"] == "clawsweeper_collection_attention"
-        assert projected["checks"]["ClawSweeper Review Rail"] == "action_required"
+        # A repository failure is not evidence about this PR or a later PR.
+        # Reconciliation must leave each unbound request queued, even after
+        # dispatch. The collector's repository-level alert remains available.
         from test_openclaw_report_publication import RecordingTransportClient
         client = RecordingTransportClient(config)
-        # Existing completed/skipped check is reused, not duplicated. Model a
-        # prior draft projection then run the real reconciliation/client code.
-        runtime.reconcile_projection(config, client, pr_number=pr)
-        claw_check = next(check for check in client.checks.values() if check["name"] == "ClawSweeper Review Rail")
-        claw_check.update(status="completed", conclusion="skipped")
-        runtime.reconcile_projection(config, client, pr_number=pr)
-        assert claw_check["status"] == "completed" and claw_check["conclusion"] == "action_required"
-        assert "not bound to this PR" in claw_check["output"]["summary"]
-        assert "Accepted artifact:" not in claw_check["output"]["summary"]
-        assert "Review content:" not in claw_check["output"]["summary"]
-        assert len(client.checks) == 2
+        for candidate in (pr, pr + 1):
+            if candidate != pr:
+                prepare_openclaw(config, root, candidate)
+            for dispatched in (False, True):
+                candidate_action = action(config, candidate, "clawsweeper.dispatch")
+                connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+                try:
+                    connection.execute(
+                        "UPDATE actions SET status = ? WHERE action_id = ?",
+                        ("dispatched" if dispatched else "pending", candidate_action["action_id"]),
+                    )
+                    connection.commit()
+                finally:
+                    connection.close()
+                before = dict(current(config, candidate))
+                expected = core.state_projection(before)
+                projected = runtime.reconcile_projection(
+                    config, None, pr_number=candidate, dry_run=True,
+                )["projected"][0]
+                assert projected["visible_state"] == expected["visible_state"]
+                assert projected["checks"]["ClawSweeper Review Rail"] == "queued"
+                runtime.reconcile_projection(config, client, pr_number=candidate)
+                check = next(
+                    check for check in client.checks.values()
+                    if check["name"] == "ClawSweeper Review Rail"
+                    and check["external_id"] == runtime.projection_external_id(
+                        before, "ClawSweeper Review Rail",
+                    )
+                )
+                assert check["status"] == "queued" and check.get("conclusion") is None
+                assert str(run_id) not in check["output"]["summary"]
+                assert "collection_attention_required" not in check["output"]["summary"]
+                assert "Accepted artifact:" not in check["output"]["summary"]
+                assert "Review content:" not in check["output"]["summary"]
+                assert dict(current(config, candidate)) == before
+        assert len(client.checks) == 4
         connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
         try:
-            attention = runtime.unbound_clawsweeper_attention(connection, current(config, pr))
-            assert "not bound to this PR" in attention["reason"]
-            assert "workflow_run_id" not in attention and "content_verdict" not in attention
-            # An action that has not dispatched is not held by someone else's run.
-            row = current(config, pr)
-            connection.execute("UPDATE actions SET status = 'pending' WHERE action_id = ?", (claw_action["action_id"],))
-            assert runtime.unbound_clawsweeper_attention(connection, row) is None
+            failed = connection.execute(
+                "SELECT * FROM rail_workflow_runs WHERE workflow_run_id = ?", (str(run_id),),
+            ).fetchone()
+            assert failed["status"] == "terminal_attention_required"
+            assert failed["bound_repository"] is None and failed["bound_pr_number"] is None
+            assert failed["verdict"] is None and failed["proof_ref"] is None
         finally:
             connection.close()
         notifier = FakeNotifier()
