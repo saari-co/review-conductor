@@ -102,9 +102,13 @@ new App per repository.
 
 Reviewer services own their native detailed findings and comments. Only the
 Conductor publishes the authoritative rail check names after validating the
-corresponding exact-revision evidence. Fence the previous writer before a
-cutover; never operate competing authoritative writers. Dashboard clients are
-read-only and no check result grants merge authority.
+corresponding exact-revision evidence. Accepted native results may also project
+one idempotent PR summary and ClawSweeper status labels the Conductor owns.
+Check output must name the current stage, decision reason, exact head, workflow
+run, and accepted artifact digest. Review-success is not merge authorization.
+Fence the previous writer before a cutover; never operate competing
+authoritative writers. Dashboard clients are read-only and no check result
+grants merge authority.
 
 ## Gateway/client contract (planned; no server or plugin installed)
 

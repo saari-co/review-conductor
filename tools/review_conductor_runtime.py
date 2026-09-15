@@ -15,6 +15,7 @@ import copy
 import contextlib
 import datetime as dt
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -37,6 +38,7 @@ TOOLS = Path(__file__).resolve().parent
 if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 import review_conductor as core  # noqa: E402
+import review_result_projection as result_projection  # noqa: E402
 
 
 UTC = getattr(dt, "UTC", dt.timezone.utc)
@@ -72,6 +74,7 @@ API_VERSION = "2022-11-28"
 # GitHub statuses that describe a transient upstream condition rather than a
 # rejected operation; callers may retry without changing the request.
 TRANSIENT_STATUSES = frozenset({429, 500, 502, 503, 504})
+MAX_LIST_PAGES = 10
 FIXED_GIT = Path("/usr/bin/git")
 
 
@@ -417,6 +420,10 @@ class GitHubAppClient:
             ),
             ("POST", rf"/repos/{repository}/issues/[1-9][0-9]*/labels", "label-add"),
             ("DELETE", rf"/repos/{repository}/issues/[1-9][0-9]*/labels/.+", "label-remove"),
+            ("GET", rf"/repos/{repository}/issues/[1-9][0-9]*/labels(?:\?per_page=100(?:&page=[1-9][0-9]*)?)?", "label-list"),
+            ("GET", rf"/repos/{repository}/issues/[1-9][0-9]*/comments(?:\?per_page=100(?:&page=[1-9][0-9]*)?)?", "comment-list"),
+            ("POST", rf"/repos/{repository}/issues/[1-9][0-9]*/comments", "comment-create"),
+            ("PATCH", rf"/repos/{repository}/issues/comments/[1-9][0-9]*", "comment-update"),
             (
                 "POST",
                 rf"/repos/{repository}/actions/workflows/{re.escape(self._clawsweeper['workflow_id'])}/dispatches",
@@ -476,6 +483,26 @@ class GitHubAppClient:
         app_jwt: str | None = None,
         authority: dict[str, Any] | None = None,
     ) -> tuple[str, bytes]:
+        operation, _response_headers, raw = self._call_raw_response(
+            method,
+            path,
+            payload,
+            expected=expected,
+            app_jwt=app_jwt,
+            authority=authority,
+        )
+        return operation, raw
+
+    def _call_raw_response(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+        *,
+        expected: set[int],
+        app_jwt: str | None = None,
+        authority: dict[str, Any] | None = None,
+    ) -> tuple[str, dict[str, str], bytes]:
         operation = self._allow(method, path)
         token = app_jwt if operation == "installation-token" else self._installation_token()
         headers = {
@@ -521,7 +548,7 @@ class GitHubAppClient:
                     f"allowlisted GitHub API operation failed transiently ({operation})"
                 )
             raise GitHubApiError(f"allowlisted GitHub API operation failed ({operation})")
-        return operation, raw
+        return operation, response_headers, raw
 
     def _installation_token(self) -> str:
         if self._token is not None and self._clock() < self._token_expires - 60:
@@ -595,10 +622,11 @@ class GitHubAppClient:
         state: str,
         *,
         authority: dict[str, Any] | None = None,
+        report: dict[str, Any] | None = None,
     ) -> int:
         if name not in CHECK_NAMES:
             raise GitHubApiError("check name is outside the fixed allowlist")
-        payload = check_payload(name, head_sha, external_id, state)
+        payload = check_payload(name, head_sha, external_id, state, report=report)
         response = self._call(
             "POST",
             f"/repos/{self.repository}/check-runs",
@@ -617,14 +645,184 @@ class GitHubAppClient:
         state: str,
         *,
         authority: dict[str, Any] | None = None,
+        report: dict[str, Any] | None = None,
     ) -> None:
         if name not in CHECK_NAMES:
             raise GitHubApiError("check name is outside the fixed allowlist")
         self._call(
             "PATCH",
             f"/repos/{self.repository}/check-runs/{check_id}",
-            check_payload(name, head_sha, external_id, state),
+            check_payload(name, head_sha, external_id, state, report=report),
             expected={200},
+            authority=authority,
+        )
+
+    def _call_list(
+        self,
+        method: str,
+        path: str,
+        *,
+        authority: dict[str, Any] | None = None,
+    ) -> list[Any]:
+        items: list[Any] = []
+        current = path
+        seen: set[str] = set()
+        for _page in range(MAX_LIST_PAGES + 1):
+            if current in seen:
+                raise GitHubApiError("GitHub list pagination looped")
+            seen.add(current)
+            operation, response_headers, raw = self._call_raw_response(
+                method, current, None, expected={200}, authority=authority
+            )
+            del operation
+            try:
+                decoded = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise GitHubApiError("GitHub API returned malformed JSON") from exc
+            if not isinstance(decoded, list):
+                raise GitHubApiError("GitHub API returned an unexpected payload shape")
+            items.extend(decoded)
+            nxt = self._next_list_path(current, response_headers)
+            if nxt is None:
+                return items
+            if _page == MAX_LIST_PAGES - 1:
+                raise GitHubApiError("GitHub list pagination exceeded the bounded page count")
+            current = nxt
+        raise GitHubApiError("GitHub list pagination exceeded the bounded page count")
+
+    def _next_list_path(self, current_path: str, response_headers: dict[str, str]) -> str | None:
+        link = header_value(response_headers, "Link")
+        if not link:
+            return None
+        next_url = None
+        for part in link.split(","):
+            piece = part.strip()
+            if 'rel="next"' not in piece:
+                continue
+            match = re.fullmatch(r"<([^>]+)>;\s*rel=\"next\"", piece)
+            if match is None:
+                raise GitHubApiError("GitHub list pagination Link header is malformed")
+            if next_url is not None:
+                raise GitHubApiError("GitHub list pagination Link header is ambiguous")
+            next_url = match.group(1)
+        if next_url is None:
+            return None
+        try:
+            parsed = urllib.parse.urlsplit(next_url)
+        except ValueError as exc:
+            raise GitHubApiError("GitHub list pagination URL is invalid") from exc
+        api = urllib.parse.urlsplit(self._app["api_base"])
+        if (
+            parsed.scheme != api.scheme
+            or parsed.netloc != api.netloc
+            or parsed.fragment
+            or not parsed.path
+        ):
+            raise GitHubApiError("GitHub list pagination left the allowlisted API origin")
+        path = parsed.path
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+        self._allow("GET", path)
+        if path == current_path:
+            raise GitHubApiError("GitHub list pagination looped")
+        return path
+
+    def list_issue_comments(
+        self, pr_number: int, *, authority: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        items = self._call_list(
+            "GET",
+            f"/repos/{self.repository}/issues/{pr_number}/comments?per_page=100",
+            authority=authority,
+        )
+        comments: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                raise GitHubApiError("issue comment list is malformed")
+            comments.append(item)
+        return comments
+
+    def create_issue_comment(
+        self,
+        pr_number: int,
+        body: str,
+        *,
+        authority: dict[str, Any] | None = None,
+    ) -> int:
+        response = self._call(
+            "POST",
+            f"/repos/{self.repository}/issues/{pr_number}/comments",
+            {"body": body},
+            expected={201},
+            authority=authority,
+        )
+        return core.require_positive_int(response.get("id"), "GitHub comment id")
+
+    def update_issue_comment(
+        self,
+        comment_id: int,
+        body: str,
+        *,
+        authority: dict[str, Any] | None = None,
+    ) -> None:
+        self._call(
+            "PATCH",
+            f"/repos/{self.repository}/issues/comments/{comment_id}",
+            {"body": body},
+            expected={200},
+            authority=authority,
+        )
+
+    def list_issue_labels(
+        self, pr_number: int, *, authority: dict[str, Any] | None = None
+    ) -> list[str]:
+        items = self._call_list(
+            "GET",
+            f"/repos/{self.repository}/issues/{pr_number}/labels?per_page=100",
+            authority=authority,
+        )
+        names: list[str] = []
+        for item in items:
+            if isinstance(item, dict) and isinstance(item.get("name"), str):
+                names.append(item["name"])
+            elif isinstance(item, str):
+                names.append(item)
+            else:
+                raise GitHubApiError("issue label list is malformed")
+        return names
+
+    def add_owned_label(
+        self,
+        pr_number: int,
+        name: str,
+        *,
+        authority: dict[str, Any] | None = None,
+    ) -> None:
+        if name not in result_projection.OWNED_LABELS:
+            raise GitHubApiError("label is outside the Conductor-owned vocabulary")
+        self._call(
+            "POST",
+            f"/repos/{self.repository}/issues/{pr_number}/labels",
+            {"labels": [name]},
+            expected={200},
+            authority=authority,
+        )
+
+    def remove_owned_label(
+        self,
+        pr_number: int,
+        name: str,
+        *,
+        authority: dict[str, Any] | None = None,
+    ) -> None:
+        if name not in result_projection.OWNED_LABELS:
+            raise GitHubApiError("label is outside the Conductor-owned vocabulary")
+        encoded = urllib.parse.quote(name, safe="")
+        self._call(
+            "DELETE",
+            f"/repos/{self.repository}/issues/{pr_number}/labels/{encoded}",
+            None,
+            expected={200, 204, 404},
             authority=authority,
         )
 
@@ -714,7 +912,14 @@ class GitHubAppClient:
         return raw
 
 
-def check_payload(name: str, head_sha: str, external_id: str, state: str) -> dict[str, Any]:
+def check_payload(
+    name: str,
+    head_sha: str,
+    external_id: str,
+    state: str,
+    *,
+    report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     core.require_sha(head_sha, "check head_sha")
     if state not in {
         "queued",
@@ -726,40 +931,339 @@ def check_payload(name: str, head_sha: str, external_id: str, state: str) -> dic
         "cancelled",
     }:
         raise RuntimeError("check projection state is unsupported")
-    if state == "queued":
-        return {
-            "name": name,
-            "head_sha": head_sha,
-            "external_id": external_id,
-            "status": "queued",
-            "output": {
-                "title": name,
-                "summary": "Waiting for the exact prerequisite or Review Rail dispatch.",
-            },
-        }
-    if state == "in_progress":
-        return {
-            "name": name,
-            "head_sha": head_sha,
-            "external_id": external_id,
-            "status": "in_progress",
-            "output": {"title": name, "summary": "The exact-head Review Rail is running."},
-        }
-    summaries = {
+    fallback = {
+        "queued": "Waiting for the exact prerequisite or Review Rail dispatch.",
+        "in_progress": "The exact-head Review Rail is running.",
         "success": "The exact-head Review Rail completed cleanly.",
         "failure": "The exact-head Review Rail reached a terminal failure.",
         "action_required": "The exact-head Review Rail requires adjudication or recovery.",
         "skipped": "This rail was not dispatched because an exact prerequisite did not succeed or the tuple was superseded.",
         "cancelled": "This exact tuple was cancelled because the pull request closed.",
     }
-    return {
+    output = {
+        "title": name,
+        "summary": f"{fallback[state]} Exact head {head_sha}.",
+    }
+    payload: dict[str, Any] = {
         "name": name,
         "head_sha": head_sha,
         "external_id": external_id,
-        "status": "completed",
-        "conclusion": state,
-        "output": {"title": name, "summary": summaries[state]},
     }
+    if report:
+        rendered = result_projection.check_output(
+            name,
+            state,
+            repository=report["repository"],
+            pr_number=int(report["pr_number"]),
+            head_sha=head_sha,
+            stage=report.get("stage"),
+            content_verdict=report.get("content_verdict"),
+            process_gates=report.get("process_gates"),
+            reason=report.get("reason"),
+            workflow_run_id=report.get("workflow_run_id"),
+            artifact_digest=report.get("artifact_digest"),
+            report_url=report.get("report_url"),
+            request_id=report.get("request_id"),
+        )
+        output = {"title": rendered["title"], "summary": rendered["summary"], "text": rendered["text"]}
+        if rendered.get("details_url"):
+            payload["details_url"] = rendered["details_url"]
+    if state == "queued":
+        payload["status"] = "queued"
+        payload["output"] = output
+        return payload
+    if state == "in_progress":
+        payload["status"] = "in_progress"
+        payload["output"] = output
+        return payload
+    payload["status"] = "completed"
+    payload["conclusion"] = state
+    payload["output"] = output
+    return payload
+
+
+def accepted_quality_row(connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any] | None:
+    tables = {
+        name
+        for (name,) in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    if "clawsweeper_quality" not in tables:
+        return None
+    quality = connection.execute(
+        """
+        SELECT * FROM clawsweeper_quality
+        WHERE repository = ? AND pr_number = ? AND base_sha = ? AND head_sha = ?
+          AND review_epoch = ?
+        """,
+        (
+            row["repository"], row["pr_number"], row["base_sha"], row["head_sha"],
+            row["review_epoch"],
+        ),
+    ).fetchone()
+    if quality is None:
+        return None
+    # Reconciliation may run before a collector migrates an old database.
+    result = dict(quality)
+    result.setdefault("content_verdict", None)
+    result.setdefault("process_gates_json", None)
+    return result
+
+
+def effective_quality(connection: sqlite3.Connection, row: sqlite3.Row, quality: Any) -> Any:
+    if quality is None or row["state"] != "ready_for_human_merge":
+        return quality
+    events = connection.execute(
+        "SELECT event_id, payload_json FROM events WHERE kind='adjudication.completed' "
+        "AND repository=? AND pr_number=? AND base_sha=? AND head_sha=? AND stale=0 "
+        "ORDER BY sequence DESC",
+        (row["repository"], row["pr_number"], row["base_sha"], row["head_sha"]),
+    )
+    for event in events:
+        payload = json.loads(event["payload_json"])
+        if (type(payload.get("review_epoch")) is not int
+                or payload["review_epoch"] != row["review_epoch"]
+                or payload.get("rail") != "clawsweeper"
+                or payload.get("request_id") != row["review_request_id"]):
+            continue
+        dispositions = payload.get("classifications")
+        if not isinstance(dispositions, list) or not dispositions or not set(dispositions) <= {"reject_false_positive", "defer"}:
+            return quality
+        result = dict(quality)
+        result["adjudication_reason"] = (
+            f"Original review content: {quality['content_verdict'] or 'unclassified'}; "
+            f"effective disposition: {', '.join(dispositions)} (event {str(event['event_id'])[:48]})"
+        )
+        result["content_verdict"] = result_projection.CONTENT_CLEAN
+        result["process_gates_json"] = json.dumps([result_projection.PROCESS_OWNER_MERGE])
+        return result
+    return quality
+
+
+def accepted_openclaw_terminal(
+    connection: sqlite3.Connection, row: sqlite3.Row
+) -> dict[str, Any] | None:
+    tables = {
+        name
+        for (name,) in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    if "events" not in tables:
+        return None
+    found = connection.execute(
+        """
+        SELECT payload_json FROM events
+        WHERE kind = 'openclaw.terminal'
+          AND repository = ? AND pr_number = ? AND base_sha = ? AND head_sha = ?
+          AND stale = 0
+        ORDER BY sequence DESC
+        """,
+        (
+            row["repository"], row["pr_number"], row["base_sha"], row["head_sha"],
+        ),
+    )
+    payload = None
+    for candidate in found:
+        decoded = json.loads(candidate["payload_json"])
+        if (isinstance(decoded, dict)
+                and type(decoded.get("review_epoch")) is int
+                and decoded["review_epoch"] == row["review_epoch"]):
+            payload = decoded
+            break
+    if payload is None:
+        return None
+    terminal: dict[str, Any] = {}
+    request_id = payload.get("request_id")
+    if isinstance(request_id, str) and request_id:
+        terminal["request_id"] = request_id
+    result = payload.get("result")
+    if isinstance(result, str) and result:
+        terminal["result"] = result
+    proof_sha = payload.get("proof_sha256")
+    if isinstance(proof_sha, str) and proof_sha:
+        terminal["proof_sha256"] = proof_sha
+    artifact_digest = payload.get("artifact_digest") or payload.get("artifact_sha256")
+    if isinstance(artifact_digest, str) and artifact_digest:
+        terminal["artifact_digest"] = artifact_digest
+    report_url = payload.get("report_url")
+    if isinstance(report_url, str) and report_url:
+        terminal["report_url"] = report_url
+    return terminal or None
+
+
+def projection_check_report(
+    row: sqlite3.Row,
+    quality: sqlite3.Row | None = None,
+    *,
+    check_name: str,
+    check_state: str | None = None,
+    openclaw_terminal: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if check_name not in CHECK_NAMES:
+        raise RuntimeError("check name is outside the fixed allowlist")
+    report: dict[str, Any] = {
+        "repository": row["repository"],
+        "pr_number": row["pr_number"],
+        "stage": check_state or row["state"],
+        "reason": row["blocker"] or f"state {row['state']}",
+    }
+    if check_name == "OpenClaw Review Rail":
+        report["stage"] = (
+            "openclaw_completed"
+            if check_state == "success"
+            else (check_state or row["state"])
+        )
+        if openclaw_terminal:
+            if openclaw_terminal.get("request_id"):
+                report["request_id"] = openclaw_terminal["request_id"]
+                report["reason"] = (
+                    f"OpenClaw {openclaw_terminal.get('result') or check_state} "
+                    f"for {openclaw_terminal['request_id']}"
+                )
+            digest = openclaw_terminal.get("artifact_digest") or openclaw_terminal.get("proof_sha256")
+            if digest:
+                report["artifact_digest"] = digest
+            if openclaw_terminal.get("report_url"):
+                report["report_url"] = openclaw_terminal["report_url"]
+            result = openclaw_terminal.get("result")
+            if result == "clean":
+                report["content_verdict"] = result_projection.CONTENT_CLEAN
+            elif result == "findings":
+                report["content_verdict"] = result_projection.CONTENT_FINDINGS
+            elif result == "failed":
+                report["content_verdict"] = result_projection.CONTENT_FAILED
+            elif result == "human_gate":
+                report["content_verdict"] = result_projection.CONTENT_HUMAN_POLICY
+        return report
+    request_id = row["review_request_id"]
+    if row["rail"] == "clawsweeper" and request_id and str(request_id).isdigit():
+        report["workflow_run_id"] = str(request_id)
+        report["report_url"] = result_projection.workflow_run_url(
+            row["repository"], str(request_id)
+        )
+    if quality is not None:
+        if "adjudication_reason" in quality.keys():
+            report["reason"] = quality["adjudication_reason"]
+        report["artifact_digest"] = quality["report_sha256"]
+        report["workflow_run_id"] = quality["workflow_run_id"]
+        run_url = result_projection.workflow_run_url(
+            row["repository"], quality["workflow_run_id"]
+        )
+        if run_url:
+            report["report_url"] = run_url
+        if quality["content_verdict"]:
+            report["content_verdict"] = quality["content_verdict"]
+        if quality["process_gates_json"]:
+            report["process_gates"] = json.loads(quality["process_gates_json"])
+    return report
+
+
+def _invoke_check(
+    client: Any,
+    method: str,
+    *positional: Any,
+    report: dict[str, Any] | None,
+    authority_kwargs: dict[str, Any],
+) -> Any:
+    target = getattr(client, method)
+    # Bind before any side effect. An exception inside the client must never
+    # trigger a second non-idempotent check creation.
+    signature = inspect.signature(target)
+    kwargs = dict(authority_kwargs)
+    if "report" in signature.parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    ):
+        kwargs["report"] = report
+    signature.bind(*positional, **kwargs)
+    return target(*positional, **kwargs)
+
+
+def publish_accepted_github_projection(
+    client: Any,
+    row: sqlite3.Row,
+    quality: sqlite3.Row,
+    *,
+    dry_run: bool,
+    authority_kwargs: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not all(
+        hasattr(client, name)
+        for name in (
+            "list_issue_comments",
+            "list_issue_labels",
+            "create_issue_comment",
+            "update_issue_comment",
+            "add_owned_label",
+            "remove_owned_label",
+        )
+    ):
+        return None
+    issuer = client._app.get("app_id") if hasattr(client, "_app") else result_projection.CONDUCTOR_ISSUER_APP_ID
+    identity = result_projection.bind_accepted_artifact(
+        repository=row["repository"],
+        pr_number=int(row["pr_number"]),
+        base_sha=row["base_sha"],
+        head_sha=row["head_sha"],
+        review_epoch=int(row["review_epoch"]),
+        issuer_app_id=int(issuer),
+        artifact_digest=quality["report_sha256"],
+        expected={
+            "repository": row["repository"],
+            "pr_number": int(row["pr_number"]),
+            "base_sha": row["base_sha"],
+            "head_sha": row["head_sha"],
+            "review_epoch": int(row["review_epoch"]),
+            "issuer_app_id": int(issuer),
+            "artifact_digest": quality["report_sha256"],
+        },
+    )
+    gates = json.loads(quality["process_gates_json"] or "[]")
+    classification = {
+        "content_verdict": quality["content_verdict"] or CONTENT_FROM_STATE.get(row["state"], "human_policy"),
+        "process_gates": gates,
+        "rail_result": "clean" if row["state"] == "ready_for_human_merge" else "human_gate",
+        "merge_authorized": False,
+        "merge_policy": "human_only",
+        "own_current_check_circular": result_projection.PROCESS_OWN_CHECK in gates,
+        "native_decision": None,
+    }
+    if dry_run:
+        return {
+            "schema": "smoky.review-conductor.github-publication.v1",
+            "result": "planned",
+            "identity": identity,
+            "classification": classification,
+        }
+    comments = client.list_issue_comments(row["pr_number"], **authority_kwargs)
+    labels = client.list_issue_labels(row["pr_number"], **authority_kwargs)
+    plan = result_projection.plan_github_publication(
+        identity=identity,
+        classification=classification,
+        existing_comments=comments,
+        existing_labels=labels,
+        stage=row["state"],
+        reason=(quality["adjudication_reason"] if "adjudication_reason" in quality.keys()
+                else row["blocker"] or f"state {row['state']}"),
+        workflow_run_id=quality["workflow_run_id"],
+    )
+    if not plan["writes"]:
+        return {**plan, "result": "unchanged"}
+    receipt = result_projection.apply_github_publication(
+        client, plan, authority_kwargs=authority_kwargs
+    )
+    return {**plan, "result": "published", "receipt": receipt}
+
+
+CONTENT_FROM_STATE = {
+    "ready_for_human_merge": result_projection.CONTENT_CLEAN,
+    "awaiting_adjudication": result_projection.CONTENT_FINDINGS,
+    "openclaw_failed": result_projection.CONTENT_FAILED,
+    "clawsweeper_failed": result_projection.CONTENT_FAILED,
+    "waiting_human": result_projection.CONTENT_HUMAN_POLICY,
+}
 
 
 def projection_external_id(row: sqlite3.Row, check_name: str) -> str:
@@ -827,6 +1331,21 @@ def superseded_projection_rows(
     return connection.execute(query, params).fetchall()
 
 
+def remove_projected_status_labels(client: Any, pr_number: int) -> None:
+    """Retract the reserved projection vocabulary as repository maintenance.
+
+    This negative cleanup deliberately has no live-tuple authority: its owner
+    may already be closed or superseded. The client's existing maintenance
+    guard still checks current enrollment before each DELETE.
+    """
+    client.remove_ready_label(pr_number)
+    remove = getattr(client, "remove_owned_label", None)
+    if callable(remove):
+        for name in sorted(result_projection.OWNED_LABELS):
+            if name != READY_LABEL:
+                remove(pr_number, name)
+
+
 def reconcile_superseded_projection(
     connection: sqlite3.Connection,
     row: sqlite3.Row,
@@ -874,8 +1393,8 @@ def reconcile_superseded_projection(
             raise RuntimeError(
                 f"superseded {name} creation outcome is uncertain and requires reconciliation"
             )
-    if conclusion == "cancelled" and bool(row["ready_label_applied"]) and not ready_label_already_removed:
-        client.remove_ready_label(row["pr_number"])
+    if not ready_label_already_removed:
+        remove_projected_status_labels(client, row["pr_number"])
     now = core.utc_now()
     connection.execute(
         """
@@ -938,7 +1457,7 @@ def reconcile_projection(
         closed = connection.execute(closed_query, closed_params).fetchall()
         for closed_head in closed:
             if not dry_run:
-                client.remove_ready_label(closed_head["pr_number"])
+                remove_projected_status_labels(client, closed_head["pr_number"])
             closed_projection = connection.execute(
                 """
                 SELECT * FROM projections
@@ -1040,7 +1559,16 @@ def reconcile_projection(
                     "clawsweeper_check_create_state",
                 ),
             }
+            quality = effective_quality(connection, row, accepted_quality_row(connection, row))
+            openclaw_terminal = accepted_openclaw_terminal(connection, row)
             for name, check_state in state["checks"].items():
+                check_report = projection_check_report(
+                    row,
+                    quality,
+                    check_name=name,
+                    check_state=check_state,
+                    openclaw_terminal=openclaw_terminal,
+                )
                 column, create_state_column = check_columns[name]
                 check_id = projection[column]
                 external_id = projection_external_id(row, name)
@@ -1073,12 +1601,15 @@ def reconcile_projection(
                     if current is None or int(current["review_epoch"]) != row["review_epoch"]:
                         raise RuntimeError("check creation claim became stale before projection")
                     try:
-                        check_id = client.create_check(
+                        check_id = _invoke_check(
+                            client,
+                            "create_check",
                             name,
                             row["head_sha"],
                             external_id,
                             check_state,
-                            **authority_kwargs,
+                            report=check_report,
+                            authority_kwargs=authority_kwargs,
                         )
                     except core.AuthorityDenied:
                         connection.execute(
@@ -1111,13 +1642,16 @@ def reconcile_projection(
                         ),
                     )
                 else:
-                    client.update_check(
+                    _invoke_check(
+                        client,
+                        "update_check",
                         check_id,
                         name,
                         row["head_sha"],
                         external_id,
                         check_state,
-                        **authority_kwargs,
+                        report=check_report,
+                        authority_kwargs=authority_kwargs,
                     )
             desired = bool(state["ready_for_human_label"])
             label_action = item["ready_label_action"]
@@ -1164,6 +1698,25 @@ def reconcile_projection(
                 ).fetchone()[0]
                 for name, (column, _create_state_column) in check_columns.items()
             }
+            if (
+                quality is not None
+                and quality["content_verdict"]
+                and row["state"]
+                in {
+                    "ready_for_human_merge",
+                    "awaiting_adjudication",
+                    "waiting_human",
+                    "openclaw_failed",
+                    "clawsweeper_failed",
+                }
+            ):
+                item["publication"] = publish_accepted_github_projection(
+                    client,
+                    row,
+                    quality,
+                    dry_run=False,
+                    authority_kwargs=authority_kwargs,
+                )
             projected.append(item)
         if dry_run:
             connection.rollback()
@@ -1928,6 +2481,9 @@ def bridge_openclaw(config: dict[str, Any], artifact_path: Path) -> dict[str, An
             "finding_count": finding_count,
             "reviewer_actor": artifact["reviewer_actor"],
             "proof_ref": str(proof),
+            "proof_sha256": artifact["proof_sha256"],
+            "artifact_digest": artifact_digest,
+            "review_epoch": artifact["review_epoch"],
         }
         if config.get("review_policy"):
             event["review_scope"] = artifact["review_scope"]

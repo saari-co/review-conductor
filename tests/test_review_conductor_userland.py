@@ -236,6 +236,9 @@ def claw_bundle(
     proof_status: str = "sufficient",
     maintainer_required: bool = False,
     finding: bool = False,
+    decision: str | None = None,
+    process_gates: list[str] | None = None,
+    needs_contributor_action: bool = False,
 ) -> bytes:
     finding_text = (
         "\n## Review Findings\n\n- **[P1] Fix the exact regression:** `src/example.ts:1`\n  - body: bounded fixture finding\n"
@@ -254,6 +257,7 @@ def claw_bundle(
             f"pr_rating_overall: {overall}",
             f"pr_rating_proof: {proof}",
             f"real_behavior_proof_status: {proof_status}",
+            f"real_behavior_proof_needs_contributor_action: {str(needs_contributor_action).lower()}",
             "maintainer_decision: "
             + json.dumps(
                 {
@@ -261,6 +265,19 @@ def claw_bundle(
                     "kind": "manual_review" if maintainer_required else "none",
                 },
                 separators=(",", ":"),
+            ),
+            *(
+                [f"decision: {decision}"]
+                if decision
+                else []
+            ),
+            *(
+                [
+                    "process_gates: "
+                    + json.dumps(process_gates, separators=(",", ":"))
+                ]
+                if process_gates is not None
+                else []
             ),
             "---",
             "",
@@ -815,6 +832,36 @@ def test_clawsweeper_finding_waits_for_adjudication_and_notifies_discord_only() 
         assert all("awaiting bounded adjudication" in message for _channel, message in notifier.sent)
 
 
+def test_keep_open_without_defects_is_review_success_not_merge() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config = config_fixture(root)
+        pr = 91
+        run_id = 2091
+        prepare_openclaw(config, root, pr)
+        prepare_clawsweeper_run(config, pr, run_id)
+        client = FakeGitHub(
+            run_id,
+            claw_bundle(
+                run_id=run_id,
+                pr=pr,
+                proof_status="not_applicable",
+                decision="keep_open",
+                process_gates=["own_current_check", "owner_merge_authority"],
+            ),
+        )
+        collected = userland.collect_clawsweeper_terminals(
+            config, client, dry_run=False
+        )
+        assert collected[0]["verdict"] == "clean"
+        assert collected[0]["ready_qualified"] is False
+        runtime.drain_bridge_inboxes(config)
+        row = current(config, pr)
+        assert row["state"] == "ready_for_human_merge"
+        assert core.state_projection(dict(row))["checks"]["ClawSweeper Review Rail"] == "success"
+        assert core.state_projection(dict(row))["merge_authorized"] is False
+
+
 def test_sub_platinum_or_insufficient_proof_stops_at_human_gate() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
@@ -1198,6 +1245,7 @@ def main() -> None:
         test_real_spark_receipt_shape_bridges_nonzero_human_gate,
         test_legacy_openclaw_terminal_without_review_policy_does_not_require_applied_p3,
         test_exact_artifacts_drive_ready_notification_once_without_merge,
+        test_keep_open_without_defects_is_review_success_not_merge,
         test_clawsweeper_finding_waits_for_adjudication_and_notifies_discord_only,
         test_sub_platinum_or_insufficient_proof_stops_at_human_gate,
         test_unbound_clawsweeper_workflow_failure_alerts_without_guessing_a_pr,

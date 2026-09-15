@@ -36,7 +36,7 @@ INTERNAL_EVENT_FIELDS = {
     "openclaw.started": ({"request_id"}, set()),
     "openclaw.terminal": (
         {"request_id", "result", "finding_count", "reviewer_actor", "proof_ref"},
-        set(),
+        {"proof_sha256", "artifact_digest", "review_epoch"},
     ),
     "adjudication.completed": (
         {"request_id", "rail", "classifications", "reviewer_actor", "proof_ref"},
@@ -1502,6 +1502,13 @@ def validate_internal_event(config: dict[str, Any], event: dict[str, Any]) -> di
     require_positive_int(event["pr_number"], "internal event pr_number")
     require_sha(event["base_sha"], "internal event base_sha")
     require_sha(event["head_sha"], "internal event head_sha")
+    if event_type == "openclaw.terminal":
+        for field in ("proof_sha256", "artifact_digest"):
+            if field in event and (not isinstance(event[field], str) or
+                                   re.fullmatch(r"[0-9a-f]{64}", event[field]) is None):
+                raise ContractError(f"{field} must be lowercase SHA-256")
+        if "review_epoch" in event and (type(event["review_epoch"]) is not int or event["review_epoch"] < 0):
+            raise ContractError("OpenClaw terminal requires an exact review epoch")
     if event_type.startswith("openclaw."):
         require_text(event.get("request_id"), "OpenClaw request_id", 200)
     if event_type.startswith("clawsweeper."):

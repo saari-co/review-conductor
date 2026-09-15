@@ -28,6 +28,7 @@ if str(TOOLS) not in sys.path:
 import review_conductor as core  # noqa: E402
 import review_conductor_runtime as runtime  # noqa: E402
 import review_conductor_profiles as profiles  # noqa: E402
+import review_result_projection as projection  # noqa: E402
 
 
 USERLAND_SCHEMA = "smoky.review-conductor.userland.v1"
@@ -846,41 +847,31 @@ def parse_clawsweeper_bundle(
         raise UserlandError("ClawSweeper proof tier is invalid")
     if not isinstance(proof_status, str) or not proof_status:
         raise UserlandError("ClawSweeper proof status is missing")
-    terminal_failure = frontmatter.get("review_terminal_failure") == "true"
     finding_count = len(FINDING_RE.findall(report))
-    maintainer_required = False
-    maintainer = frontmatter.get("maintainer_decision")
-    if maintainer:
-        try:
-            maintainer_payload = json.loads(maintainer)
-        except json.JSONDecodeError as exc:
-            raise UserlandError("ClawSweeper maintainer decision is invalid") from exc
-        maintainer_required = (
-            isinstance(maintainer_payload, dict)
-            and maintainer_payload.get("required") is True
+    try:
+        classified = projection.classify_from_frontmatter(
+            frontmatter, finding_count=finding_count
         )
+    except projection.ProjectionError as exc:
+        raise UserlandError(str(exc)) from exc
     ready_qualified = (
         overall_tier in READY_OVERALL_TIERS
         and proof_status in READY_PROOF_STATUSES
+        and classified["content_verdict"] == "clean"
     )
-    if terminal_failure:
-        verdict = "failed"
-    elif finding_count:
-        verdict = "findings"
-    elif maintainer_required or not ready_qualified:
-        verdict = "human_gate"
-    else:
-        verdict = "clean"
     return {
         "manifest": manifest,
         "report": report,
         "report_bytes": report_raw,
-        "verdict": verdict,
+        "verdict": classified["rail_result"],
         "finding_count": finding_count,
         "overall_tier": overall_tier,
         "proof_tier": proof_tier,
         "proof_status": proof_status,
         "ready_qualified": ready_qualified,
+        "content_verdict": classified["content_verdict"],
+        "process_gates": classified["process_gates"],
+        "merge_authorized": False,
     }
 
 
@@ -899,6 +890,8 @@ def ensure_userland_tables(connection: sqlite3.Connection) -> None:
           proof_status TEXT NOT NULL,
           ready_qualified INTEGER NOT NULL,
           report_sha256 TEXT NOT NULL,
+          content_verdict TEXT,
+          process_gates_json TEXT,
           created_at TEXT NOT NULL,
           PRIMARY KEY(repository, pr_number, base_sha, head_sha, review_epoch)
         );
@@ -933,6 +926,13 @@ def ensure_userland_tables(connection: sqlite3.Connection) -> None:
         );
         """
     )
+    quality_columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(clawsweeper_quality)").fetchall()
+    }
+    if "content_verdict" not in quality_columns:
+        connection.execute("ALTER TABLE clawsweeper_quality ADD COLUMN content_verdict TEXT")
+    if "process_gates_json" not in quality_columns:
+        connection.execute("ALTER TABLE clawsweeper_quality ADD COLUMN process_gates_json TEXT")
 
 
 def queue_operator_alert(config: dict[str, Any], alert_id: str, message: str) -> None:
@@ -1227,22 +1227,27 @@ def collect_clawsweeper_terminals(
                 INSERT INTO clawsweeper_quality(
                   repository, pr_number, base_sha, head_sha, review_epoch,
                   workflow_run_id, overall_tier, proof_tier, proof_status,
-                  ready_qualified, report_sha256, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  ready_qualified, report_sha256, content_verdict, process_gates_json,
+                  created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(repository, pr_number, base_sha, head_sha, review_epoch)
                 DO UPDATE SET workflow_run_id = excluded.workflow_run_id,
                   overall_tier = excluded.overall_tier,
                   proof_tier = excluded.proof_tier,
                   proof_status = excluded.proof_status,
                   ready_qualified = excluded.ready_qualified,
-                  report_sha256 = excluded.report_sha256
+                  report_sha256 = excluded.report_sha256,
+                  content_verdict = excluded.content_verdict,
+                  process_gates_json = excluded.process_gates_json
                 """,
                 (
                     action["repository"], action["pr_number"], action["base_sha"],
                     action["head_sha"], action["review_epoch"], str(run_id),
                     parsed["overall_tier"], parsed["proof_tier"],
                     parsed["proof_status"], int(parsed["ready_qualified"]),
-                    report_digest, core.utc_now(),
+                    report_digest, parsed["content_verdict"],
+                    json.dumps(parsed["process_gates"], separators=(",", ":")),
+                    core.utc_now(),
                 ),
             )
             connection.commit()

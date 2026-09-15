@@ -7,7 +7,7 @@
       "source_path": "tools/review_conductor.py",
       "destination_path": "tools/review_conductor.py",
       "source_sha256": "3915b5d15b9226b29c9e1fe6b74af71a08bb787c68e2e6bd8b63fef86924eda4",
-      "destination_sha256": "4b07c241adba4ab596de922b7bd2b6d25788cd47c8a36e4d3eb10ccf9bfcccd2",
+      "destination_sha256": "150504f83a8769a5a88909ed074552b9c6ce8ef334a6150c01f4b5deb9426918",
       "adaptation": "standalone admission hook, head-state scheduling with an immutable head-incarnation CI cutoff, immediate CI-to-OpenClaw processing, draft-aware adjudication, replay-safe readiness-gated ClawSweeper dispatch and an explicit fully-reviewed-draft state, a distinct recoverable pre-transport authority denial, optional per-command authority callback and isolated per-subprocess environment for multi-step OpenClaw dispatch; supervised adapter commands preserve the generation descriptor through close_fds while direct and legacy callers remain unchanged; OpenClaw queue command_preview emits the source-owned exact-tuple contract selector and persisted review epoch only when openclaw.exact_tuple_contract declares the pinned companion contract, fails closed if payload epoch is not that bound action identity, compares exact-tuple identity by type and value, and requires applied-P3 qualification on generalized openclaw.terminal events"
     },
     {
@@ -21,15 +21,15 @@
       "source_path": "tools/review_conductor_runtime.py",
       "destination_path": "tools/review_conductor_runtime.py",
       "source_sha256": "22fff3925db126de0fc27e9c61be03cd710d24d9140342ff8367e9831e683d40",
-      "destination_sha256": "480f52b10eabe4bf89c542f5976455568d2c6b2fdf9528cc4169606df60fa919",
-      "adaptation": "standalone policy-read/check adapter with profile-selected least privilege, immutable App and ClawSweeper maps, synchronized installation-token caching, unfenced policy-fetch token minting, injected signer/ingestor seams, header-aware transient and rate-limit classification plus two-/three-element artifact-response normalization, exact repository/PR/base/head/epoch fences before each current mutating GitHub or OpenClaw operation, scoped closed-head cleanup including heads without prior projection rows and remote ready-label removal, recoverable pre-request authority denial and an allowlisted per-subprocess OpenClaw environment that never mutates the threaded service process environment; generalized OpenClaw terminal artifacts must persist and present applied-P3 exact-tuple qualification at the bridge before an internal terminal event is accepted"
+      "destination_sha256": "b484d7f2a756fc2f863ecf837a49219718e867c36e6c7e2f19196d063c414323",
+      "adaptation": "standalone policy-read/check adapter with profile-selected least privilege, immutable App and ClawSweeper maps, synchronized installation-token caching, unfenced policy-fetch token minting, injected signer/ingestor seams, header-aware transient and rate-limit classification plus two-/three-element artifact-response normalization, exact repository/PR/base/head/epoch fences before each current mutating GitHub or OpenClaw operation, scoped closed-head cleanup including heads without prior projection rows and remote ready-label removal, recoverable pre-request authority denial and an allowlisted per-subprocess OpenClaw environment that never mutates the threaded service process environment; generalized OpenClaw terminal artifacts must persist and present applied-P3 exact-tuple qualification at the bridge before an internal terminal event is accepted; trusted GitHub projection adds useful check output, owned-label/comment allowlist, and accepted-artifact publication after validation; comment and label lists follow bounded allowlisted pagination; publication mutations retain exact-tuple authority; each rail check binds its own stage, result, artifact and report link"
     },
     {
       "source_path": "tools/review_conductor_userland.py",
       "destination_path": "tools/review_conductor_userland.py",
       "source_sha256": "0f19c2143f568117fa44b29bd56cb652df511f6e19c6ea8d100389dc2605a106",
-      "destination_sha256": "c9ff05251ca40de09e0d3972b29346ebc141adea169e9925d92b6e1a16ddb394",
-      "adaptation": "generalized standalone profiles require Contents read and the trusted service entrypoint; legacy Blocks permissions and CLI route remain accepted unchanged; checkout fetches and review-result notifications use fresh exact-tuple admission-authority fences, with revocation preserved as recoverable pending work; every notification is durably claimed uncertain before transport so an interrupted outcome cannot be retried without operator reconciliation; notification subprocesses receive only an allowlisted runtime identity/locale environment and use the shared generation-preserving adapter-command boundary; explicit retry and notification reconciliation accept a transaction-bound authority callback; generalized review_policy OpenClaw terminals require Spark status native_max_priority=P3, applied_max_priority=P3, and exact_tuple_qualified is True compared by type and value before any artifact write, persist those qualification fields on the artifact, and keep legacy profiles without review_policy compatible; enabled standalone source readiness requires a non-empty isolated tunnel name and public hostname while a deployment-only tunnel ID may remain missing"
+      "destination_sha256": "a7f6f6e9d560a4b19be7f4e29a1f20b7536982d0e30836d38e4e248cf3ced4b7",
+      "adaptation": "generalized standalone profiles require Contents read and the trusted service entrypoint; legacy Blocks permissions and CLI route remain accepted unchanged; checkout fetches and review-result notifications use fresh exact-tuple admission-authority fences, with revocation preserved as recoverable pending work; every notification is durably claimed uncertain before transport so an interrupted outcome cannot be retried without operator reconciliation; notification subprocesses receive only an allowlisted runtime identity/locale environment and use the shared generation-preserving adapter-command boundary; explicit retry and notification reconciliation accept a transaction-bound authority callback; generalized review_policy OpenClaw terminals require Spark status native_max_priority=P3, applied_max_priority=P3, and exact_tuple_qualified is True compared by type and value before any artifact write, persist those qualification fields on the artifact, and keep legacy profiles without review_policy compatible; enabled standalone source readiness requires a non-empty isolated tunnel name and public hostname while a deployment-only tunnel ID may remain missing; ClawSweeper terminal classification separates review content from merge/process waiting and records typed process gates"
     },
     {
       "source_path": "tools/review_conductor_userland_launcher.py",
@@ -77,22 +77,22 @@
       "source_path": "tonight-lab/tests/test_review_conductor_activation.py",
       "destination_path": "tests/test_review_conductor_activation.py",
       "source_sha256": "28cc6d0e689fa11f3652586cfd55be16059d50632a0ed708c8fe49442a64ddd6",
-      "destination_sha256": "11669b912d1d0c8e7f74708aeea8f5e127afc98728de99fb13c3ce99665cede8",
-      "adaptation": "test root and archived lane location; closed-head projection filtering, no-prior-projection cleanup and remote ready-label removal regressions"
+      "destination_sha256": "39f2be0c26ed8f99140b85ea3782bf4b3432737be628f22356f5ae3b5994d308",
+      "adaptation": "test root and archived lane location; closed-head projection filtering, no-prior-projection cleanup and remote ready-label removal regressions; FakeGitHub check methods accept optional report kwargs"
     },
     {
       "source_path": "tonight-lab/tests/test_review_conductor_profiles.py",
       "destination_path": "tests/test_review_conductor_profiles.py",
       "source_sha256": "b166648b7b0139b718d82ced0911d670475e0885d0aba20a7eb26f257f527462",
-      "destination_sha256": "842f440a704ec2f0437c9014a3190f767a4d963e10b96ed0ad7b28af56a30279",
+      "destination_sha256": "f4098d9042c11198e23698911e1d0499984102fabecefe1c5a9aaaa17fad7719",
       "adaptation": "test root and archived lane location; standalone SMCBD candidate App/installation/Contents-read pins remain inactive; source-bound reviewers spark-openclaw/saari-clawsweeper are pinned and an enabled standalone profile loads without a tunnel ID while empty tunnel_name is rejected; immutable head-incarnation CI freshness, first-event draft status, replay-safe draft/ready action resumption, draft-aware adjudication, closed projection filtering and completed/in-flight ClawSweeper draft demotion are regression checked; generalized OpenClaw collect_openclaw_terminals consumers require type-strict applied-P3 exact-tuple status fields, persist them, reject collector/bridge/internal-event bypasses, and kill precise disposable-copy mutants that omit native_max_priority, applied_max_priority, or exact_tuple_qualified identity"
     },
     {
       "source_path": "tonight-lab/tests/test_review_conductor_userland.py",
       "destination_path": "tests/test_review_conductor_userland.py",
       "source_sha256": "a2b754063c40c6acd3228aed5741692dcddc518c5cb5540a4bf01fb50d898c4f",
-      "destination_sha256": "6bac0a06badbda438f8183889d1edad3b1f8ecfe13f03cef70f14a31125aaf3b",
-      "adaptation": "test root/archived lane paths; assemble synthetic fixture key marker from adjacent bytes (same runtime value); legacy collect_openclaw_terminals without review_policy still materializes and bridges status that omits applied-P3 qualification fields"
+      "destination_sha256": "decad2699b242261f5ffe46b69e58c287c853c5ced1237c41932815bf93d04c6",
+      "adaptation": "test root/archived lane paths; assemble synthetic fixture key marker from adjacent bytes (same runtime value); legacy collect_openclaw_terminals without review_policy still materializes and bridges status that omits applied-P3 qualification fields; keep_open without defects is review-success while merge stays human-only"
     },
     {
       "source_path": "lanes/spark-openclaw-autoreview/run.sh",
