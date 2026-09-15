@@ -670,10 +670,16 @@ class GitHubAppClient:
             ):
                 raise GitHubApiError("original report check page does not match the owned exact check")
             payload["details_url"] = url
-        self._call(
+        observed = self._call(
             "PATCH", f"/repos/{self.repository}/check-runs/{check_id}", payload,
             expected={200}, authority=authority,
         )
+        if state in {"queued", "in_progress"} and (
+            observed.get("status") != state or observed.get("conclusion") is not None
+        ):
+            # An HTTP 200 is not proof that a previously terminal check resumed.
+            # Do not invent null-conclusion support or silently retain a skip.
+            raise GitHubApiError("GitHub did not confirm the requested nonterminal check state; operator recovery required")
 
     def _call_list(
         self,
@@ -1114,6 +1120,39 @@ def accepted_openclaw_terminal(
     return terminal or None
 
 
+
+def unbound_clawsweeper_attention(
+    connection: sqlite3.Connection, row: sqlite3.Row,
+) -> dict[str, Any] | None:
+    """Surface collection trouble, without assigning an unbound run to a PR.
+
+    Head verdict/action identity stays untouched. A dispatched request with no
+    run binding cannot truthfully be shown as still queued when collection has
+    encountered an unresolved terminal execution failure in this repository.
+    """
+    if row["state"] != "clawsweeper_queued" or row["review_request_id"]:
+        return None
+    identity = {key: row[key] for key in ("repository", "pr_number", "base_sha", "head_sha")}
+    action = core.tuple_action(connection, identity, "clawsweeper.dispatch", int(row["review_epoch"]))
+    if action is None or action["status"] != "dispatched":
+        return None
+    failed = connection.execute(
+        """
+        SELECT workflow_run_id FROM rail_workflow_runs
+        WHERE rail = 'clawsweeper' AND status = 'terminal_attention_required'
+          AND bound_repository IS NULL AND conclusion != 'success'
+        ORDER BY received_at DESC, workflow_run_id DESC LIMIT 1
+        """
+    ).fetchone()
+    if failed is None:
+        return None
+    run_id = core.require_positive_int(int(failed["workflow_run_id"]), "unbound workflow run id")
+    return {
+        "stage": "collection_attention_required",
+        "reason": f"Unbound repository workflow {run_id} failed without a verdict. This request outcome is unresolved; the failed run is not bound to this PR. Operator recovery required.",
+    }
+
+
 def projection_check_report(
     row: sqlite3.Row,
     quality: sqlite3.Row | None = None,
@@ -1526,6 +1565,10 @@ def reconcile_projection(
             projection = ensure_projection_row(connection, row)
             authority_kwargs = guarded_client_kwargs(client, row)
             state = core.state_projection(dict(row))
+            collection_attention = unbound_clawsweeper_attention(connection, row)
+            if collection_attention:
+                state["visible_state"] = "clawsweeper_collection_attention"
+                state["checks"]["ClawSweeper Review Rail"] = "action_required"
             clawsweeper_publication_owner = False
             if row["state"] == "clawsweeper_queued":
                 action = core.tuple_action(
@@ -1551,7 +1594,7 @@ def reconcile_projection(
                 "base_sha": row["base_sha"],
                 "head_sha": row["head_sha"],
                 "review_epoch": row["review_epoch"],
-                "visible_state": row["state"],
+                "visible_state": state["visible_state"],
                 "checks": state["checks"],
                 "ready_label": state["ready_for_human_label"],
                 "ready_label_action": (
@@ -1594,6 +1637,8 @@ def reconcile_projection(
                     check_state=check_state,
                     openclaw_terminal=openclaw_terminal,
                 )
+                if collection_attention and name == "ClawSweeper Review Rail":
+                    check_report.update(collection_attention)
                 column, create_state_column = check_columns[name]
                 check_id = projection[column]
                 external_id = projection_external_id(row, name)

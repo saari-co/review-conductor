@@ -195,6 +195,7 @@ class ProfilesTest(unittest.TestCase):
         action=legacy.action(config,7,'openclaw.enqueue');legacy.mark_dispatched(config,action['action_id'])
         runtime.bridge_openclaw(config,self.terminal(config,action))
         self.assertEqual(self.state(config)['state'],'openclaw_clean_draft')
+        self.assertEqual(core.state_projection(self.state(config))['checks']['ClawSweeper Review Rail'], 'queued')
         epoch=self.state(config)['review_epoch']
         p['action']='ready_for_review';p['pull_request'].update(draft=False,updated_at='2026-08-29T20:12:00Z')
         self.ingest(config,'pull_request','ready',p)

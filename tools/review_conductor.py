@@ -2292,7 +2292,9 @@ def state_projection(row: dict[str, Any]) -> dict[str, Any]:
     elif state == "openclaw_failed":
         openclaw, clawsweeper = "failure", "skipped"
     elif state == "openclaw_clean_draft":
-        openclaw, clawsweeper = "success", "skipped"
+        # Draft is a prerequisite wait, not a terminal skip: the same exact
+        # tuple/epoch check must remain nonterminal when the PR becomes ready.
+        openclaw, clawsweeper = "success", "queued"
     elif state == "clawsweeper_clean_draft":
         openclaw, clawsweeper = "success", "success"
     elif state == "clawsweeper_queued":

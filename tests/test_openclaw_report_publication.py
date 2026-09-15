@@ -86,6 +86,21 @@ class OriginalReportTests(unittest.TestCase):
         runtime.reconcile_projection(self.config, self.client, pr_number=7)
         return next(value for value in self.client.checks.values() if value["name"] == "OpenClaw Review Rail")
 
+    def test_nonterminal_update_rejects_retained_terminal_conclusion(self):
+        name = "ClawSweeper Review Rail"
+        external = "fixture-exact-check"
+        check_id = self.client.create_check(name, profiles.HEAD, external, "skipped")
+        # Model the observed partial PATCH: omitted fields retain prior values.
+        # HTTP 200 must not count as queued while the terminal conclusion remains.
+        for state in ("queued", "in_progress"):
+            with self.subTest(state=state), self.assertRaisesRegex(runtime.GitHubApiError, "nonterminal check state"):
+                self.client.update_check(check_id, name, profiles.HEAD, external, state)
+        self.client.update_check(check_id, name, profiles.HEAD, external, "action_required")
+        self.assertEqual(self.client.checks[check_id]["conclusion"], "action_required")
+        fresh_id = self.client.create_check(name, profiles.HEAD, "fixture-other-epoch", "queued")
+        self.client.update_check(fresh_id, name, profiles.HEAD, "fixture-other-epoch", "in_progress")
+        self.assertNotIn("conclusion", self.client.checks[fresh_id])
+
     def test_real_collector_bridge_check_roundtrip_and_same_check_idempotency(self):
         raw = b"overall: patch is correct\nScope limitation: dependency was unavailable.\n```\n[untrusted](https://example.test)\n"
         self.project()  # Genuine queued check identity precedes native completion.

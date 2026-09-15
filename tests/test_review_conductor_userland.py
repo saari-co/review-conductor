@@ -926,7 +926,36 @@ def test_unbound_clawsweeper_workflow_failure_alerts_without_guessing_a_pr() -> 
                 "conclusion": "failure",
             }
         ]
+        # Do not guess a terminal PR verdict, but do not tell GitHub it is
+        # still happily queued either: project explicitly unbound attention.
         assert current(config, pr)["state"] == "clawsweeper_queued"
+        projected = runtime.reconcile_projection(config, None, pr_number=pr, dry_run=True)["projected"][0]
+        assert projected["visible_state"] == "clawsweeper_collection_attention"
+        assert projected["checks"]["ClawSweeper Review Rail"] == "action_required"
+        from test_openclaw_report_publication import RecordingTransportClient
+        client = RecordingTransportClient(config)
+        # Existing completed/skipped check is reused, not duplicated. Model a
+        # prior draft projection then run the real reconciliation/client code.
+        runtime.reconcile_projection(config, client, pr_number=pr)
+        claw_check = next(check for check in client.checks.values() if check["name"] == "ClawSweeper Review Rail")
+        claw_check.update(status="completed", conclusion="skipped")
+        runtime.reconcile_projection(config, client, pr_number=pr)
+        assert claw_check["status"] == "completed" and claw_check["conclusion"] == "action_required"
+        assert "not bound to this PR" in claw_check["output"]["summary"]
+        assert "Accepted artifact:" not in claw_check["output"]["summary"]
+        assert "Review content:" not in claw_check["output"]["summary"]
+        assert len(client.checks) == 2
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            attention = runtime.unbound_clawsweeper_attention(connection, current(config, pr))
+            assert "not bound to this PR" in attention["reason"]
+            assert "workflow_run_id" not in attention and "content_verdict" not in attention
+            # An action that has not dispatched is not held by someone else's run.
+            row = current(config, pr)
+            connection.execute("UPDATE actions SET status = 'pending' WHERE action_id = ?", (claw_action["action_id"],))
+            assert runtime.unbound_clawsweeper_attention(connection, row) is None
+        finally:
+            connection.close()
         notifier = FakeNotifier()
         userland.deliver_notifications(config, notifier, dry_run=False)
         assert [channel for channel, _message in notifier.sent] == [
@@ -936,6 +965,56 @@ def test_unbound_clawsweeper_workflow_failure_alerts_without_guessing_a_pr() -> 
         ]
         assert all("No PR was marked ready" in message for _channel, message in notifier.sent)
         assert all("No merge was attempted" in message for _channel, message in notifier.sent)
+
+
+
+def test_bound_failed_workflow_without_bundle_is_execution_failure() -> None:
+    for binding in ("current", "wrong_run", "stale_epoch"):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = config_fixture(root)
+            pr, run_id = 78, 2078
+            prepare_openclaw(config, root, pr)
+            claw_action = action(config, pr, "clawsweeper.dispatch")
+            mark_dispatched(config, claw_action["action_id"])
+            connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+            try:
+                core.process_internal_event(connection, core.load_config(Path(config["core_config"])), {
+                    "schema": core.INTERNAL_EVENT_SCHEMA, "event_id": "fixture-claw-start",
+                    "type": "clawsweeper.started", "repository": "dinkuskit/blocks",
+                    "pr_number": pr, "base_sha": BASE, "head_sha": HEAD,
+                    "review_epoch": claw_action["review_epoch"],
+                    "workflow_run_id": str(run_id if binding != "wrong_run" else run_id + 1),
+                })
+                if binding == "stale_epoch":
+                    connection.execute("UPDATE heads SET review_epoch = review_epoch + 1")
+                connection.commit()
+            finally:
+                connection.close()
+            ingress(config, "workflow_run", "fixture-claw-failed", claw_workflow_payload(run_id, conclusion="failure"))
+            outcomes = userland.collect_clawsweeper_terminals(config, EmptyGitHub(), dry_run=False)
+            row = current(config, pr)
+            if binding == "current":
+                assert outcomes[0]["result"] == "bound_execution_failed"
+                assert row["state"] == "clawsweeper_failed"
+                assert "no qualified verdict bundle" in row["blocker"]
+                report = runtime.projection_check_report(row, check_name="ClawSweeper Review Rail", check_state="failure")
+                payload = runtime.check_payload("ClawSweeper Review Rail", HEAD, "fixture-check", "failure", report=report)
+                assert payload["status"] == "completed" and payload["conclusion"] == "failure"
+                assert "Review content:" not in payload["output"]["summary"]
+                assert report["workflow_run_id"] == str(run_id)
+            else:
+                assert outcomes[0]["result"] == "rail_failure_alerted"
+                assert row["state"] == "clawsweeper_running"
+            connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+            try:
+                receipt = connection.execute("SELECT * FROM rail_workflow_runs WHERE workflow_run_id = ?", (str(run_id),)).fetchone()
+                assert receipt["verdict"] is None and receipt["proof_ref"] is None
+                assert (receipt["bound_pr_number"] == pr) == (binding == "current")
+            finally:
+                connection.close()
+            assert userland.collect_clawsweeper_terminals(config, EmptyGitHub(), dry_run=False) == []
+            assert list(Path(config["clawsweeper_bridge"]["terminal_inbox"]).glob("*.json")) == []
 
 
 def test_failed_clawsweeper_publisher_binds_exact_artifact_and_fails_pr() -> None:
@@ -1251,6 +1330,7 @@ def main() -> None:
         test_clawsweeper_finding_waits_for_adjudication_and_notifies_discord_only,
         test_sub_platinum_or_insufficient_proof_stops_at_human_gate,
         test_unbound_clawsweeper_workflow_failure_alerts_without_guessing_a_pr,
+        test_bound_failed_workflow_without_bundle_is_execution_failure,
         test_failed_clawsweeper_publisher_binds_exact_artifact_and_fails_pr,
         test_notification_commands_use_gateway_without_secret_flags,
         test_pretty_multiline_notification_receipt_and_explicit_reconciliation,
