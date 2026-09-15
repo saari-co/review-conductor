@@ -161,7 +161,7 @@ def safe_diagram(text: str) -> str | None:
         return None
     if len(text.encode()) > 4096 or len(text.splitlines()) > 80:
         return None
-    if not re.match(r"\Aflowchart[ \t]+(?:TD|TB|BT|RL|LR)[ \t]*;?[ \t]*(?:\n|$)", text):
+    if not re.match(r"\Aflowchart[ \t]+(?:TD|TB|BT|RL|LR)[ \t]*;?[ \t]*(?:\n|$)", text, re.I):
         return None
     if re.search(r"`|~~~|@\{|<[/!a-zA-Z]|//|%%\{|^\s*#|\b(?:data|javascript|vbscript|https?|ftp|file|blob|mailto):\S", text, re.M | re.I):
         return None

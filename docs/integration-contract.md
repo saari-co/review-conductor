@@ -100,10 +100,17 @@ installed only on `openclaw-smcbd-suite`. The pilot does not require public or
 isolation decision; future repository enrollment does not inherently require a
 new App per repository.
 
-Reviewer services own their native detailed findings and comments. Only the
-Conductor publishes the authoritative rail check names after validating the
-corresponding exact-revision evidence. Accepted native results may also project
-one idempotent PR summary and ClawSweeper status labels the Conductor owns.
+Reviewer services own the original native reports and detailed findings as
+evidence. Only Conductor publishes the authoritative rail check names after
+validating the corresponding exact-revision evidence. For the native publication
+route, Conductor also solely owns one idempotent projection comment containing
+selected native public sections, its existing status labels and the explicitly
+allowlisted native rating, priority, proof/media and merge-risk label families.
+The accepted tuple/epoch/digest and current admission bind publication; native
+prose and labels do not regrade, adjudicate or alter status authority. This
+source-qualified boundary supersedes the earlier status-only/comment split;
+the [rich publication contract](#rich-native-clawsweeper-publication-source-qualified-activation-held)
+below defines its bounds and held activation gates, not deployment permission.
 Check output must name the current stage, decision reason, exact head, workflow
 run, and accepted artifact digest. Review-success is not merge authorization.
 Fence the previous writer before a cutover; never operate competing

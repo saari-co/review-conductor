@@ -70,6 +70,16 @@ class PresentationTests(unittest.TestCase):
         self.assertEqual(projection.parse_projection_marker(body), identity)
         self.assertIn(r"\\\![", native.quoted(r"\![untrusted image](https://example.invalid/image)"))
 
+    def test_native_lowercase_and_mixedcase_diagrams_are_preserved(self):
+        for declaration in ("flowchart lr", "FLOWCHART TB", "FlOwChArT bT"):
+            with self.subTest(declaration=declaration):
+                identity, report = presentation(FIXTURE.read_text().replace("flowchart LR", declaration))
+                diagram = report["sections"]["Architecture Diagram"]
+                self.assertEqual(native.safe_diagram(diagram), diagram)
+                body = plan_for(identity, report)["comment"]["body"]
+                self.assertIn("```mermaid\n" + diagram + "\n```", body)
+                self.assertNotIn("outside the safe presentation subset", body)
+
     def test_repeated_publication_and_family_transition_preserve_manual_labels(self):
         identity, report = presentation()
         client = RecordingGitHub()
@@ -148,9 +158,11 @@ class PresentationTests(unittest.TestCase):
         self.assertNotIn("@everyone", body)
         self.assertEqual(body.count(projection.MARKER_PREFIX), 1)
         self.assertEqual(projection.parse_projection_marker(body), identity)
-        for suffix in ('\nclick Bound "https://example.invalid"', '\nBound; style Bound fill:red',
-                       '\nA[<img src=x>]', '\n%%{init: {}}', '\nA[data:text/x]', '\nA[//example.invalid]', '\n```'):
-            self.assertIsNone(native.safe_diagram("flowchart LR\nA --> B" + suffix))
+        for declaration in ("flowchart LR", "flowchart lr", "FlOwChArT lR"):
+            for suffix in ('\nclick Bound "https://example.invalid"', '\nBound; style Bound fill:red',
+                           '\nA[<img src=x>]', '\n%%{init: {}}', '\nA[data:text/x]', '\nA[//example.invalid]', '\n```'):
+                with self.subTest(declaration=declaration, suffix=suffix):
+                    self.assertIsNone(native.safe_diagram(declaration + "\nA --> B" + suffix))
 
     def test_bounds_are_explicit_and_keep_original_report_access(self):
         text = FIXTURE.read_text().replace("Carries accepted", "x" * 10000 + "Carries accepted")

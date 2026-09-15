@@ -113,6 +113,7 @@
       "src/clawsweeper-report-comment-presentation.ts": "16c6d84ef6db01a6d68265f92ae290c800e2d0d6c08160796a918f5146591c93",
       "src/clawsweeper-report-helpers.ts": "c5b93149ad2f7740bbc1997157ec2515c8f98ea0de67b7721bc1b9fe78429d3d",
       "src/clawsweeper-types.ts": "c699212976944a600806172e0d0eadd1e969b8c6dd8e2d819f79a410830525d5"
-    }
+    },
+    "diagram_declaration_contract": "src/clawsweeper-report-helpers.ts:sanitizeArchitectureDiagram accepts flowchart keyword and direction case-insensitively; unsafe-content rejection remains mandatory"
   }
 }

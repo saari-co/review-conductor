@@ -1,6 +1,7 @@
 # Rich ClawSweeper publication — source proof
 
 Date: 2026-09-15. Lane/owner: `rich_publication_implementation`; closer: root.
+Round 1 repair owner: `conductor15_round1_repairs`; root retains review/closeout.
 Task: restore native presentation through Conductor's existing publication owner.
 Mode: source/tests/docs/proof and draft PR only. No runtime activation or review verdict.
 
@@ -14,6 +15,7 @@ changes were performed or authorized by this proof.
 - Repository: `saari-co/review-conductor`.
 - Branch: `codex/restore-rich-clawsweeper-publication-20260915`, isolated sibling worktree.
 - Fresh base: `8cefc3548d40b3868263cacd54a9568d51fbe67f`.
+- Round 1 repair baseline: `b99e1d4289a53e2b1f48dea7b0a9224c78e07078`.
 - Producer contract: `saari-co/clawsweeper@f1d79d1234897abca168807faf8a2088525a0e98`.
 - [Source hashes](source-hashes.json) bind the tested implementation/fixture files.
 - [Provenance ledger](../../docs/provenance.json) records the extracted-file
@@ -69,6 +71,7 @@ PY
 | Foreign comment / manual labels | Wrong-App comment untouched; `proof: override`, `rating: manual`, custom risk and ordinary labels preserved outside explicitly activated families. |
 | Closed / changed head | Journaled native labels retracted; old owned comment explicitly historical, not current clearance. |
 | Untrusted presentation | HTML, control markers, fences and mentions neutralized; unknown/malformed label instructions rejected; unsafe/missing diagram not rendered. |
+| Native declaration case | `flowchart lr`, `FLOWCHART TB` and `FlOwChArT bT` survive unchanged into the Mermaid fence; all seven existing unsafe suffixes remain rejected across uppercase, lowercase and mixed-case declarations (21 combinations). |
 | Output bounds | Per-section excerpts explicitly marked; 512 KiB input bound and 48 KiB output budget; whole-rich-body fallback preserves original artifact access. |
 | Label API availability | Existing scoped POST/DELETE only, response confirmation required, already-absent removal idempotent; rejected/unconfirmed addition is failure, no bootstrap or destructive replacement. |
 | Legacy receipts / Blocks | No historical backfill from nearby files. Missing retained digest and legacy Blocks retain explicit compact-summary behavior. |
@@ -90,9 +93,48 @@ runtime backfill, deployed label parity or a live GitHub render. Old terminal
 receipts lacking a persisted digest are intentionally unavailable for rich
 publication until a separately accepted prospective report provides that binding.
 
+## Copilot Round 1 repairs
+
+The coordinator adjudicated both inline findings from
+[review 5216994149](https://github.com/saari-co/review-conductor/pull/15#pullrequestreview-5216994149)
+as `required_fix`:
+
+- [4021204883](https://github.com/saari-co/review-conductor/pull/15#discussion_r4021204883):
+  `safe_diagram` now matches only the declaration case-insensitively, following
+  the pinned producer's `sanitizeArchitectureDiagram`. No unsafe-content filter,
+  bounds, admission, label, grade or verdict logic changed.
+- [4021204916](https://github.com/saari-co/review-conductor/pull/15#discussion_r4021204916):
+  [architecture](../../docs/architecture.md) and the directly overlapping
+  [integration contract](../../docs/integration-contract.md) explicitly supersede
+  the old status-only/comment split. Reviewer services retain original evidence
+  authority; Conductor owns the bounded comment and allowlisted native-label
+  publication. Exact tuple/epoch/digest/admission, status semantics, independent
+  adjudication, human-only merge and inactive qualification remain unchanged.
+
+Before the renderer fix, `git archive` of the exact repair baseline was extracted
+into a disposable temporary directory and only the updated test file was copied
+there. Running the two tests below produced three expected assertion failures
+for the valid declaration variants and a passing unsafe-content test. The
+assigned checkout was never reset or switched. After the one-flag repair, both
+tests and the complete 18-test focused suite passed.
+
+```sh
+python3 tests/test_clawsweeper_presentation.py \
+  PresentationTests.test_native_lowercase_and_mixedcase_diagrams_are_preserved \
+  PresentationTests.test_marker_html_and_fence_injection_and_unsafe_diagrams_are_not_active
+```
+
+All six pinned producer blob hashes and all ten implementation/test/contract
+hashes in `source-hashes.json` were independently checked. The existing synthetic
+preview body, excluding its explanatory preamble, is byte-identical to current
+renderer output. Changed contract links resolve locally; the diff preserves
+admission/evidence, no-regrading, adjudication and human-only merge boundaries.
+Only the renderer/tests, sanitized proof/provenance and contract text changed. No raw report,
+credential, runtime configuration or service state was added.
+
 ## Validation and gates
 
-Focused synthetic suite: 17 tests passed. Existing projection (22), original
+Focused synthetic suite: 18 tests passed. Existing projection (22), original
 OpenClaw/publication (31), and profile/Blocks compatibility (31) suites passed
 during implementation. Full required checks and build are recorded below after
 terminal execution; CI URLs and exact PR head are bound in the draft PR and
@@ -103,9 +145,17 @@ external implementation receipt to avoid self-referential commit evidence.
 `make build`: PASS (`dist/review-conductor.pyz`, ignored build output).
 
 `git diff --cached --check`: PASS after removing blank quote-line trailing whitespace in the generated preview.
-The source renderer fix was covered by the full run and a focused 17-test rerun.
+The Round 1 renderer fix was covered by all 16 `make check` suites and the focused
+18-test run. The 12 unittest suites reported 275 tests; the four existing custom
+test programs also completed successfully, including userland (21) and
+projection (22). No aggregate count is inferred for the other two custom programs.
 No checks were skipped; no live credentials or runtime service were used.
 
-Remaining gates: exact-head CI and independent review via the coordinator;
+Exact-head CI and the published repair SHA are recorded in the draft PR and the
+external Round 1 repair receipt after push; this tracked proof does not claim a
+self-referential commit or external-review clearance. The repair worker made no
+review request; the coordinator owns the separately authorized final review round.
+
+Remaining gates: independent exact-head review via the coordinator;
 prerequisite merge order, refreshed final qualification, explicit human merge
 and separate activation. No deployed parity claim is made.
