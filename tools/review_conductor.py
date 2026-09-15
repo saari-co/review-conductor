@@ -1732,6 +1732,16 @@ def process_internal_event(connection: sqlite3.Connection, config: dict[str, Any
         )
         if dispatch is None or dispatch["status"] != "dispatched":
             raise ContractError("ClawSweeper start does not match a dispatched exact-tuple action")
+        receipt = connection.execute(
+            "SELECT status FROM rail_workflow_runs WHERE rail = 'clawsweeper' AND workflow_run_id = ?",
+            (str(event["workflow_run_id"]),),
+        ).fetchone()
+        if receipt is not None and receipt["status"] in {
+            "terminal_attention_required", "verdict_ingested",
+        }:
+            # A delayed start cannot revive a retired receipt. Its alert/evidence
+            # remains authoritative; only explicit recovery may reopen the work.
+            raise ContractError("ClawSweeper start refers to a retired terminal workflow; operator recovery required")
         update_exact_head(connection, identity, state="clawsweeper_running", rail="clawsweeper", review_request_id=str(event["workflow_run_id"]), blocker=None)
         next_state = "clawsweeper_running"
     elif event_type == "clawsweeper.terminal":

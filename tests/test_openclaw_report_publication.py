@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -35,7 +36,7 @@ class RecordingTransportClient(runtime.GitHubAppClient):
         self.calls.append((method, path, copy.deepcopy(payload)))
         if operation == "check-create":
             check_id = 1000 + len(self.checks)
-            result = {**payload, "id": check_id, "app": {"id": self._app["app_id"]},
+            result = {"conclusion": None, **payload, "id": check_id, "app": {"id": self._app["app_id"]},
                       "html_url": f"https://github.com/{self.repository}/runs/{check_id}",
                       "details_url": "https://github.com/saari-co/review-conductor"}
             self.checks[check_id] = result
@@ -99,7 +100,7 @@ class OriginalReportTests(unittest.TestCase):
         self.assertEqual(self.client.checks[check_id]["conclusion"], "action_required")
         fresh_id = self.client.create_check(name, profiles.HEAD, "fixture-other-epoch", "queued")
         self.client.update_check(fresh_id, name, profiles.HEAD, "fixture-other-epoch", "in_progress")
-        self.assertNotIn("conclusion", self.client.checks[fresh_id])
+        self.assertIsNone(self.client.checks[fresh_id]["conclusion"])
 
     def test_real_collector_bridge_check_roundtrip_and_same_check_idempotency(self):
         raw = b"overall: patch is correct\nScope limitation: dependency was unavailable.\n```\n[untrusted](https://example.test)\n"
@@ -213,7 +214,8 @@ class OriginalReportTests(unittest.TestCase):
         check = self.project()
         self.project()
         self.assertNotIn("Do not backfill", check["output"]["text"])
-        self.assertFalse(any(method == "GET" for method, _, _ in self.client.calls))
+        self.assertFalse(any(method == "GET" and path.endswith(str(check["id"]))
+                             for method, path, _ in self.client.calls))
 
     def test_literal_output_bounds_and_external_run_links_remain_closed(self):
         text = "`" * (core.OPENCLAW_REPORT_MAX_BYTES // 2) + "~" * (core.OPENCLAW_REPORT_MAX_BYTES // 2)
@@ -477,6 +479,332 @@ class OriginalReportTests(unittest.TestCase):
             output = runtime.original_report_output(self.config, artifact)
         self.assertEqual(replaced, [True])
         self.assertEqual(output["text"], "original directory assessment\n")
+
+
+class GitHubArrayTransport:
+    """Only HTTP is injected: production auth, shape, ownership and writes run."""
+    def __init__(self, config):
+        self.app_id = config["github_app"]["app_id"]
+        self.repository = config["github_app"]["repository"]
+        self.checks, self.comments = {}, []
+        self.labels = {"docs", "P3"}
+        self.calls, self.overrides = [], {}
+        self.omit_conclusion = False
+        self.fail_created_check = False
+
+    def __call__(self, method, url, headers, body, timeout):
+        from urllib.parse import urlsplit, unquote
+        path = urlsplit(url).path
+        payload = json.loads(body) if body is not None else None
+        # Never retain authentication headers, even in synthetic proof.
+        self.calls.append((method, path, copy.deepcopy(payload)))
+        if (method, path) in self.overrides:
+            return self.overrides[(method, path)]
+        status = 200
+        if path.endswith("/access_tokens"):
+            result = {"token": "offline-fixture", "expires_at": "2099-01-01T00:00:00Z"}
+            status = 201
+        elif path.endswith("/check-runs") and method == "POST":
+            check_id = 1000 + len(self.checks)
+            result = {"conclusion": None, **payload, "id": check_id,
+                      "app": {"id": self.app_id},
+                      "html_url": f"https://github.com/{self.repository}/runs/{check_id}"}
+            self.checks[check_id] = copy.deepcopy(result)
+            status = 201
+            if self.fail_created_check:
+                raise runtime.GitHubTransientError("injected uncertain check creation")
+        elif "/check-runs/" in path:
+            check = self.checks[int(path.rsplit("/", 1)[1])]
+            if method == "PATCH":
+                check.update(payload)
+            result = copy.deepcopy(check)
+            if method == "PATCH" and self.omit_conclusion:
+                result.pop("conclusion", None)
+        elif path.endswith("/labels"):
+            if method == "POST":
+                self.labels.update(payload["labels"])
+            result = [{"id": index + 1, "name": name} for index, name in enumerate(sorted(self.labels))]
+        elif "/labels/" in path and method == "DELETE":
+            name = unquote(path.rsplit("/", 1)[1])
+            if name not in self.labels:
+                status, result = 404, {"message": "Not Found"}
+            else:
+                self.labels.remove(name)
+                result = [{"name": label} for label in sorted(self.labels)]
+        elif path.endswith("/comments"):
+            if method == "POST":
+                self.comments.append({"id": 900 + len(self.comments), **payload,
+                                      "performed_via_github_app": {"id": self.app_id}})
+                status, result = 201, self.comments[-1]
+            else:
+                result = self.comments
+        elif "/issues/comments/" in path and method == "PATCH":
+            result = next(item for item in self.comments if item["id"] == int(path.rsplit("/", 1)[1]))
+            result.update(payload)
+        else:
+            raise AssertionError((method, path))
+        return status, json.dumps(result).encode()
+
+
+class ProductionProjectionRepairTests(unittest.TestCase):
+    def setUp(self):
+        self.fixture = profiles.ProfilesTest()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.config = self.fixture.config()
+        self.action = self.fixture.enqueue(self.config)
+        self.http = GitHubArrayTransport(self.config)
+        self.client = runtime.GitHubAppClient(
+            self.config, "unused-offline-key", transport=self.http,
+            signer=lambda *args: "offline-fixture-jwt",
+        )
+        self.authorities = []
+        self.client.set_authority_guard(lambda method, path, authority: self.authorities.append((method, path, authority)))
+        self.root_path = f"/repos/{profiles.REPO}"
+
+    def project(self):
+        return runtime.reconcile_projection(self.config, self.client, pr_number=7)
+
+    def db(self):
+        return core.open_database(Path(self.config["paths"]["state_root"]), profiles.REPO)
+
+    def prepare_ready(self):
+        runtime.bridge_openclaw(self.config, self.fixture.terminal(self.config, self.action))
+        claw = legacy.action(self.config, 7, "clawsweeper.dispatch")
+        legacy.mark_dispatched(self.config, claw["action_id"])
+        self.fixture.ingest(self.config, "workflow_run", "claw-workflow",
+                            self.fixture.payload(legacy.claw_workflow_payload(801)))
+        class Artifacts(legacy.FakeGitHub):
+            def list_run_artifacts(self, run_id):
+                return [{"id": 9001, "name": f"smcbd-suite-review-{run_id}-1", "expired": False}]
+        userland.collect_clawsweeper_terminals(
+            self.config, Artifacts(801, self.fixture.bundle(self.config, claw)), dry_run=False,
+        )
+        runtime.bridge_clawsweeper(self.config, Path(self.config["clawsweeper_bridge"]["terminal_inbox"]) / "801.terminal.json")
+
+    def test_real_label_arrays_allow_ready_projection_one_owned_summary_and_replay(self):
+        self.project()
+        self.prepare_ready()
+        result = self.project()
+        self.assertEqual(result["projected"][0]["publication"]["result"], "published")
+        self.assertEqual(len(self.http.comments), 1)
+        self.assertEqual(self.http.comments[0]["performed_via_github_app"]["id"], self.http.app_id)
+        self.assertIn(runtime.READY_LABEL, self.http.labels)
+        self.assertTrue({"docs", "P3"} <= self.http.labels)
+        self.assertFalse(result["merge_authorized"])
+        with closing(self.db()) as connection:
+            row = connection.execute("SELECT * FROM projections").fetchone()
+            self.assertEqual(row["last_projected_state"], "ready_for_human_merge")
+            self.assertEqual(row["ready_label_applied"], 1)
+        repeat = self.project()
+        self.assertEqual(repeat["projected"][0]["publication"]["result"], "unchanged")
+        self.assertEqual(len(self.http.checks), 2)
+        self.assertEqual(len(self.http.comments), 1)
+        for method, path, authority in self.authorities:
+            self.assertEqual(authority["repository"], profiles.REPO)
+            self.assertEqual(authority["pr_number"], 7)
+            self.assertEqual(authority["head_sha"], profiles.HEAD)
+            self.assertEqual(authority["base_sha"], profiles.BASE)
+            self.assertEqual(authority["review_epoch"], 0)
+
+    def test_owned_and_ready_add_remove_arrays_and_idempotent_absence(self):
+        label = next(name for name in projection.OWNED_LABELS if name != runtime.READY_LABEL)
+        self.client.add_owned_label(7, label)
+        self.client.add_ready_label(7)
+        self.client.remove_owned_label(7, label)
+        self.client.remove_ready_label(7)
+        self.client.remove_owned_label(7, label)  # Real 404 object, not an array.
+        self.client.remove_ready_label(7)
+        self.assertEqual(self.http.labels, {"docs", "P3"})
+        for operation in (self.client.add_owned_label, self.client.remove_owned_label):
+            before = len(self.http.calls)
+            with self.assertRaises(runtime.GitHubApiError):
+                operation(7, "docs")
+            self.assertEqual(len(self.http.calls), before)
+
+    def test_label_shapes_statuses_and_other_object_endpoints_fail_closed(self):
+        path = self.root_path + "/issues/7/labels"
+        for raw in (b"{}", b"null", b"", b'["label"]', b'[{}]', b"not json"):
+            self.http.overrides[("POST", path)] = (200, raw)
+            with self.subTest(raw=raw), self.assertRaises(runtime.GitHubApiError):
+                self.client.add_ready_label(7)
+        for status in (404, 422, 500):
+            self.http.overrides[("POST", path)] = (status, b"[]")
+            with self.subTest(status=status), self.assertRaises(runtime.GitHubApiError):
+                self.client.add_ready_label(7)
+        self.http.overrides[("POST", self.root_path + "/check-runs")] = (201, b"[]")
+        with self.assertRaises(runtime.GitHubApiError):
+            self.client.create_check("OpenClaw Review Rail", profiles.HEAD, "fixture", "queued")
+        from urllib.parse import quote
+        delete_path = path + "/" + quote(runtime.READY_LABEL, safe="")
+        for status, raw in ((200, b"{}"), (200, b""), (422, b"[]")):
+            self.http.overrides[("DELETE", delete_path)] = (status, raw)
+            with self.assertRaises(runtime.GitHubApiError):
+                self.client.remove_ready_label(7)
+        self.http.overrides[("DELETE", delete_path)] = (204, b"")
+        self.client.remove_ready_label(7)
+        self.client.set_authority_guard(lambda *args: (_ for _ in ()).throw(core.AuthorityDenied("revoked")))
+        before = len(self.http.calls)
+        with self.assertRaises(core.AuthorityDenied):
+            self.client.add_ready_label(7)
+        self.assertEqual(len(self.http.calls), before)
+
+    def test_delayed_started_event_cannot_revive_retired_failed_workflow(self):
+        runtime.bridge_openclaw(self.config, self.fixture.terminal(self.config, self.action))
+        claw = legacy.action(self.config, 7, "clawsweeper.dispatch")
+        legacy.mark_dispatched(self.config, claw["action_id"])
+        self.fixture.ingest(self.config, "workflow_run", "late-start-failure",
+                            self.fixture.payload(legacy.claw_workflow_payload(801, conclusion="failure")))
+        outcomes = userland.collect_clawsweeper_terminals(self.config, legacy.EmptyGitHub(), dry_run=False)
+        self.assertEqual(outcomes[0]["result"], "rail_failure_alerted")
+        event = {"schema": core.INTERNAL_EVENT_SCHEMA, "event_id": "late-start",
+                 "type": "clawsweeper.started", "repository": profiles.REPO, "pr_number": 7,
+                 "base_sha": profiles.BASE, "head_sha": profiles.HEAD,
+                 "review_epoch": claw["review_epoch"], "workflow_run_id": "801"}
+        config = core.load_config(Path(self.config["core_config"]))
+        with closing(self.db()) as connection:
+            for _ in range(2):
+                with self.assertRaisesRegex(core.ContractError, "retired terminal workflow"):
+                    core.process_internal_event(connection, config, event)
+                self.assertEqual(core.current_head(connection, profiles.REPO, 7)["state"], "clawsweeper_queued")
+            with self.assertRaisesRegex(core.ContractError, "epoch is stale"):
+                core.process_internal_event(connection, config, {**event, "review_epoch": 1})
+            stale = core.process_internal_event(connection, config, {**event, "head_sha": "f" * 40})
+            self.assertEqual(stale["result"], "stale")
+            connection.rollback()
+            # An unrelated receipt must not fence a different exact start.
+            core.process_internal_event(connection, config, {**event, "workflow_run_id": "802"})
+            self.assertEqual(core.current_head(connection, profiles.REPO, 7)["state"], "clawsweeper_running")
+            connection.rollback()
+            receipt = connection.execute("SELECT * FROM rail_workflow_runs WHERE workflow_run_id='801'").fetchone()
+            self.assertEqual(receipt["status"], "terminal_attention_required")
+            self.assertIsNone(receipt["bound_pr_number"])
+            self.assertIsNone(receipt["verdict"])
+            self.assertIsNone(receipt["proof_ref"])
+        self.assertEqual(userland.collect_clawsweeper_terminals(self.config, legacy.EmptyGitHub(), dry_run=False), [])
+        self.assertEqual(list(Path(self.config["clawsweeper_bridge"]["terminal_inbox"]).glob("*.json")), [])
+
+    def test_nonterminal_readback_requires_explicit_null(self):
+        check_id = self.client.create_check("ClawSweeper Review Rail", profiles.HEAD, "fixture", "queued")
+        self.http.omit_conclusion = True
+        for state in ("queued", "in_progress"):
+            with self.assertRaisesRegex(runtime.GitHubApiError, "nonterminal check state"):
+                self.client.update_check(check_id, "ClawSweeper Review Rail", profiles.HEAD, "fixture", state)
+        self.http.omit_conclusion = False
+        self.client.update_check(check_id, "ClawSweeper Review Rail", profiles.HEAD, "fixture", "in_progress")
+
+    def legacy_skipped_check(self):
+        self.project()
+        check = next(item for item in self.http.checks.values() if item["name"] == "ClawSweeper Review Rail")
+        check.update(status="completed", conclusion="skipped")
+        return check
+
+    def test_existing_owned_terminal_skip_migrates_once_then_runs_and_completes(self):
+        old = self.legacy_skipped_check()
+        result = self.project()
+        replacement = result["projected"][0]["check_ids"][old["name"]]
+        self.assertNotEqual(replacement, old["id"])
+        self.assertEqual(old["conclusion"], "skipped")
+        self.assertIsNone(self.http.checks[replacement]["conclusion"])
+        self.assertEqual(self.http.checks[replacement]["external_id"], old["external_id"])
+        self.project()
+        self.assertEqual(len(self.http.checks), 3)
+        with closing(self.db()) as connection:
+            events = connection.execute("SELECT payload_json FROM events WHERE kind='projection.skipped_check_replacement'").fetchall()
+            self.assertEqual(len(events), 1)
+            self.assertEqual(json.loads(events[0][0])["old_check_run_id"], old["id"])
+        runtime.bridge_openclaw(self.config, self.fixture.terminal(self.config, self.action))
+        claw = legacy.action(self.config, 7, "clawsweeper.dispatch")
+        legacy.mark_dispatched(self.config, claw["action_id"])
+        with closing(self.db()) as connection:
+            core.process_internal_event(connection, core.load_config(Path(self.config["core_config"])), {
+                "schema": core.INTERNAL_EVENT_SCHEMA, "event_id": "migration-start",
+                "type": "clawsweeper.started", "repository": profiles.REPO, "pr_number": 7,
+                "base_sha": profiles.BASE, "head_sha": profiles.HEAD,
+                "review_epoch": claw["review_epoch"], "workflow_run_id": "801",
+            })
+            connection.commit()
+        self.project()
+        self.assertEqual(self.http.checks[replacement]["status"], "in_progress")
+        self.assertIsNone(self.http.checks[replacement]["conclusion"])
+        self.prepare_ready()
+        self.project()
+        self.assertEqual(self.http.checks[replacement]["conclusion"], "success")
+        self.assertEqual(old["conclusion"], "skipped")
+        self.assertEqual(len(self.http.comments), 1)
+
+    def test_migration_recovers_retained_skip_after_a_prior_partial_patch(self):
+        old = self.legacy_skipped_check()
+        old["status"] = "queued"
+        self.project()
+        self.assertEqual(len(self.http.checks), 3)
+        self.assertEqual(self.http.checks[1002]["status"], "queued")
+        self.assertIsNone(self.http.checks[1002]["conclusion"])
+        self.assertEqual(old["conclusion"], "skipped")
+        self.project()
+        self.assertEqual(len(self.http.checks), 3)
+
+    def test_migration_rejects_foreign_identity_and_non_skipped_verdict(self):
+        old = self.legacy_skipped_check()
+        original = copy.deepcopy(old)
+        for mutation in ({"id": True}, {"name": "Other"}, {"head_sha": "f" * 40},
+                         {"external_id": "other-epoch"}, {"app": {"id": 77}},
+                         {"conclusion": "failure"}, {"conclusion": "success"}):
+            old.update(mutation)
+            self.http.calls.clear()
+            with self.subTest(mutation=mutation), self.assertRaises(runtime.GitHubApiError):
+                self.project()
+            self.assertFalse(any(method == "POST" for method, _, _ in self.http.calls))
+            old.clear(); old.update(original)
+        self.assertEqual(len(self.http.checks), 2)
+
+    def test_uncertain_replacement_is_fenced(self):
+        old = self.legacy_skipped_check()
+        self.http.fail_created_check = True
+        with self.assertRaises(runtime.GitHubTransientError):
+            self.project()
+        self.http.fail_created_check = False
+        with self.assertRaisesRegex(runtime.RuntimeError, "creation outcome is uncertain"):
+            self.project()
+        self.assertEqual(len(self.http.checks), 3)
+        with closing(self.db()) as connection:
+            row = connection.execute("SELECT * FROM projections").fetchone()
+            self.assertIsNone(row["clawsweeper_check_run_id"])
+            self.assertEqual(row["clawsweeper_check_create_state"], "creating")
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM events WHERE kind='projection.skipped_check_replacement'").fetchone()[0], 1)
+        self.assertEqual(old["conclusion"], "skipped")
+
+    def test_replacement_authority_revocation_prevents_post_and_is_recoverable(self):
+        self.legacy_skipped_check()
+        def revoke_creation(method, path, authority):
+            if method == "POST" and path.endswith("/check-runs"):
+                raise core.AuthorityDenied("revoked exact tuple")
+        self.client.set_authority_guard(revoke_creation)
+        with self.assertRaises(core.AuthorityDenied):
+            self.project()
+        self.assertEqual(len(self.http.checks), 2)
+        with closing(self.db()) as connection:
+            row = connection.execute("SELECT * FROM projections").fetchone()
+            self.assertIsNone(row["clawsweeper_check_run_id"])
+            self.assertEqual(row["clawsweeper_check_create_state"], "pending")
+        self.client.set_authority_guard(None)
+        self.project()
+        self.assertEqual(len(self.http.checks), 3)
+
+    def test_confirmed_replacement_id_survives_later_label_failure(self):
+        self.legacy_skipped_check()
+        from urllib.parse import quote
+        path = self.root_path + "/issues/7/labels/" + quote(runtime.READY_LABEL, safe="")
+        self.http.overrides[("DELETE", path)] = (500, b"{}")
+        with self.assertRaises(runtime.GitHubTransientError):
+            self.project()
+        with closing(self.db()) as connection:
+            row = connection.execute("SELECT * FROM projections").fetchone()
+            self.assertEqual(row["clawsweeper_check_run_id"], 1002)
+            self.assertEqual(row["clawsweeper_check_create_state"], "active")
+        self.http.overrides.clear()
+        self.project()
+        self.assertEqual(len(self.http.checks), 3)
 
 
 if __name__ == "__main__":

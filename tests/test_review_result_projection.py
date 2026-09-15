@@ -512,7 +512,7 @@ def test_publication_forwards_exact_tuple_authority_on_real_client() -> None:
         if url.endswith("/comments"):
             return 201, b'{"id":17}'
         if url.endswith("/labels"):
-            return 200, b"{}"
+            return 200, b'[{"name":"status: ready"}]'
         raise AssertionError(f"unexpected URL {url}")
 
     client = runtime.GitHubAppClient(
