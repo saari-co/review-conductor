@@ -724,6 +724,50 @@ def test_check_output_never_links_back_to_the_pr() -> None:
         raise AssertionError("PR details_url must fail closed")
 
 
+def test_report_links_reject_all_reviewed_pr_variants() -> None:
+    for suffix in ("", "/", "/files", "/commits", "?diff=split", "#discussion_r1", "/files?diff=split#L1"):
+        try:
+            projection.require_report_url(
+                f"https://github.com/{REPO}/pull/19{suffix}", repository=REPO, pr_number=19
+            )
+        except projection.ProjectionError:
+            pass
+        else:
+            raise AssertionError(f"reviewed PR variant accepted: {suffix}")
+    for path in (f"actions/runs/{RUN_ID}", f"actions/runs/{RUN_ID}/artifacts/123"):
+        url = f"https://github.com/{REPO}/{path}"
+        assert projection.require_report_url(url, repository=REPO, pr_number=19) == url
+
+
+def test_check_client_typeerror_never_retries_mutation() -> None:
+    class ReportClient:
+        calls = 0
+
+        def create_check(self, *, report: Any) -> None:
+            self.calls += 1  # Simulate a completed remote create before decoding fails.
+            raise TypeError("malformed response after create")
+
+    client = ReportClient()
+    try:
+        runtime._invoke_check(client, "create_check", report={}, authority_kwargs={})
+    except TypeError as exc:
+        assert str(exc) == "malformed response after create"
+    else:
+        raise AssertionError("client error was swallowed")
+    assert client.calls == 1
+
+    class LegacyClient:
+        calls = 0
+
+        def create_check(self) -> int:
+            self.calls += 1
+            return 42
+
+    legacy = LegacyClient()
+    assert runtime._invoke_check(legacy, "create_check", report={}, authority_kwargs={}) == 42
+    assert legacy.calls == 1
+
+
 def test_unknown_markdown_process_gate_is_rejected() -> None:
     try:
         projection.classify_native_review(
@@ -760,6 +804,8 @@ def main() -> int:
         test_openclaw_check_report_does_not_reuse_clawsweeper_metadata,
         test_check_output_never_links_back_to_the_pr,
         test_unknown_markdown_process_gate_is_rejected,
+        test_report_links_reject_all_reviewed_pr_variants,
+        test_check_client_typeerror_never_retries_mutation,
     ]
     for test in tests:
         test()

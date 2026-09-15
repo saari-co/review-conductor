@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import urllib.parse
 from typing import Any
 
 
@@ -279,9 +280,9 @@ def pull_request_url(repository: str, pr_number: int) -> str:
 def require_report_url(value: Any, *, repository: str, pr_number: int) -> str:
     if not isinstance(value, str) or HTTP_URL_RE.fullmatch(value) is None:
         raise ProjectionError("report_url must be an https GitHub artifact or run URL")
-    if value == pull_request_url(repository, pr_number) or value.rstrip("/") == pull_request_url(
-        repository, pr_number
-    ):
+    path = urllib.parse.unquote(urllib.parse.urlsplit(value).path).rstrip("/")
+    pr_path = urllib.parse.urlsplit(pull_request_url(repository, pr_number)).path
+    if path.casefold() == pr_path.casefold() or path.casefold().startswith(pr_path.casefold() + "/"):
         raise ProjectionError("report_url cannot be the reviewed pull request")
     return value
 

@@ -15,6 +15,7 @@ import copy
 import contextlib
 import datetime as dt
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -1020,16 +1021,21 @@ def accepted_openclaw_terminal(
         WHERE kind = 'openclaw.terminal'
           AND repository = ? AND pr_number = ? AND base_sha = ? AND head_sha = ?
           AND stale = 0
-        ORDER BY sequence DESC LIMIT 1
+        ORDER BY sequence DESC
         """,
         (
             row["repository"], row["pr_number"], row["base_sha"], row["head_sha"],
         ),
-    ).fetchone()
-    if found is None:
-        return None
-    payload = json.loads(found["payload_json"])
-    if not isinstance(payload, dict):
+    )
+    payload = None
+    for candidate in found:
+        decoded = json.loads(candidate["payload_json"])
+        if (isinstance(decoded, dict)
+                and type(decoded.get("review_epoch")) is int
+                and decoded["review_epoch"] == row["review_epoch"]):
+            payload = decoded
+            break
+    if payload is None:
         return None
     terminal: dict[str, Any] = {}
     request_id = payload.get("request_id")
@@ -1123,10 +1129,17 @@ def _invoke_check(
     authority_kwargs: dict[str, Any],
 ) -> Any:
     target = getattr(client, method)
-    try:
-        return target(*positional, report=report, **authority_kwargs)
-    except TypeError:
-        return target(*positional, **authority_kwargs)
+    # Bind before any side effect. An exception inside the client must never
+    # trigger a second non-idempotent check creation.
+    signature = inspect.signature(target)
+    kwargs = dict(authority_kwargs)
+    if "report" in signature.parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    ):
+        kwargs["report"] = report
+    signature.bind(*positional, **kwargs)
+    return target(*positional, **kwargs)
 
 
 def publish_accepted_github_projection(
@@ -1278,6 +1291,21 @@ def superseded_projection_rows(
     return connection.execute(query, params).fetchall()
 
 
+def remove_projected_status_labels(client: Any, pr_number: int) -> None:
+    """Retract the reserved projection vocabulary as repository maintenance.
+
+    This negative cleanup deliberately has no live-tuple authority: its owner
+    may already be closed or superseded. The client's existing maintenance
+    guard still checks current enrollment before each DELETE.
+    """
+    client.remove_ready_label(pr_number)
+    remove = getattr(client, "remove_owned_label", None)
+    if callable(remove):
+        for name in sorted(result_projection.OWNED_LABELS):
+            if name != READY_LABEL:
+                remove(pr_number, name)
+
+
 def reconcile_superseded_projection(
     connection: sqlite3.Connection,
     row: sqlite3.Row,
@@ -1325,8 +1353,8 @@ def reconcile_superseded_projection(
             raise RuntimeError(
                 f"superseded {name} creation outcome is uncertain and requires reconciliation"
             )
-    if conclusion == "cancelled" and bool(row["ready_label_applied"]) and not ready_label_already_removed:
-        client.remove_ready_label(row["pr_number"])
+    if not ready_label_already_removed:
+        remove_projected_status_labels(client, row["pr_number"])
     now = core.utc_now()
     connection.execute(
         """
@@ -1389,7 +1417,7 @@ def reconcile_projection(
         closed = connection.execute(closed_query, closed_params).fetchall()
         for closed_head in closed:
             if not dry_run:
-                client.remove_ready_label(closed_head["pr_number"])
+                remove_projected_status_labels(client, closed_head["pr_number"])
             closed_projection = connection.execute(
                 """
                 SELECT * FROM projections
@@ -2413,6 +2441,9 @@ def bridge_openclaw(config: dict[str, Any], artifact_path: Path) -> dict[str, An
             "finding_count": finding_count,
             "reviewer_actor": artifact["reviewer_actor"],
             "proof_ref": str(proof),
+            "proof_sha256": artifact["proof_sha256"],
+            "artifact_digest": artifact_digest,
+            "review_epoch": artifact["review_epoch"],
         }
         if config.get("review_policy"):
             event["review_scope"] = artifact["review_scope"]

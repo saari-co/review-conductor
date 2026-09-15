@@ -450,6 +450,93 @@ class ProfilesTest(unittest.TestCase):
         runtime.bridge_openclaw(config,self.terminal(config,action))
         self.assertEqual(self.state(config)['state'],'clawsweeper_queued')
 
+    def test_openclaw_projection_retains_verified_digests_and_rejects_old_epoch(self):
+        config = self.config()
+        action = self.enqueue(config)
+        artifact = self.terminal(config, action)
+        raw_artifact = json.loads(artifact.read_text())
+        receipt = runtime.bridge_openclaw(config, artifact)
+        connection = core.open_database(Path(config['paths']['state_root']))
+        try:
+            row = core.current_head(connection, REPO, 7)
+            terminal = runtime.accepted_openclaw_terminal(connection, row)
+            self.assertEqual(terminal['proof_sha256'], raw_artifact['proof_sha256'])
+            self.assertEqual(terminal['artifact_digest'], receipt['artifact_sha256'])
+            report = runtime.projection_check_report(
+                row, check_name='OpenClaw Review Rail', check_state='success',
+                openclaw_terminal=terminal,
+            )
+            check = runtime.check_payload('OpenClaw Review Rail', HEAD, 'fixture', 'success', report=report)
+            self.assertIn(receipt['artifact_sha256'], check['output']['summary'])
+            event = json.loads(connection.execute(
+                "SELECT payload_json FROM events WHERE kind='openclaw.terminal'"
+            ).fetchone()[0])
+            core_config = core.load_config(Path(config['core_config']))
+            for field in ('proof_sha256', 'artifact_digest'):
+                for invalid in (True, 'x' * 64, 'a' * 63):
+                    with self.assertRaises(core.ContractError):
+                        core.validate_internal_event(core_config, {**event, field: invalid})
+            # Type-equal Python booleans/floats must not qualify a persisted epoch.
+            for invalid in (False, 0.0, '0', None):
+                connection.execute("UPDATE events SET payload_json=? WHERE kind='openclaw.terminal'",
+                                   (json.dumps({**event, 'review_epoch': invalid}),))
+                self.assertIsNone(runtime.accepted_openclaw_terminal(connection, row))
+            connection.rollback()
+        finally:
+            connection.close()
+        closed = self.payload(legacy.pr_payload(7))
+        closed['action'] = 'closed'
+        closed['pull_request']['updated_at'] = '2026-08-29T20:20:00Z'
+        self.ingest(config, 'pull_request', 'closed-old-evidence', closed)
+        reopened = copy.deepcopy(closed)
+        reopened['action'] = 'reopened'
+        reopened['pull_request']['updated_at'] = '2026-08-29T20:21:00Z'
+        self.ingest(config, 'pull_request', 'reopened-old-evidence', reopened)
+        connection = core.open_database(Path(config['paths']['state_root']))
+        try:
+            row = core.current_head(connection, REPO, 7)
+            self.assertEqual(row['review_epoch'], 1)
+            self.assertIsNone(runtime.accepted_openclaw_terminal(connection, row))
+            report = runtime.projection_check_report(
+                row, check_name='OpenClaw Review Rail', check_state='queued',
+                openclaw_terminal=runtime.accepted_openclaw_terminal(connection, row),
+            )
+            self.assertNotIn('artifact_digest', report)
+            self.assertNotIn('request_id', report)
+        finally:
+            connection.close()
+
+    def test_closed_and_superseded_retract_all_owned_status_labels(self):
+        config = self.config()
+        self.enqueue(config)
+        class GitHub(adapters.FakeGitHub):
+            def __init__(self):
+                super().__init__()
+                self.labels = set(runtime.result_projection.OWNED_LABELS) | {'docs', 'P3'}
+
+            def remove_ready_label(self, pr, **kwargs):
+                super().remove_ready_label(pr)
+                self.labels.discard(runtime.READY_LABEL)
+
+            def remove_owned_label(self, pr, name, **kwargs):
+                self.calls.append(('remove_owned', pr, name))
+                self.labels.discard(name)
+
+        github = GitHub()
+        runtime.reconcile_projection(config, github)
+        # Both closure and later head supersession must retract every owned status.
+        for index, action in enumerate(('closed', 'reopened', 'synchronize')):
+            github.labels |= set(runtime.result_projection.OWNED_LABELS)
+            payload = self.payload(legacy.pr_payload(7))
+            payload['action'] = action
+            payload['pull_request']['updated_at'] = f'2026-08-29T20:{20 + index}:00Z'
+            if action == 'synchronize':
+                payload['pull_request']['head']['sha'] = '3' * 40
+            self.ingest(config, 'pull_request', f'label-cleanup-{action}', payload)
+            runtime.reconcile_projection(config, github)
+            if action != 'reopened':
+                self.assertEqual(github.labels, {'docs', 'P3'})
+
     def test_full_trusted_artifact_chain_and_replay(self):
         config=self.config();action=self.enqueue(config)
         artifact=self.terminal(config,action)

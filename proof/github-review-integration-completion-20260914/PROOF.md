@@ -83,3 +83,49 @@ Deployment, live credentials, runtime restart, webhook change, branch-protection
 mutation, merge, label/comment publication on existing test/product PRs, new
 review request, Blocks 9443, suite 9444 runtime, product stacks, and ClawSweeper
 #18.
+
+## Conductor #9 — first Copilot round repairs (2026-09-14)
+
+### Assignment and stop
+
+- Lane: native implementer, sole source writer; parent remains final coordinator,
+  reviewer-request owner, and closer.
+- Worktree/branch: the Conductor worktree and branch named above, continuing
+  reviewed head `3c777b8b7780bfaf5f50491a5524ffc8274e52c9` (not a new branch).
+- Task type/status: bounded review repair; implemented and locally qualified.
+- Mode/mutation owner: `mutate`, named native implementation lane; handoff to parent
+  after commit/push. No live-system, merge, activation, or new review authority.
+- Stop: repair the five first-round findings and pass `make check` / `make build`;
+  parent may request at most one remaining Copilot round. This lane requests none.
+
+### Finding dispositions
+
+| Copilot comment | Disposition | Repair and evidence |
+| --- | --- | --- |
+| 4010244109 | `required_fix` | Accepted OpenClaw projection selects only a terminal carrying the exact integer epoch. Same-head close/reopen plus bool/float/string/missing-epoch regressions reject old metadata. |
+| 4010244160 | `required_fix` | Bridge forwards verified proof SHA-256 and terminal artifact SHA-256 into the validated, persisted internal event. Schema validates both hashes; the real bridge-to-check fixture observes the accepted digest in output. Legacy events without metadata remain valid but cannot invent missing evidence. |
+| 4010244198 | `required_fix` | Check-client signature is inspected and bound before invocation. A report-aware client raising TypeError after a simulated mutation is called once; legacy report-less signature remains supported. |
+| 4010244231 | `required_fix` | Closure and supersession retract the reserved owned-status vocabulary through the existing negative-maintenance guard, before a later accepted projection. Tests preserve foreign labels and target only the affected PR; existing closure mutation test updated to the new cleanup entry point. |
+| 4010244257 | `required_fix` | Parsed/decoded reviewed-PR paths and subpaths are rejected independent of query/fragment; workflow-run and artifact links remain accepted. |
+
+### Verification and remaining boundaries
+
+- `make check`: PASS after updating the existing closure mutation-test anchor to
+  the new cleanup function (initial run correctly rejected that stale anchor).
+- `make build`: PASS; standalone validation artifact only, not deployment proof.
+- Production-path regressions: `tests/test_review_conductor_profiles.py` and
+  `tests/test_review_result_projection.py`; no live API fixtures or credentials.
+- `keep_open` classification, content/proof gates, HMAC/replay checks, exact current
+  mutation authority, and human-only merge are unchanged.
+- Pre-existing events lacking verified digests are not backfilled or relabeled.
+- Producer typed-process-gate dependency and deployment/cutover remain separate.
+- Neither this document nor CI constitutes merge approval or another review round.
+
+### Exact repaired source identity
+
+The containing commit identifies the repair and this proof; source hashes below
+bind the locally tested behavior without a self-referential commit SHA.
+
+- `tools/review_conductor.py`: `150504f83a8769a5a88909ed074552b9c6ce8ef334a6150c01f4b5deb9426918`
+- `tools/review_conductor_runtime.py`: `e37099ab4c9196aa2a9e6cf0ed46edc56e66132249ebe98e09e876fac4227d17`
+- `tools/review_result_projection.py`: `9dd09161fe9e01a03a783a00c8965ec47c46c6ed61dc07cd0107138c0b88d968`

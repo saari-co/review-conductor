@@ -3293,8 +3293,8 @@ MUTANTS = [
     (
         "retain a ready label when closing a projected pull request",
         "tools/review_conductor_runtime.py",
-        '        for closed_head in closed:\n            if not dry_run:\n                client.remove_ready_label(closed_head["pr_number"])\n',
-        '        for closed_head in closed:\n            if False:\n                client.remove_ready_label(closed_head["pr_number"])\n',
+        '        for closed_head in closed:\n            if not dry_run:\n                remove_projected_status_labels(client, closed_head["pr_number"])\n',
+        '        for closed_head in closed:\n            if False:\n                remove_projected_status_labels(client, closed_head["pr_number"])\n',
         "test_review_conductor_profiles.ProfilesTest.test_closed_projection_filter_removes_only_target_ready_label",
     ),
     (
