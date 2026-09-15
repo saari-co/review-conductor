@@ -241,6 +241,50 @@ class ProfilesTest(unittest.TestCase):
         conn=core.open_database(Path(config['paths']['state_root']))
         self.assertIsNone(conn.execute("SELECT 1 FROM actions WHERE kind='clawsweeper.dispatch'").fetchone());conn.close()
 
+    def test_nondraft_openclaw_adjudication_accepts_native_terminal(self):
+        config = self.config()
+        action = self.enqueue(config)
+        runtime.bridge_openclaw(config, self.terminal(config, action, review_clean=False, review_finding_count=2))
+        request_id = json.loads(action['payload_json'])['queue_request_id']
+        self.assertEqual(self.state(config)['state'], 'awaiting_adjudication')
+        self.assertEqual(self.state(config)['review_request_id'], request_id)
+        event = {
+            'schema': core.INTERNAL_EVENT_SCHEMA,
+            'event_id': 'clean-adjudication-nondraft',
+            'type': 'adjudication.completed',
+            'repository': REPO, 'pr_number': 7, 'base_sha': BASE, 'head_sha': HEAD,
+            'review_epoch': action['review_epoch'], 'request_id': request_id,
+            'rail': 'openclaw', 'classifications': ['reject_false_positive', 'defer'],
+            'reviewer_actor': 'fixture-suite-openclaw', 'proof_ref': 'fixture-proof',
+        }
+        outcome = core.ingest_internal_event(
+            config_path=Path(config['core_config']),
+            state_root=Path(config['paths']['state_root']), event_payload=event,
+        )
+        self.assertEqual(outcome['state'], 'clawsweeper_queued')
+        self.assertIsNone(self.state(config)['review_request_id'])
+        claw = legacy.action(config, 7, 'clawsweeper.dispatch')
+        self.assertEqual(claw['review_epoch'], action['review_epoch'])
+        legacy.mark_dispatched(config, claw['action_id'])
+        self.ingest(config, 'workflow_run', 'adjudicated-native-run', self.payload(legacy.claw_workflow_payload(801)))
+
+        class GitHub(legacy.FakeGitHub):
+            def list_run_artifacts(self, run_id):
+                return [{'id': 9001, 'name': f'smcbd-suite-review-{run_id}-1', 'expired': False}]
+
+        userland.collect_clawsweeper_terminals(config, GitHub(801, self.bundle(config, claw)), dry_run=False)
+        artifact = Path(config['clawsweeper_bridge']['terminal_inbox']) / '801.terminal.json'
+        result = runtime.drain_bridge_inboxes(config)
+        native = [item for item in result['artifacts'] if item['rail'] == 'clawsweeper']
+        self.assertEqual(native[0]['result'], 'accepted')
+        self.assertEqual(self.state(config)['state'], 'ready_for_human_merge')
+        self.assertEqual(self.state(config)['review_request_id'], '801')
+        projection = core.state_projection(self.state(config))
+        self.assertEqual(projection['checks']['ClawSweeper Review Rail'], 'success')
+        self.assertTrue(projection['ready_for_human_label'])
+        self.assertFalse(projection['merge_authorized'])
+        self.assertEqual(runtime.bridge_clawsweeper(config, artifact)['result'], 'duplicate_event')
+
     def test_closed_projection_filter_removes_only_target_ready_label(self):
         adapters.test_closed_projection_filter_removes_only_target_ready_label(self.root)
 
@@ -557,6 +601,145 @@ class ProfilesTest(unittest.TestCase):
         self.assertEqual(self.state(config)['state'],'ready_for_human_merge')
         self.assertFalse(core.state_projection(self.state(config))['merge_authorized'])
         self.assertEqual(runtime.bridge_clawsweeper(config,artifact)['result'],'duplicate_event')
+
+    def prepare_draft_native_terminal(self):
+        config = self.config()
+        payload = self.payload(legacy.pr_payload(7))
+        payload['pull_request']['draft'] = True
+        self.ingest(config, 'pull_request', 'handoff-draft', payload)
+        self.ingest(config, 'workflow_run', 'handoff-ci', self.payload(legacy.ci_payload(7, 701)))
+        action = legacy.action(config, 7, 'openclaw.enqueue')
+        legacy.mark_dispatched(config, action['action_id'])
+        runtime.bridge_openclaw(config, self.terminal(config, action))
+        request_id = self.state(config)['review_request_id']
+        payload['action'] = 'ready_for_review'
+        payload['pull_request'].update(draft=False, updated_at='2026-08-29T20:12:00Z')
+        self.ingest(config, 'pull_request', 'handoff-ready', payload)
+        claw = legacy.action(config, 7, 'clawsweeper.dispatch')
+        legacy.mark_dispatched(config, claw['action_id'])
+        self.ingest(config, 'workflow_run', 'handoff-run', self.payload(legacy.claw_workflow_payload(801)))
+
+        class GitHub(legacy.FakeGitHub):
+            def list_run_artifacts(self, run_id):
+                return [{'id':9001, 'name':f'smcbd-suite-review-{run_id}-1', 'expired':False}]
+
+        userland.collect_clawsweeper_terminals(config, GitHub(801, self.bundle(config, claw)), dry_run=False)
+        artifact = Path(config['clawsweeper_bridge']['terminal_inbox']) / '801.terminal.json'
+        return config, artifact, request_id
+
+    def test_draft_ready_native_terminal_completes_without_started_event(self):
+        config, artifact, _ = self.prepare_draft_native_terminal()
+        self.assertIsNone(self.state(config)['review_request_id'])
+        result = runtime.drain_bridge_inboxes(config)
+        native = [item for item in result['artifacts'] if item['rail'] == 'clawsweeper']
+        self.assertEqual(native[0]['result'], 'accepted')
+        self.assertEqual(self.state(config)['state'], 'ready_for_human_merge')
+        projection = core.state_projection(self.state(config))
+        self.assertEqual(projection['checks']['ClawSweeper Review Rail'], 'success')
+        self.assertTrue(projection['ready_for_human_label'])
+        self.assertFalse(projection['merge_authorized'])
+        self.assertEqual(runtime.bridge_clawsweeper(config, artifact)['result'], 'duplicate_event')
+
+    def test_existing_retained_draft_request_recovers_same_artifact_idempotently(self):
+        config, artifact, request_id = self.prepare_draft_native_terminal()
+        original = artifact.read_bytes()
+        connection = core.open_database(Path(config['paths']['state_root']), REPO)
+        try:
+            connection.execute('UPDATE heads SET review_request_id=?', (request_id,))
+            connection.commit()
+            receipt = runtime.bridge_clawsweeper(config, artifact)
+            self.assertTrue(receipt['draft_handoff_recovered'])
+            self.assertEqual(receipt['result'], 'accepted')
+            self.assertFalse(receipt['merge_dispatched'])
+            self.assertEqual(self.state(config)['review_request_id'], '801')
+            self.assertEqual(self.state(config)['state'], 'ready_for_human_merge')
+            self.assertEqual(artifact.read_bytes(), original)
+            self.assertEqual(runtime.bridge_clawsweeper(config, artifact)['result'], 'duplicate_event')
+            audits = connection.execute("SELECT payload_json FROM events WHERE kind='clawsweeper.draft_handoff_recovered'").fetchall()
+            self.assertEqual(len(audits), 1)
+            self.assertEqual(json.loads(audits[0][0])['prior_request_id'], request_id)
+            run = connection.execute("SELECT status, bound_review_epoch FROM rail_workflow_runs WHERE workflow_run_id='801'").fetchone()
+            self.assertEqual(tuple(run), ('verdict_ingested', 0))
+        finally:
+            connection.close()
+
+    def test_handoff_recovery_preserves_wrong_running_and_other_rail_ids(self):
+        config, artifact, request_id = self.prepare_draft_native_terminal()
+        connection = core.open_database(Path(config['paths']['state_root']), REPO)
+        try:
+            for retained, state, rail, draft in (
+                ('rc-unrelated', 'clawsweeper_queued', 'clawsweeper', 0),
+                ('802', 'clawsweeper_queued', 'clawsweeper', 0),
+                (request_id, 'clawsweeper_running', 'clawsweeper', 0),
+                (request_id, 'clawsweeper_queued', 'openclaw', 0),
+                (request_id, 'clawsweeper_queued', 'clawsweeper', 1),
+            ):
+                with self.subTest(retained=retained, state=state, rail=rail, draft=draft):
+                    connection.execute('UPDATE heads SET review_request_id=?, state=?, rail=?, is_draft=?', (retained, state, rail, draft))
+                    connection.commit()
+                    with self.assertRaisesRegex(core.ContractError, 'workflow_run_id does not match'):
+                        runtime.bridge_clawsweeper(config, artifact)
+                    self.assertEqual(self.state(config)['review_request_id'], retained)
+            self.assertEqual(connection.execute("SELECT count(*) FROM events WHERE kind='clawsweeper.draft_handoff_recovered'").fetchone()[0], 0)
+        finally:
+            connection.close()
+
+    def test_handoff_recovery_requires_accepted_exact_epoch_openclaw_and_ready(self):
+        config, artifact, request_id = self.prepare_draft_native_terminal()
+        connection = core.open_database(Path(config['paths']['state_root']), REPO)
+        try:
+            original = connection.execute("SELECT payload_json FROM events WHERE kind='openclaw.terminal'").fetchone()[0]
+            connection.execute('UPDATE heads SET review_request_id=?', (request_id,))
+            for field, value in (
+                ('review_epoch', 1), ('review_epoch', False), ('review_epoch', 0.0),
+                ('request_id', 'rc-other'), ('result', 'human_gate'),
+                ('repository', 'dinkuskit/blocks'), ('head_sha', '3' * 40),
+                ('reviewer_actor', 'untrusted'), ('applied_max_priority', 'P0'),
+            ):
+                with self.subTest(field=field, value=value):
+                    altered = {**json.loads(original), field: value}
+                    connection.execute("UPDATE events SET payload_json=? WHERE kind='openclaw.terminal'", (json.dumps(altered),))
+                    connection.commit()
+                    with self.assertRaises(core.ContractError):
+                        runtime.bridge_clawsweeper(config, artifact)
+                    self.assertEqual(self.state(config)['review_request_id'], request_id)
+            connection.execute("UPDATE events SET payload_json=? WHERE kind='openclaw.terminal'", (original,))
+            for kind in ('openclaw.terminal', 'pull_request.ready_for_review'):
+                connection.execute('UPDATE events SET stale=1 WHERE kind=?', (kind,))
+                connection.commit()
+                with self.assertRaises(core.ContractError):
+                    runtime.bridge_clawsweeper(config, artifact)
+                connection.execute('UPDATE events SET stale=0 WHERE kind=?', (kind,))
+            connection.commit()
+            with patch.object(core, 'process_internal_event', side_effect=core.ContractError('synthetic downstream rejection')):
+                with self.assertRaisesRegex(core.ContractError, 'synthetic downstream'):
+                    runtime.bridge_clawsweeper(config, artifact)
+            self.assertEqual(self.state(config)['review_request_id'], request_id)
+            self.assertEqual(connection.execute("SELECT count(*) FROM events WHERE kind='clawsweeper.draft_handoff_recovered'").fetchone()[0], 0)
+        finally:
+            connection.close()
+
+    def test_handoff_recovery_cannot_bind_wrong_native_tuple_or_run(self):
+        config, artifact, request_id = self.prepare_draft_native_terminal()
+        connection = core.open_database(Path(config['paths']['state_root']), REPO)
+        try:
+            connection.execute('UPDATE heads SET review_request_id=?', (request_id,))
+            connection.commit()
+            original = json.loads(artifact.read_text())
+            for field, value in (
+                ('repository', 'dinkuskit/blocks'), ('pr_number', 8),
+                ('head_sha', '3' * 40), ('base_sha', '4' * 40), ('review_epoch', 1),
+                ('review_epoch', False), ('workflow_run_id', 802),
+                ('reviewer_actor', 'untrusted'), ('proof_sha256', '0' * 64),
+            ):
+                with self.subTest(field=field, value=value):
+                    write(artifact, {**original, field: value})
+                    with self.assertRaises(core.ContractError):
+                        runtime.bridge_clawsweeper(config, artifact)
+                    self.assertEqual(self.state(config)['review_request_id'], request_id)
+            self.assertEqual(connection.execute("SELECT count(*) FROM events WHERE kind='clawsweeper.draft_handoff_recovered'").fetchone()[0], 0)
+        finally:
+            connection.close()
 
     def test_suite_findings_preserve_authority_and_two_cycle_stop(self):
         config=self.config()

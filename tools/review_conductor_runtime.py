@@ -2628,6 +2628,62 @@ def bridge_openclaw(config: dict[str, Any], artifact_path: Path) -> dict[str, An
         connection.close()
 
 
+def recover_draft_openclaw_handoff(
+    connection: sqlite3.Connection,
+    config: dict[str, Any],
+    current: sqlite3.Row,
+    terminal_event: dict[str, Any],
+) -> str | None:
+    """Repair only a proven retained draft OpenClaw ID, inside terminal acceptance.
+
+    Called after the native artifact, dispatched action and workflow are qualified.
+    A running/native request ID is never replaced. Failure later in the bridge
+    transaction rolls this normalization back with the terminal acceptance.
+    """
+    retained = current["review_request_id"]
+    if (not config.get("review_policy") or not retained
+            or current["state"] != "clawsweeper_queued"
+            or current["rail"] != "clawsweeper" or current["is_draft"]):
+        return None
+    identity = {key: current[key] for key in ("repository", "pr_number", "base_sha", "head_sha")}
+    enqueue = core.tuple_action(connection, identity, "openclaw.enqueue", current["review_epoch"])
+    if (enqueue is None or enqueue["status"] != "dispatched"
+            or json.loads(enqueue["payload_json"]).get("queue_request_id") != retained):
+        return None
+    candidates = connection.execute(
+        "SELECT sequence, payload_json FROM events WHERE kind='openclaw.terminal' "
+        "AND repository=? AND pr_number=? AND base_sha=? AND head_sha=? AND stale=0 "
+        "ORDER BY sequence DESC", tuple(identity.values()),
+    )
+    for candidate in candidates:
+        payload = json.loads(candidate["payload_json"])
+        if type(payload.get("review_epoch")) is not int or payload["review_epoch"] != current["review_epoch"]:
+            continue
+        # Revalidate the persisted authoritative event rather than infer from ID shape.
+        core.validate_internal_event(config, payload)
+        if (any(payload[key] != value for key, value in identity.items())
+                or payload["request_id"] != retained or payload["result"] != "clean"):
+            return None
+        ready = connection.execute(
+            "SELECT 1 FROM events WHERE kind='pull_request.ready_for_review' "
+            "AND repository=? AND pr_number=? AND base_sha=? AND head_sha=? "
+            "AND stale=0 AND sequence>? LIMIT 1",
+            (*identity.values(), candidate["sequence"]),
+        ).fetchone()
+        if ready is None:
+            return None
+        core.update_exact_head(connection, identity, review_request_id=None)
+        core.insert_event(
+            connection, event_id=terminal_event["event_id"] + ":draft-handoff",
+            kind="clawsweeper.draft_handoff_recovered", stale=False, **identity,
+            payload={"review_epoch": current["review_epoch"], "prior_request_id": retained,
+                     "workflow_run_id": terminal_event["workflow_run_id"],
+                     "terminal_event_id": terminal_event["event_id"]},
+        )
+        return retained
+    return None
+
+
 def bridge_clawsweeper(config: dict[str, Any], artifact_path: Path) -> dict[str, Any]:
     core.require_enabled({"review_policy": config.get("review_policy", {})})
     artifact, artifact_digest = read_terminal_artifact(artifact_path, CLAWSWEEPER_ARTIFACT_SCHEMA)
@@ -2715,9 +2771,11 @@ def bridge_clawsweeper(config: dict[str, Any], artifact_path: Path) -> dict[str,
         if config.get("review_policy"):
             event["review_scope"] = artifact["review_scope"]
             event["review_epoch"] = artifact["review_epoch"]
-        event = core.validate_internal_event(core.load_config(Path(config["core_config"])), event)
+        core_config = core.load_config(Path(config["core_config"]))
+        event = core.validate_internal_event(core_config, event)
+        recovered = recover_draft_openclaw_handoff(connection, core_config, current, event)
         outcome = core.process_internal_event(
-            connection, core.load_config(Path(config["core_config"])), event
+            connection, core_config, event
         )
         connection.execute(
             """
@@ -2734,7 +2792,8 @@ def bridge_clawsweeper(config: dict[str, Any], artifact_path: Path) -> dict[str,
             ),
         )
         connection.commit()
-        return {**outcome, "artifact_sha256": artifact_digest, "verdict_inferred": False}
+        return {**outcome, "artifact_sha256": artifact_digest, "verdict_inferred": False,
+                "draft_handoff_recovered": recovered is not None}
     except Exception:
         connection.rollback()
         raise
