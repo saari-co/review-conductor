@@ -50,6 +50,8 @@ def config_fixture(root: Path) -> dict[str, Any]:
         Path(config["clawsweeper_bridge"]["terminal_inbox"]),
     ):
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    config["source_root"] = str((root / "source").resolve())
+    Path(config["source_root"]).mkdir(exist_ok=True)
     return config
 
 
@@ -180,7 +182,7 @@ def mark_dispatched(config: dict[str, Any], action_id: str) -> None:
 
 
 def openclaw_run_fixture(root: Path, request_id: str, head: str = HEAD) -> Path:
-    run = root / "spark" / request_id
+    run = root / "source/runs/spark-openclaw-autoreview-runs" / ("spark-openclaw-autoreview-20260915T133456Z-" + str(int(hashlib.sha256(request_id.encode()).hexdigest()[:8], 16)))
     run.mkdir(parents=True)
     (run / "PROOF.md").write_text(
         "# OpenClaw proof\n\nExact-head review clean with zero findings.\n",
@@ -201,7 +203,7 @@ def openclaw_run_fixture(root: Path, request_id: str, head: str = HEAD) -> Path:
         + "\n",
         encoding="utf-8",
     )
-    return run
+    return run.resolve()
 
 
 class SparkStatusRunner:

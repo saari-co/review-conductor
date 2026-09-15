@@ -151,3 +151,44 @@ stay compatible. Review prose and adapter exit code are not applied-P3
 evidence.
 This names an adapter command dependency only. It is not x-api or spark-dgx
 publication, installation, attachment, source pin, or activation.
+
+
+## Original OpenClaw report publication
+
+Prospective collected OpenClaw terminals carry an optional closed
+`original_report` receipt. `available` requires `ref` and lowercase `sha256`;
+`missing`, `oversized`, or `invalid_text` carry only the status. The collector
+preserves the original `review_output.txt` already fetched by the existing
+Spark transport, separately from its status `PROOF.md`. Accepted UTF-8 output
+is bounded to 24 KiB, copied unchanged under the exact request proof directory,
+and checked against its digest at bridge acceptance and again at publication.
+The fetch source is restricted to the transport-owned
+`runs/spark-openclaw-autoreview-runs/<generated-lane-run-id>/` beneath the
+configured source root. The generated fetch ID is not the review request ID:
+`REQUEST_STATUS.json` from that opened directory must bind the exact action
+before proof/report bytes are copied. Traversal, outside absolute paths and
+symlinked descendants are rejected. Directory-descriptor traversal and
+single-open, no-follow regular-file reads keep validation and copied bytes
+bound to the opened directory/inode even when path names are replaced.
+Missing or oversized output is explicitly unavailable, never a full-report or
+clean-content claim. Terminal verdict/qualification remains independently bound
+to repository/PR/base/head/epoch/request; report prose grants no authority.
+Legacy artifacts that omit this field are not backfilled from nearby files.
+
+The Conductor renders the original output literally inside its existing owned
+OpenClaw check, including reviewer caveats, with the accepted digest. Native
+text is not interpreted as Markdown, commands, policy, or links. A successful
+review does not assert complete report publication when the receipt says the
+report is unavailable. No external host, upload service, or model write
+credential is introduced.
+
+For an existing check, the App reads GitHub's check-run response and accepts its
+`html_url` only if repository/check ID/name/head/App/external ID all match the
+owned projection. That observed page becomes `details_url`; generic App,
+repository, PR, foreign check and guessed Actions links are not substitutes.
+A late-created check first persists its ID using the existing uncertain-create
+fence; its next normal reconciliation binds the observed link. This never
+retries creation because a link update failed. ClawSweeper retains its validated
+run/artifact links; the external report-URL allowlist is unchanged. See GitHub's
+[Checks API](https://docs.github.com/en/rest/checks/runs) for the existing
+`output.text` and `html_url` surface.
