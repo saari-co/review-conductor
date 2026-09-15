@@ -5,8 +5,11 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
+import shutil
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -209,6 +212,135 @@ class OriginalReportTests(unittest.TestCase):
         output = projection.check_output("ClawSweeper Review Rail", "success", repository=profiles.REPO,
                                          pr_number=7, head_sha=profiles.HEAD, workflow_run_id=99)
         self.assertEqual(output["details_url"], f"https://github.com/{profiles.REPO}/actions/runs/99")
+
+    def test_report_descriptor_survives_leaf_replacement_and_disappearance(self):
+        source = self.run / "review_output.txt"
+        source.write_bytes(b"this request")
+        other = self.fixture.root / "unrelated.txt"
+        other.write_bytes(b"unrelated local bytes")
+        destination = self.fixture.root / "copied.txt"
+        real_open = os.open
+
+        def replace_after_open(path, flags, **kwargs):
+            fd = real_open(path, flags, **kwargs)
+            if Path(path) == source:
+                source.unlink()
+                source.symlink_to(other)
+            return fd
+
+        with patch.object(userland.os, "open", side_effect=replace_after_open):
+            receipt = userland.preserve_openclaw_report(source, destination)
+        self.assertEqual(receipt["status"], "available")
+        self.assertEqual(destination.read_bytes(), b"this request")
+        source.unlink()
+        source.write_bytes(b"gone before open")
+
+        def remove_before_open(path, flags, **kwargs):
+            if Path(path) == source:
+                source.unlink()
+            return real_open(path, flags, **kwargs)
+
+        with patch.object(userland.os, "open", side_effect=remove_before_open):
+            self.assertEqual(userland.preserve_openclaw_report(source, destination), {"status": "missing"})
+
+    def test_collector_rejects_outside_traversal_and_wrong_request_sources(self):
+        outside = self.fixture.root / "unrelated"
+        shutil.copytree(self.run, outside)
+        (outside / "review_output.txt").write_text("unrelated local bytes")
+        source_root = Path(self.config["source_root"])
+        relative = self.run.relative_to(source_root)
+        for proof_path in (str(outside / "PROOF.md"),
+                           "../unrelated/PROOF.md",
+                           str(relative / ".." / self.run.name / "PROOF.md"),
+                           "runs/other-lane/spark-openclaw-autoreview-20260915T133456Z-1/PROOF.md"):
+            with self.subTest(proof_path=proof_path):
+                runner = legacy.SparkStatusRunner(Path(proof_path).parent)
+                with self.assertRaises(userland.UserlandError):
+                    userland.collect_openclaw_terminals(self.config, dry_run=False, runner=runner)
+                self.assertFalse(self.artifact_path.exists())
+        status = json.loads((self.run / "REQUEST_STATUS.json").read_text())
+        status["id"] = "another-request"
+        (self.run / "REQUEST_STATUS.json").write_text(json.dumps(status))
+        with self.assertRaisesRegex(userland.UserlandError, "exact action"):
+            self.collect(b"wrong request report")
+        self.assertFalse(self.artifact_path.exists())
+
+    def test_collector_accepts_transport_relative_path(self):
+        (self.run / "review_output.txt").write_text("relative transport receipt")
+        relative = self.run.relative_to(Path(self.config["source_root"]))
+        userland.collect_openclaw_terminals(self.config, dry_run=False, runner=legacy.SparkStatusRunner(relative))
+        artifact = json.loads(self.artifact_path.read_text())
+        self.assertEqual(Path(artifact["original_report"]["ref"]).read_text(), "relative transport receipt")
+
+    def test_fetch_symlinked_ancestors_and_status_proof_leaves_are_rejected(self):
+        for directory in (self.run, self.run.parent, self.run.parent.parent):
+            with self.subTest(directory=directory.name):
+                moved = directory.with_name(directory.name + "-real")
+                directory.rename(moved)
+                directory.symlink_to(moved, target_is_directory=True)
+                try:
+                    with self.assertRaises(userland.UserlandError):
+                        self.collect(None)
+                    self.assertFalse(self.artifact_path.exists())
+                finally:
+                    directory.unlink()
+                    moved.rename(directory)
+        for name in ("REQUEST_STATUS.json", "PROOF.md"):
+            with self.subTest(leaf=name):
+                source = self.run / name
+                moved = source.with_name(name + ".real")
+                source.rename(moved)
+                source.symlink_to(moved)
+                try:
+                    with self.assertRaises(userland.UserlandError):
+                        self.collect(None)
+                    self.assertFalse(self.artifact_path.exists())
+                finally:
+                    source.unlink()
+                    moved.rename(source)
+
+    def test_fetch_directory_replacement_does_not_redirect_opened_files(self):
+        (self.run / "review_output.txt").write_text("original directory report")
+        other = self.fixture.root / "replacement"
+        shutil.copytree(self.run, other)
+        (other / "review_output.txt").write_text("unrelated directory report")
+        original = self.run.with_name(self.run.name + "-original")
+        real_open = os.open
+
+        def replace_opened_directory(path, flags, **kwargs):
+            fd = real_open(path, flags, **kwargs)
+            if str(path) == self.run.name:
+                self.run.rename(original)
+                self.run.symlink_to(other, target_is_directory=True)
+            return fd
+
+        with patch.object(userland.os, "open", side_effect=replace_opened_directory):
+            artifact = self.collect(None)
+        self.assertEqual(Path(artifact["original_report"]["ref"]).read_text(), "original directory report")
+
+    def test_projection_distinguishes_empty_text_from_oversized_report(self):
+        for text, error in ((None, "non-empty text"), ("", "non-empty text"),
+                            (" \n\t", "non-empty text"),
+                            ("x" * (core.OPENCLAW_REPORT_MAX_BYTES + 1), "exceeds its text bound")):
+            with self.subTest(text_length=len(text) if text is not None else None):
+                report = {"status": "available", "text": text, "sha256": "0" * 64}
+                with self.assertRaisesRegex(projection.ProjectionError, error):
+                    projection.check_output("OpenClaw Review Rail", "success", repository=profiles.REPO,
+                                            pr_number=7, head_sha=profiles.HEAD, original_report=report)
+
+    def test_nonregular_report_fails_before_read_without_fifo_blocking(self):
+        source = self.run / "review_output.txt"
+        for make_source in (source.mkdir, lambda: os.mkfifo(source)):
+            make_source()
+            try:
+                with self.assertRaisesRegex(userland.UserlandError, "regular non-symlink"):
+                    self.collect(None)
+                self.assertFalse(self.artifact_path.exists())
+            finally:
+                if source.is_dir():
+                    source.rmdir()
+                else:
+                    source.unlink()
 
     def test_collector_rejects_symlinks(self):
         other = self.fixture.root / "unrelated.txt"

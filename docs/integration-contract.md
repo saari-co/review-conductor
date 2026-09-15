@@ -162,6 +162,14 @@ preserves the original `review_output.txt` already fetched by the existing
 Spark transport, separately from its status `PROOF.md`. Accepted UTF-8 output
 is bounded to 24 KiB, copied unchanged under the exact request proof directory,
 and checked against its digest at bridge acceptance and again at publication.
+The fetch source is restricted to the transport-owned
+`runs/spark-openclaw-autoreview-runs/<generated-lane-run-id>/` beneath the
+configured source root. The generated fetch ID is not the review request ID:
+`REQUEST_STATUS.json` from that opened directory must bind the exact action
+before proof/report bytes are copied. Traversal, outside absolute paths and
+symlinked descendants are rejected. Directory-descriptor traversal and
+single-open, no-follow regular-file reads keep validation and copied bytes
+bound to the opened directory/inode even when path names are replaced.
 Missing or oversized output is explicitly unavailable, never a full-report or
 clean-content claim. Terminal verdict/qualification remains independently bound
 to repository/PR/base/head/epoch/request; report prose grants no authority.

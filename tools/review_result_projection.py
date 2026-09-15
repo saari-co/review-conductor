@@ -370,7 +370,9 @@ def check_output(
             if set(original_report) != {"status", "sha256", "text"}:
                 raise ProjectionError("original report output has unknown or missing fields")
             text = original_report["text"]
-            if not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > core.OPENCLAW_REPORT_MAX_BYTES:
+            if not isinstance(text, str) or not text.strip():
+                raise ProjectionError("original report output must be non-empty text")
+            if len(text.encode("utf-8")) > core.OPENCLAW_REPORT_MAX_BYTES:
                 raise ProjectionError("original report output exceeds its text bound")
             digest = require_digest(original_report["sha256"], "original report digest")
             if hashlib.sha256(text.encode("utf-8")).hexdigest() != digest:
