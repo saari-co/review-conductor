@@ -15,6 +15,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -1489,6 +1490,100 @@ def checkout_git_environment() -> dict[str, str]:
     }
 
 
+class HydrationFailure(UserlandError):
+    """Closed failure classification; never carries Git or credential output."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(f"exact PR hydration failed ({reason})")
+
+
+def fetch_hydration_pack(
+    checkout: Path, action: Any, client: Any, *, runner: CommandRunner,
+) -> None:
+    """Fetch in an independent bare store; import only a validated object pack.
+
+    The checkout's config, helpers, hooks, refs and worktree never participate
+    in the authenticated transport. Temporary files contain Git objects only.
+    """
+    authority = runtime.tuple_authority(action)
+    credentials = getattr(client, "hydration_credentials", None)
+    if not callable(credentials):
+        raise HydrationFailure("service_auth_unavailable")
+    repository = authority["repository"]
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        raise HydrationFailure("repository_mismatch")
+    head, base = authority["head_sha"], authority["base_sha"]
+    checkout_identity = checkout_fingerprint(checkout)
+    with tempfile.TemporaryDirectory(prefix="conductor-hydration-") as temporary:
+        staging = Path(temporary) / "objects.git"
+        staging.mkdir(mode=0o700)
+
+        def run(directory: Path, *args: str, input: Any = None,
+                output: Any = subprocess.PIPE, text: bool = True,
+                fd: int | None = None) -> subprocess.CompletedProcess:
+            def bound_runner(command: list[str], **kwargs: Any):
+                # Preserve the owned service generation, plus only our pipe.
+                if fd is not None:
+                    kwargs["pass_fds"] = (*kwargs["pass_fds"], fd)
+                return runner(command, **kwargs)
+            try:
+                return core.run_generation_bound(
+                    bound_runner, checkout_git_command(directory, *args),
+                    cwd="/", env={**checkout_git_environment(), "HOME": str(staging)}, input=input,
+                    stdout=output, stderr=subprocess.DEVNULL, text=text,
+                    timeout=180, check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                raise HydrationFailure("transport_unavailable") from None
+
+        if run(staging, "init", "--bare", "--template=/dev/null").returncode:
+            raise HydrationFailure("staging_unavailable")
+        runtime.assert_authority(client, "checkout-hydration:fetch", authority)
+        with credentials(authority) as (helper, descriptor):
+            result = run(
+                staging, "-c", "credential.helper=", "-c", f"credential.helper={helper}",
+                "-c", "credential.useHttpPath=true", "-c", "credential.interactive=false",
+                "-c", "http.followRedirects=false", "-c", "http.sslVerify=true",
+                "-c", "http.proxy=", "-c", "http.extraHeader=",
+                "-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
+                "fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
+                f"https://github.com/{repository}.git",
+                f"refs/pull/{authority['pr_number']}/head:refs/heads/hydration",
+                base, fd=descriptor, output=subprocess.DEVNULL,
+            )
+        if result.returncode:
+            raise HydrationFailure("authenticated_fetch_failed")
+        resolved = run(staging, "rev-parse", "--verify", "refs/heads/hydration^{commit}")
+        ancestry = run(staging, "merge-base", "--is-ancestor", base, head)
+        if resolved.returncode or resolved.stdout.strip() != head or ancestry.returncode:
+            raise HydrationFailure("fetched_tuple_mismatch")
+        pack = Path(temporary) / "objects.pack"
+        with pack.open("wb") as destination:
+            packed = run(staging, "pack-objects", "--stdout", "--revs",
+                         input=f"{head}\n{base}\n".encode(), output=destination, text=False)
+        if packed.returncode or not 0 < pack.stat().st_size <= 256 * 1024 * 1024:
+            raise HydrationFailure("object_pack_unavailable")
+        runtime.assert_authority(client, "checkout-hydration:import", authority)
+        if checkout_fingerprint(checkout) != checkout_identity:
+            raise HydrationFailure("checkout_identity_changed")
+        # index-pack does not execute an upload-pack or perform network transport;
+        # target local credential/URL configuration therefore cannot redirect it.
+        with pack.open("rb") as source:
+            try:
+                imported = core.run_generation_bound(
+                    runner, checkout_git_command(checkout, "index-pack", "--stdin", "--strict"),
+                    cwd="/", env=checkout_git_environment(), stdin=source,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=180, check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                raise HydrationFailure("object_import_unavailable") from None
+        if imported.returncode:
+            raise HydrationFailure("object_import_failed")
+        runtime.assert_authority(client, "checkout-hydration:imported", authority)
+
+
 def hydrate_exact_pr_head(
     config: dict[str, Any],
     action: sqlite3.Row,
@@ -1551,26 +1646,16 @@ def hydrate_exact_pr_head(
     base_sha = core.require_sha(action["base_sha"], "OpenClaw action base")
     authority = runtime.tuple_authority(action)
 
+    if authority["repository"] != config["github_app"]["repository"]:
+        raise HydrationFailure("repository_mismatch")
     available = git("cat-file", "-e", f"{head_sha}^{{commit}}")
+    base_available = git("cat-file", "-e", f"{base_sha}^{{commit}}")
     fetched = False
-    if available.returncode != 0:
+    if available.returncode != 0 or base_available.returncode != 0:
         runtime.assert_authority(
-            authority_client,
-            f"checkout-hydration:{action['action_id']}:fetch",
-            authority,
+            authority_client, f"checkout-hydration:{action['action_id']}:fetch", authority,
         )
-        pull_ref = f"refs/pull/{core.require_positive_int(action['pr_number'], 'PR number')}/head"
-        fetched_result = git(
-            "fetch",
-            "--no-tags",
-            "--no-recurse-submodules",
-            "--no-write-fetch-head",
-            f"https://github.com/{config['github_app']['repository']}.git",
-            pull_ref,
-            timeout=180,
-        )
-        if fetched_result.returncode != 0:
-            raise UserlandError("exact GitHub PR head fetch failed")
+        fetch_hydration_pack(checkout, action, authority_client, runner=runner)
         fetched = True
 
     resolved_head = git("rev-parse", "--verify", f"{head_sha}^{{commit}}")
@@ -1652,17 +1737,18 @@ def hydrate_pending_openclaw_heads(
             )
         except core.AuthorityDenied:
             raise
-        except core.ContractError:
+        except core.ContractError as exc:
+            reason = exc.reason if isinstance(exc, HydrationFailure) else "checkout_validation_failed"
             connection = core.open_database(Path(config["paths"]["state_root"]), config["github_app"]["repository"])
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 connection.execute(
                     """
                     UPDATE actions SET status = 'failed', attempts = attempts + 1,
-                      last_error = 'exact PR head hydration failed', updated_at = ?
+                      last_error = ?, updated_at = ?
                     WHERE action_id = ? AND status = 'pending'
                     """,
-                    (core.utc_now(), row["action_id"]),
+                    (f"exact PR head hydration failed ({reason})", core.utc_now(), row["action_id"]),
                 )
                 connection.commit()
             finally:

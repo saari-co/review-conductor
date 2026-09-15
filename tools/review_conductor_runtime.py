@@ -19,6 +19,7 @@ import inspect
 import json
 import os
 import re
+import shlex
 import socket
 import sqlite3
 import stat
@@ -592,6 +593,42 @@ class GitHubAppClient:
             self._token = token
             self._token_expires = expiry
             return token
+
+    @contextlib.contextmanager
+    def hydration_credentials(self, authority: dict[str, Any]):
+        """One-use pipe to the fixed Git helper; values never enter argv/env/files.
+
+        Only the admitted standalone service has Contents-read authority. The
+        helper is service source, never a helper selected by the target checkout.
+        """
+        authority = tuple_authority(authority)
+        if (not self._strict_adapter or self._authority_guard is None
+                or authority["repository"] != self.repository
+                or self._app["api_base"] != "https://api.github.com"):
+            raise core.AuthorityDenied("authenticated hydration authority unavailable")
+        self.assert_authority("checkout-hydration:credential", authority)
+        token = self._installation_token()
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,2048}", token):
+            raise GitHubApiError("hydration credential has invalid bounded shape")
+        self.assert_authority("checkout-hydration:credential-ready", authority)
+        read_fd, write_fd = os.pipe()
+        try:
+            # Below POSIX PIPE_BUF: no writer thread, tempfile, or environment.
+            encoded = token.encode("ascii")
+            if len(encoded) > os.fpathconf(write_fd, "PC_PIPE_BUF"):
+                raise GitHubApiError("hydration credential exceeds atomic pipe bound")
+            os.write(write_fd, encoded)
+            os.close(write_fd)
+            write_fd = -1
+            helper = "!" + " ".join(shlex.quote(item) for item in (
+                sys.executable, "-I", str(TOOLS / "git_hydration_credential.py"),
+                str(read_fd), self.repository,
+            ))
+            yield helper, read_fd
+        finally:
+            os.close(read_fd)
+            if write_fd != -1:
+                os.close(write_fd)
 
     def read_policy(self, repository: str, commit: str) -> bytes:
         if repository != self.repository:

@@ -1245,6 +1245,8 @@ class HydrationRunner:
             stdout = BASE + "\n"
         elif arguments == ["for-each-ref", "--format=%(refname)%09%(objectname)"]:
             stdout = f"refs/heads/main\t{BASE}\n"
+        elif arguments == ["cat-file", "-e", f"{BASE}^{{commit}}"]:
+            returncode = 0
         elif arguments == ["cat-file", "-e", f"{HEAD}^{{commit}}"]:
             returncode = 0 if self.fetched else 1
         elif arguments[:5] == [
@@ -1266,7 +1268,7 @@ class HydrationRunner:
         return subprocess.CompletedProcess(command, returncode, stdout=stdout, stderr="")
 
 
-def test_missing_pr_head_is_fetched_without_ref_or_worktree_mutation() -> None:
+def test_missing_pr_head_requires_service_owned_authentication() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         config = config_fixture(Path(temporary))
         pr = 78
@@ -1275,14 +1277,14 @@ def test_missing_pr_head_is_fetched_without_ref_or_worktree_mutation() -> None:
         queued = action(config, pr, "openclaw.enqueue")
         checkout = Path(config["paths"]["blocks_checkout"])
         runner = HydrationRunner(checkout)
-        result = userland.hydrate_exact_pr_head(config, queued, runner=runner)
-        assert result["result"] == "fetched"
-        assert result["refs_changed"] is False
-        assert result["worktree_changed"] is False
-        fetches = [call for call in runner.calls if "fetch" in call]
-        assert len(fetches) == 1
-        assert "--no-write-fetch-head" in fetches[0]
-        assert "refs/pull/78/head" in fetches[0]
+        try:
+            userland.hydrate_exact_pr_head(config, queued, runner=runner)
+        except userland.HydrationFailure as exc:
+            assert exc.reason == "service_auth_unavailable"
+        else:
+            raise AssertionError("missing auth must not use an unauthenticated fallback")
+        assert not any("fetch" in call for call in runner.calls)
+
 
 
 def test_adapter_failure_stops_retry_loop_notifies_and_allows_explicit_retry() -> None:
@@ -1356,7 +1358,7 @@ def main() -> None:
         test_notification_commands_use_gateway_without_secret_flags,
         test_pretty_multiline_notification_receipt_and_explicit_reconciliation,
         test_attended_bootstrap_rejects_echoing_getpass_fallback,
-        test_missing_pr_head_is_fetched_without_ref_or_worktree_mutation,
+        test_missing_pr_head_requires_service_owned_authentication,
         test_adapter_failure_stops_retry_loop_notifies_and_allows_explicit_retry,
     ]
     for test in tests:

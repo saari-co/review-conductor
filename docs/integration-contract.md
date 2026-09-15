@@ -192,3 +192,31 @@ retries creation because a link update failed. ClawSweeper retains its validated
 run/artifact links; the external report-URL allowlist is unchanged. See GitHub's
 [Checks API](https://docs.github.com/en/rest/checks/runs) for the existing
 `output.text` and `html_url` surface.
+
+## Cold exact-object hydration (source-qualified)
+
+An admitted standalone service hydrates uncached PR objects through its existing
+repository-scoped GitHub App client and Contents-read capability. It never uses
+operator `gh` authentication, global Git config, target credential helpers, or
+interactive prompts. Admission is checked before credential resolution, after
+resolution, before object import and after import. Existing supervisor generation
+descriptors remain inherited throughout. Missing auth or revoked authority fails
+closed without submitting a reviewer request. Legacy clients without this
+capability may reuse already-present objects but cannot perform a cold fetch.
+
+The service-owned credential helper consumes one bounded installation token from
+an anonymous pipe. Only the descriptor number and expected repository enter Git
+configuration/argv. The helper accepts only HTTPS, `github.com`, the exact enrolled
+repository path and `get`; it neither stores credentials nor follows fallback
+authentication modes. Redirects are disabled. The token is never written to a
+named or anonymous file, environment, diagnostic, proof or operator output. Git's
+private credential-protocol pipe is its sole subprocess recipient.
+
+Authenticated fetch runs in a disposable independent bare object store with a
+clean HOME and allowlisted environment, not the target checkout. The current PR
+ref must resolve to the admitted head, and the explicit base must be its ancestor.
+A bounded, validated pack is then imported via `index-pack --strict`; checkout
+HEAD, refs, origin and working tree are rechecked and remain unchanged. Temporary
+files contain repository objects only. Network/fetch failures expose a closed
+reason class, never raw Git output. This source qualification uses synthetic
+credentials and local independent stores; it is not live private-GitHub proof.
