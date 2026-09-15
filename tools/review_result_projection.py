@@ -133,7 +133,13 @@ def parse_optional_decision(value: Any) -> str | None:
 
 
 def _truthy_flag(value: Any) -> bool:
-    return value in {True, "true", "True"}
+    if value is None:
+        return False  # optional legacy field
+    if type(value) is bool:
+        return value
+    if isinstance(value, str) and value in {"true", "True", "false", "False"}:
+        return value.lower() == "true"
+    raise ProjectionError("boolean evidence must be true or false")
 
 
 def classify_native_review(
@@ -157,6 +163,8 @@ def classify_native_review(
     gate, not a content defect. Missing or empty typed process evidence
     cannot waive a non-ready rating or invent the reason for keep_open.
     """
+    if any(type(flag) is not bool for flag in (terminal_failure, maintainer_required, needs_contributor_action)):
+        raise ProjectionError("classification boolean evidence must be typed booleans")
     if review_status != "complete":
         raise ProjectionError("native review is not complete")
     if isinstance(finding_count, bool) or not isinstance(finding_count, int) or finding_count < 0:
@@ -212,12 +220,14 @@ def _classification(
 def classify_from_frontmatter(frontmatter: dict[str, str], *, finding_count: int) -> dict[str, Any]:
     maintainer_required = False
     maintainer = frontmatter.get("maintainer_decision")
-    if maintainer:
+    if maintainer is not None:
         try:
             payload = json.loads(maintainer)
         except json.JSONDecodeError as exc:
             raise ProjectionError("ClawSweeper maintainer decision is invalid") from exc
-        maintainer_required = isinstance(payload, dict) and payload.get("required") is True
+        if not isinstance(payload, dict) or type(payload.get("required")) is not bool:
+            raise ProjectionError("maintainer decision required must be a JSON boolean")
+        maintainer_required = payload["required"]
     return classify_native_review(
         review_status=frontmatter.get("review_status", ""),
         terminal_failure=_truthy_flag(frontmatter.get("review_terminal_failure")),
@@ -284,6 +294,11 @@ def require_report_url(value: Any, *, repository: str, pr_number: int) -> str:
     pr_path = urllib.parse.urlsplit(pull_request_url(repository, pr_number)).path
     if path.casefold() == pr_path.casefold() or path.casefold().startswith(pr_path.casefold() + "/"):
         raise ProjectionError("report_url cannot be the reviewed pull request")
+    parsed = urllib.parse.urlsplit(value)
+    expected = re.escape(require_repository(repository))
+    if (parsed.netloc != "github.com" or parsed.query or parsed.fragment
+            or re.fullmatch(rf"/{expected}/actions/runs/[1-9][0-9]*(?:/(?:artifacts|job)/[1-9][0-9]*)?", parsed.path) is None):
+        raise ProjectionError("report_url must name an expected-repository run or artifact")
     return value
 
 

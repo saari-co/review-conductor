@@ -129,3 +129,33 @@ bind the locally tested behavior without a self-referential commit SHA.
 - `tools/review_conductor.py`: `150504f83a8769a5a88909ed074552b9c6ce8ef334a6150c01f4b5deb9426918`
 - `tools/review_conductor_runtime.py`: `e37099ab4c9196aa2a9e6cf0ed46edc56e66132249ebe98e09e876fac4227d17`
 - `tools/review_result_projection.py`: `9dd09161fe9e01a03a783a00c8965ec47c46c6ed61dc07cd0107138c0b88d968`
+
+## Final bounded Copilot closeout (round 2/2)
+
+Starting head: `a8ffb3b322d5ec1e089e5c86052b21c438558eaf`.
+Review: `5204288041`. The review budget is exhausted: no third review request.
+This commit repairs the four frozen findings; it neither approves merge nor
+activates publication, runtime, credentials, or required-check cutover.
+
+| Finding | Disposition | Final boundary |
+| --- | --- | --- |
+| Inline 4010833085 | `required_fix` | Explicit boolean vocabulary; malformed supplied flags and malformed maintainer-decision JSON boolean fail closed. Missing optional legacy flags retain their prior default, not arbitrary supplied values. Direct classifier arguments require actual booleans. |
+| Inline 4010833113 | `required_fix` | Report links require exact expected repository and an Actions run, run artifact, or job path. Unrelated repositories, issues/releases, traversal, query and fragment variants fail closed. |
+| Suppressed runtime upgrade | `required_fix` | Reproduced old quality schema without new columns. Collection migrates tables only on processing a candidate; no-pending-terminal reconciliation can run first. Read normalization supplies null projection fields, retains original digest/run, and does not infer a verdict or publish a new label from old evidence. |
+| Suppressed post-adjudication projection | `required_fix` | Effective clean disposition requires a stored accepted, non-stale ClawSweeper adjudication matching repository/PR/base/head, typed epoch, and request, with only defer/reject_false_positive. Ready state alone cannot manufacture clearance. Original quality row is never updated; checks and comments explicitly name original findings and the adjudication event, and effective labels remove waiting-on-author. Merge remains human-only. |
+
+Focused tests exercise production parser/link validation, old SQLite schema,
+exact-epoch/request adjudication selection, and actual publication planning and
+application against an injected API. They verify original evidence is preserved,
+foreign labels survive, and no new mutation authority is granted. No actual
+adjudication, live API, credentials, or Suite #19 evidence was used or changed.
+
+The producer typed-process-gate dependency and deployment remain outstanding.
+A source/CI pass is not live integration verification or original-review PASS.
+
+Final verification: `make check` PASS; `make build` PASS; projection regressions 22/22 PASS.
+Final source hashes (containing commit binds proof):
+
+- `tools/review_result_projection.py`: `19d571e38d13b5f108d8d9961d96d6bea92120e289974dc666baac7abf0cdbd0`
+- `tools/review_conductor_runtime.py`: `b484d7f2a756fc2f863ecf837a49219718e867c36e6c7e2f19196d063c414323`
+- `tests/test_review_result_projection.py`: `82a51edf11482a9f6c0bb6364e7e0589fda3f0afbce98f60579192b2a8ff7252`

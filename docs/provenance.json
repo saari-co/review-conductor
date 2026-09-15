@@ -21,7 +21,7 @@
       "source_path": "tools/review_conductor_runtime.py",
       "destination_path": "tools/review_conductor_runtime.py",
       "source_sha256": "22fff3925db126de0fc27e9c61be03cd710d24d9140342ff8367e9831e683d40",
-      "destination_sha256": "e37099ab4c9196aa2a9e6cf0ed46edc56e66132249ebe98e09e876fac4227d17",
+      "destination_sha256": "b484d7f2a756fc2f863ecf837a49219718e867c36e6c7e2f19196d063c414323",
       "adaptation": "standalone policy-read/check adapter with profile-selected least privilege, immutable App and ClawSweeper maps, synchronized installation-token caching, unfenced policy-fetch token minting, injected signer/ingestor seams, header-aware transient and rate-limit classification plus two-/three-element artifact-response normalization, exact repository/PR/base/head/epoch fences before each current mutating GitHub or OpenClaw operation, scoped closed-head cleanup including heads without prior projection rows and remote ready-label removal, recoverable pre-request authority denial and an allowlisted per-subprocess OpenClaw environment that never mutates the threaded service process environment; generalized OpenClaw terminal artifacts must persist and present applied-P3 exact-tuple qualification at the bridge before an internal terminal event is accepted; trusted GitHub projection adds useful check output, owned-label/comment allowlist, and accepted-artifact publication after validation; comment and label lists follow bounded allowlisted pagination; publication mutations retain exact-tuple authority; each rail check binds its own stage, result, artifact and report link"
     },
     {

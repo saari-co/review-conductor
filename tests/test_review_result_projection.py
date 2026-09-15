@@ -787,6 +787,9 @@ def test_unknown_markdown_process_gate_is_rejected() -> None:
 
 def main() -> int:
     tests = [
+        test_boolean_and_maintainer_evidence_fail_closed,
+        test_report_links_bind_repository_and_allowed_paths,
+        test_old_quality_and_exact_adjudication_projection,
         test_clean_completed_review_is_success_while_merge_stays_human,
         test_keep_open_is_not_blindly_success,
         test_execution_failure_and_human_policy_stay_distinct,
@@ -811,6 +814,78 @@ def main() -> int:
         test()
     print(f"review result projection tests passed ({len(tests)})")
     return 0
+
+
+
+
+def test_boolean_and_maintainer_evidence_fail_closed() -> None:
+    valid = dict(review_status="complete", pr_rating_overall="B", real_behavior_proof_status="sufficient")
+    for field in ("review_terminal_failure", "real_behavior_proof_needs_contributor_action"):
+        for value in ("yes", "unknown", "", 1, [], {}):
+            try:
+                projection.classify_from_frontmatter({**valid, field: value}, finding_count=0)
+            except projection.ProjectionError:
+                pass
+            else:
+                raise AssertionError((field, value))
+    for value in ('', '[]', '{}', '{"required":"false"}', '{"required":1}'):
+        try:
+            projection.classify_from_frontmatter({**valid, "maintainer_decision": value}, finding_count=0)
+        except projection.ProjectionError:
+            pass
+        else:
+            raise AssertionError(value)
+    for value in (False, "false", "False"):
+        assert projection.classify_from_frontmatter({**valid, "review_terminal_failure": value}, finding_count=0)["content_verdict"] == "clean"
+
+
+def test_report_links_bind_repository_and_allowed_paths() -> None:
+    for url in ("https://github.com/other/repo/actions/runs/1", f"https://github.com/{REPO}/issues/1", f"https://github.com/{REPO}/releases/tag/v1", f"https://github.com/{REPO}/actions/runs/1/../../issues/1", f"https://github.com/{REPO}/actions/runs/1?redirect=elsewhere"):
+        try:
+            projection.require_report_url(url, repository=REPO, pr_number=19)
+        except projection.ProjectionError:
+            pass
+        else:
+            raise AssertionError(url)
+
+
+def test_old_quality_and_exact_adjudication_projection() -> None:
+    import sqlite3
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.execute("CREATE TABLE clawsweeper_quality(repository, pr_number, base_sha, head_sha, review_epoch, report_sha256, workflow_run_id)")
+    db.execute("INSERT INTO clawsweeper_quality VALUES(?,?,?,?,?,?,?)", (REPO,19,BASE,HEAD,0,DIGEST,RUN_ID))
+    row = dict(repository=REPO, pr_number=19, base_sha=BASE, head_sha=HEAD, review_epoch=0, state="ready_for_human_merge", rail="clawsweeper", review_request_id=RUN_ID, blocker="human merge authority required")
+    quality = runtime.accepted_quality_row(db, row)
+    report = runtime.projection_check_report(row, quality, check_name="ClawSweeper Review Rail", check_state="success")
+    assert "content_verdict" not in report
+    db.execute("CREATE TABLE events(sequence INTEGER PRIMARY KEY, event_id, kind, repository, pr_number, base_sha, head_sha, stale, payload_json)")
+    quality["content_verdict"] = "findings"
+    quality["process_gates_json"] = "[]"
+    assert runtime.effective_quality(db, row, quality) == quality
+    for epoch, request, dispositions, qualifies in ((1,RUN_ID,["defer"],False),(0,"other",["defer"],False),(0,RUN_ID,["required_fix"],False),(0,RUN_ID,["reject_false_positive","defer"],True)):
+        db.execute("DELETE FROM events")
+        db.execute("INSERT INTO events VALUES(1,'adjudication-1','adjudication.completed',?,?,?,?,0,?)",(REPO,19,BASE,HEAD,json.dumps(dict(review_epoch=epoch,rail="clawsweeper",request_id=request,classifications=dispositions))))
+        effective = runtime.effective_quality(db,row,quality)
+        assert (effective["content_verdict"] == "clean") is qualifies
+        assert quality["content_verdict"] == "findings"
+        if qualifies:
+            report = runtime.projection_check_report(row,effective,check_name="ClawSweeper Review Rail",check_state="success")
+            assert "Original review content: findings" in report["reason"]
+            assert "adjudication-1" in report["reason"]
+            class PublicationClient(RecordingGitHub):
+                def list_issue_labels(self, pr: int, **kwargs: Any) -> list[str]:
+                    return self.labels
+            client = PublicationClient()
+            client.labels.append("status: ⏳ waiting on author")
+            receipt = runtime.publish_accepted_github_projection(client, row, effective, dry_run=False, authority_kwargs={"authority": "exact-test-tuple"})
+            assert receipt["result"] == "published"
+            assert "Original review content: findings" in client.comments[0]["body"]
+            assert "adjudication-1" in client.comments[0]["body"]
+            assert "status: ⏳ waiting on author" not in client.labels
+            assert "status: 👀 ready for maintainer look" in client.labels
+            assert "Merge authorized: no" in client.comments[0]["body"]
+            assert projection.desired_owned_labels(effective["content_verdict"]) == {"status: 👀 ready for maintainer look"}
 
 
 if __name__ == "__main__":

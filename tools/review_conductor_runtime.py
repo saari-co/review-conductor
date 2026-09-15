@@ -982,7 +982,7 @@ def check_payload(
     return payload
 
 
-def accepted_quality_row(connection: sqlite3.Connection, row: sqlite3.Row) -> sqlite3.Row | None:
+def accepted_quality_row(connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any] | None:
     tables = {
         name
         for (name,) in connection.execute(
@@ -991,7 +991,7 @@ def accepted_quality_row(connection: sqlite3.Connection, row: sqlite3.Row) -> sq
     }
     if "clawsweeper_quality" not in tables:
         return None
-    return connection.execute(
+    quality = connection.execute(
         """
         SELECT * FROM clawsweeper_quality
         WHERE repository = ? AND pr_number = ? AND base_sha = ? AND head_sha = ?
@@ -1002,6 +1002,43 @@ def accepted_quality_row(connection: sqlite3.Connection, row: sqlite3.Row) -> sq
             row["review_epoch"],
         ),
     ).fetchone()
+    if quality is None:
+        return None
+    # Reconciliation may run before a collector migrates an old database.
+    result = dict(quality)
+    result.setdefault("content_verdict", None)
+    result.setdefault("process_gates_json", None)
+    return result
+
+
+def effective_quality(connection: sqlite3.Connection, row: sqlite3.Row, quality: Any) -> Any:
+    if quality is None or row["state"] != "ready_for_human_merge":
+        return quality
+    events = connection.execute(
+        "SELECT event_id, payload_json FROM events WHERE kind='adjudication.completed' "
+        "AND repository=? AND pr_number=? AND base_sha=? AND head_sha=? AND stale=0 "
+        "ORDER BY sequence DESC",
+        (row["repository"], row["pr_number"], row["base_sha"], row["head_sha"]),
+    )
+    for event in events:
+        payload = json.loads(event["payload_json"])
+        if (type(payload.get("review_epoch")) is not int
+                or payload["review_epoch"] != row["review_epoch"]
+                or payload.get("rail") != "clawsweeper"
+                or payload.get("request_id") != row["review_request_id"]):
+            continue
+        dispositions = payload.get("classifications")
+        if not isinstance(dispositions, list) or not dispositions or not set(dispositions) <= {"reject_false_positive", "defer"}:
+            return quality
+        result = dict(quality)
+        result["adjudication_reason"] = (
+            f"Original review content: {quality['content_verdict'] or 'unclassified'}; "
+            f"effective disposition: {', '.join(dispositions)} (event {str(event['event_id'])[:48]})"
+        )
+        result["content_verdict"] = result_projection.CONTENT_CLEAN
+        result["process_gates_json"] = json.dumps([result_projection.PROCESS_OWNER_MERGE])
+        return result
+    return quality
 
 
 def accepted_openclaw_terminal(
@@ -1107,6 +1144,8 @@ def projection_check_report(
             row["repository"], str(request_id)
         )
     if quality is not None:
+        if "adjudication_reason" in quality.keys():
+            report["reason"] = quality["adjudication_reason"]
         report["artifact_digest"] = quality["report_sha256"]
         report["workflow_run_id"] = quality["workflow_run_id"]
         run_url = result_projection.workflow_run_url(
@@ -1206,7 +1245,8 @@ def publish_accepted_github_projection(
         existing_comments=comments,
         existing_labels=labels,
         stage=row["state"],
-        reason=row["blocker"] or f"state {row['state']}",
+        reason=(quality["adjudication_reason"] if "adjudication_reason" in quality.keys()
+                else row["blocker"] or f"state {row['state']}"),
         workflow_run_id=quality["workflow_run_id"],
     )
     if not plan["writes"]:
@@ -1519,7 +1559,7 @@ def reconcile_projection(
                     "clawsweeper_check_create_state",
                 ),
             }
-            quality = accepted_quality_row(connection, row)
+            quality = effective_quality(connection, row, accepted_quality_row(connection, row))
             openclaw_terminal = accepted_openclaw_terminal(connection, row)
             for name, check_state in state["checks"].items():
                 check_report = projection_check_report(
