@@ -1,6 +1,8 @@
 """Independent object-store proof; synthetic auth only, no live GitHub calls."""
 import copy
 import contextlib
+import base64
+import http.server
 import json
 import os
 from pathlib import Path
@@ -8,6 +10,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -218,6 +221,122 @@ class ColdHydrationTest(unittest.TestCase):
             repeated = invoke("github.com")
             self.assertNotEqual(repeated.returncode, 0)
             self.assertEqual((repeated.stdout, repeated.stderr), ("", ""))
+
+    def test_git_http_challenge_metadata_reaches_fixed_helper(self):
+        # Actual remote-http negotiation, not `git credential fill`. The local
+        # fixture adapter rewrites only protocol/host to the fixed helper's
+        # admitted HTTPS GitHub identity; all Git metadata and the pipe survive.
+        helper = self.root / "http-fixture-helper.py"
+        observed = self.root / "http-fixture-metadata.json"
+        helper.write_text('''import json, subprocess, sys
+fd, target, observed, operation = sys.argv[1:]
+if operation != "get":
+    sys.exit(0)
+lines = sys.stdin.readlines()
+keys = [line.partition("=")[0] for line in lines if "=" in line]
+with open(observed, "w") as receipt:
+    json.dump(keys, receipt)
+data = "".join("protocol=https\\n" if line.startswith("protocol=") else
+               "host=github.com\\n" if line.startswith("host=") else line
+               for line in lines)
+result = subprocess.run([sys.executable, "-I", target, fd,
+                         "test-owner/private-fixture", "get"],
+                        input=data, text=True, capture_output=True,
+                        pass_fds=(int(fd),), check=False)
+sys.stdout.write(result.stdout)
+sys.exit(result.returncode)
+''')
+        requests = []
+        expected = "Basic " + base64.b64encode(
+            ("x-access-token:" + SYNTHETIC).encode()).decode()
+        advertised = self.head
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                authenticated = self.headers.get("Authorization") == expected
+                requests.append(authenticated)  # Never retain credential header.
+                if not authenticated:
+                    self.send_response(401)
+                    self.send_header("WWW-Authenticate", 'Basic realm="fixture"')
+                    self.send_header("WWW-Authenticate", 'Bearer realm="fixture"')
+                    self.end_headers()
+                    return
+                if self.path.startswith("/test-owner/private-fixture.git/info/refs"):
+                    body = (advertised + "\trefs/heads/main\n").encode()
+                elif self.path == "/test-owner/private-fixture.git/HEAD":
+                    body = b"ref: refs/heads/main\n"
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with self.client.hydration_credentials(self.action) as (_helper, fd):
+                fixture_helper = "!" + " ".join(shlex.quote(value) for value in (
+                    sys.executable, "-I", str(helper), str(fd),
+                    str(userland.TOOLS / "git_hydration_credential.py"), str(observed)))
+                command = userland.hydration_git_command(
+                    self.checkout, "-c", "credential.helper=", "-c",
+                    "credential.helper=" + fixture_helper, "-c",
+                    "credential.useHttpPath=true", "-c", "http.proxy=",
+                    "ls-remote", f"http://127.0.0.1:{server.server_port}/{REPOSITORY}.git")
+                result = subprocess.run(command, env=userland.checkout_git_environment(),
+                    pass_fds=(fd,), text=True, capture_output=True, timeout=15)
+                self.assertEqual(result.returncode, 0, "synthetic HTTP authentication failed")
+                self.assertIn(self.head + "\trefs/heads/main", result.stdout)
+                self.assertNotIn(SYNTHETIC, result.stdout + result.stderr)
+                self.assertEqual(os.read(fd, 2049), b"")
+            keys = json.loads(observed.read_text())
+            self.assertGreaterEqual(keys.count("wwwauth[]"), 2)
+            self.assertIn(False, requests)
+            self.assertIn(True, requests)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_helper_array_metadata_keeps_binding_singletons_strict(self):
+        with self.client.hydration_credentials(self.action) as (helper, fd):
+            command = shlex.split(helper[1:]) + ["get"]
+            bound = f"protocol=https\nhost=github.com\npath={REPOSITORY}.git\n"
+            metadata = "capability[]=authtype\ncapability[]=state\nwwwauth[]=Basic\nwwwauth[]=Bearer\n"
+            for extra in ("protocol=https\n", "host=github.com\n",
+                          f"path={REPOSITORY}.git\n"):
+                result = subprocess.run(command, input=metadata + bound + extra + "\n",
+                    pass_fds=(fd,), text=True, capture_output=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual((result.stdout, result.stderr), ("", ""))
+            wrong = bound.replace(REPOSITORY, "other/private")
+            result = subprocess.run(command, input=metadata + wrong + "\n",
+                pass_fds=(fd,), text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual((result.stdout, result.stderr), ("", ""))
+            # Rejections above must not consume the one-use credential.
+            valid = subprocess.run(command, input=metadata + bound + "\n",
+                pass_fds=(fd,), text=True, capture_output=True)
+            self.assertEqual(valid.returncode, 0)
+            self.assertEqual(os.read(fd, 2049), b"")
+
+    def test_helper_array_metadata_remains_bounded(self):
+        with self.client.hydration_credentials(self.action) as (helper, fd):
+            result = subprocess.run(shlex.split(helper[1:]) + ["get"],
+                input="capability[]=state\n" * 300 +
+                      f"protocol=https\nhost=github.com\npath={REPOSITORY}.git\n\n",
+                pass_fds=(fd,), text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual((result.stdout, result.stderr), ("", ""))
+            self.assertEqual(os.read(fd, 2049), SYNTHETIC.encode())
 
     def test_failed_fetch_has_sanitized_class_and_closes_pipe(self):
         def fail(command, **kwargs):

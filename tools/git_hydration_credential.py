@@ -24,7 +24,14 @@ def main() -> int:
         if line == "\n":
             break
         key, separator, value = line.rstrip("\n").partition("=")
-        if not separator or key in fields:
+        if not separator:
+            return 1
+        # Git remote-http sends repeated array-valued negotiation metadata.
+        # We do not advertise these capabilities or use challenges to select
+        # credentials; ignore only these known arrays within the total bound.
+        if key in {"capability[]", "wwwauth[]"}:
+            continue
+        if key in fields:
             return 1
         fields[key] = value
     if (fields.get("protocol") != "https" or fields.get("host") != "github.com"
