@@ -240,6 +240,50 @@ class ProfilesTest(unittest.TestCase):
         conn=core.open_database(Path(config['paths']['state_root']))
         self.assertIsNone(conn.execute("SELECT 1 FROM actions WHERE kind='clawsweeper.dispatch'").fetchone());conn.close()
 
+    def test_nondraft_openclaw_adjudication_accepts_native_terminal(self):
+        config = self.config()
+        action = self.enqueue(config)
+        runtime.bridge_openclaw(config, self.terminal(config, action, review_clean=False, review_finding_count=2))
+        request_id = json.loads(action['payload_json'])['queue_request_id']
+        self.assertEqual(self.state(config)['state'], 'awaiting_adjudication')
+        self.assertEqual(self.state(config)['review_request_id'], request_id)
+        event = {
+            'schema': core.INTERNAL_EVENT_SCHEMA,
+            'event_id': 'clean-adjudication-nondraft',
+            'type': 'adjudication.completed',
+            'repository': REPO, 'pr_number': 7, 'base_sha': BASE, 'head_sha': HEAD,
+            'review_epoch': action['review_epoch'], 'request_id': request_id,
+            'rail': 'openclaw', 'classifications': ['reject_false_positive', 'defer'],
+            'reviewer_actor': 'fixture-suite-openclaw', 'proof_ref': 'fixture-proof',
+        }
+        outcome = core.ingest_internal_event(
+            config_path=Path(config['core_config']),
+            state_root=Path(config['paths']['state_root']), event_payload=event,
+        )
+        self.assertEqual(outcome['state'], 'clawsweeper_queued')
+        self.assertIsNone(self.state(config)['review_request_id'])
+        claw = legacy.action(config, 7, 'clawsweeper.dispatch')
+        self.assertEqual(claw['review_epoch'], action['review_epoch'])
+        legacy.mark_dispatched(config, claw['action_id'])
+        self.ingest(config, 'workflow_run', 'adjudicated-native-run', self.payload(legacy.claw_workflow_payload(801)))
+
+        class GitHub(legacy.FakeGitHub):
+            def list_run_artifacts(self, run_id):
+                return [{'id': 9001, 'name': f'smcbd-suite-review-{run_id}-1', 'expired': False}]
+
+        userland.collect_clawsweeper_terminals(config, GitHub(801, self.bundle(config, claw)), dry_run=False)
+        artifact = Path(config['clawsweeper_bridge']['terminal_inbox']) / '801.terminal.json'
+        result = runtime.drain_bridge_inboxes(config)
+        native = [item for item in result['artifacts'] if item['rail'] == 'clawsweeper']
+        self.assertEqual(native[0]['result'], 'accepted')
+        self.assertEqual(self.state(config)['state'], 'ready_for_human_merge')
+        self.assertEqual(self.state(config)['review_request_id'], '801')
+        projection = core.state_projection(self.state(config))
+        self.assertEqual(projection['checks']['ClawSweeper Review Rail'], 'success')
+        self.assertTrue(projection['ready_for_human_label'])
+        self.assertFalse(projection['merge_authorized'])
+        self.assertEqual(runtime.bridge_clawsweeper(config, artifact)['result'], 'duplicate_event')
+
     def test_closed_projection_filter_removes_only_target_ready_label(self):
         adapters.test_closed_projection_filter_removes_only_target_ready_label(self.root)
 

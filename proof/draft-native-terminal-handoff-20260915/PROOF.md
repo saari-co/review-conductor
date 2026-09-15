@@ -4,7 +4,8 @@
 
 - Purpose: consume a genuine native terminal after draft OpenClaw clearance;
   do not rerun reviewers or manufacture their verdicts.
-- Lane / writable owner: `suite24_publication_diagnosis`; final closer: parent
+- Lane / writable owner: `conductor12_round1_repairs_current` (round-one repairs,
+  handed off from `suite24_publication_diagnosis`); final closer: parent
   coordinator. Mode: source-only mutate; runtime, deployment and merge remain
   parent-owned.
 - Repository: `saari-co/review-conductor`.
@@ -51,7 +52,7 @@ draft -> CI -> OpenClaw clean -> ready -> native dispatch -> native terminal.
 Its error was `ClawSweeper terminal workflow_run_id does not match the running request`.
 No live mutation was used for the reproduction.
 
-- `python3 tests/test_review_conductor_profiles.py`: **30 tests pass**.
+- `python3 tests/test_review_conductor_profiles.py`: **31 tests pass**.
 - Five new tests cover complete draft-to-terminal ingestion; recovery of seeded
   old state using the unchanged artifact; duplicate ingestion and a single audit;
   wrong/running/other-rail IDs; stale, mistyped and untrusted OpenClaw evidence;
@@ -62,15 +63,36 @@ No live mutation was used for the reproduction.
 - `make check`: **PASS**, including governance, engine/runtime/publication,
   Blocks/profile regressions, transport/supervisor, provenance and whitespace.
 - `make build`: **PASS**.
-- Hosted exact-head CI: pending publication.
+- Prior exact-head CI [35000800446](https://github.com/saari-co/review-conductor/actions/runs/35000800446): all four jobs **PASS** on `aa79830c9388e293be891f13cb909c2de723a1e8`.
+- The round-one repair head receives its own hosted CI; its terminal receipt is
+  recorded in the PR body after publication. Prior-head CI is not new-head proof.
 
 Tested source SHA-256:
 
 | Source | SHA-256 |
 | --- | --- |
-| `tools/review_conductor.py` | `2a22c7e558e92256ab725f3657303450d734d2be347c4901dfdd9841df974ba9` |
+| `tools/review_conductor.py` | `31356a00605ed6f99cdd204298f26afab83427a276ad5d13bcfbff8319a8e7f4` |
 | `tools/review_conductor_runtime.py` | `e2975f922a8ac83a4e9949be8cd6ad2302615e781f4ca9aafb01ba1777c5fe34` |
-| `tests/test_review_conductor_profiles.py` | `5b43c35d3c0c1afcc539a55290127e954630e5d72c49ed780d961be3d650e261` |
+| `tests/test_review_conductor_profiles.py` | `857fa38b7c74092d75f632829c48937aa12ca9b184e2e28fb46de81bd41f8efb` |
+
+## Copilot round-one dispositions
+
+Review `5213707537` covered 5/5 files; two inline findings, no suppressed findings.
+Both are `required_fix`, repaired in one bounded batch:
+
+- `4018528958`: the non-draft OpenClaw `continue_after_adjudication` path also
+  retained the previous request ID. Clear it when switching to the native queue,
+  matching the direct clean and draft-ready paths. The added production-path
+  regression starts with accepted findings, adjudicates `reject_false_positive`
+  and `defer`, dispatches and collects the genuine synthetic native bundle, then
+  consumes its terminal without a started event. It failed on the original
+  retained `rc-*` ID before the fix; it now proves terminal acceptance, same
+  epoch, review success, human-only merge and duplicate-ingestion idempotency.
+- `4018529021`: replaced the stale hosted-CI-pending claim with the observed
+  successful prior-head CI run and an explicit separate new-head CI receipt.
+
+No extra recovery eligibility, runtime mutation or held #11 behavior is added.
+The parent owns the one remaining Copilot round; this lane requests none.
 
 ## Executable recovery plan (parent-owned, not executed here)
 

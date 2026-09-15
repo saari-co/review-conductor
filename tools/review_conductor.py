@@ -1639,7 +1639,7 @@ def continue_after_adjudication(
             review_epoch=review_epoch,
             **identity,
         )
-        update_exact_head(connection, identity, state="clawsweeper_queued", rail="clawsweeper", blocker=None)
+        update_exact_head(connection, identity, state="clawsweeper_queued", rail="clawsweeper", review_request_id=None, blocker=None)
         return "clawsweeper_queued", action_id, created
     if bool(row["is_draft"]):
         update_exact_head(
