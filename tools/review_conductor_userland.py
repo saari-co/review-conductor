@@ -631,6 +631,41 @@ def active_openclaw_actions(config: dict[str, Any]) -> list[sqlite3.Row]:
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 
 
+def preserve_openclaw_report(source: Path, destination: Path) -> dict[str, Any]:
+    """Copy only bounded native output from the already-qualified fetch directory."""
+    try:
+        metadata = source.lstat()
+    except FileNotFoundError:
+        return {"status": "missing"}
+    if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+        raise UserlandError("original report must be a regular non-symlink file")
+    if metadata.st_size > core.OPENCLAW_REPORT_MAX_BYTES:
+        return {"status": "oversized"}
+    with source.open("rb") as stream:
+        raw = stream.read(core.OPENCLAW_REPORT_MAX_BYTES + 1)
+    if len(raw) > core.OPENCLAW_REPORT_MAX_BYTES:
+        return {"status": "oversized"}
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeError:
+        return {"status": "invalid_text"}
+    if not text.strip() or any(ord(char) < 32 and char not in "\n\r\t" for char in text):
+        return {"status": "invalid_text"}
+    # Use the bytes just bounded and inspected, not a second read of the source.
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+    old_umask = os.umask(0o077)
+    try:
+        with temporary.open("xb") as stream:
+            stream.write(raw)
+        os.replace(temporary, destination)
+    finally:
+        os.umask(old_umask)
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+    return {"status": "available", "ref": str(destination), "sha256": hashlib.sha256(raw).hexdigest()}
+
+
 def collect_openclaw_terminals(
     config: dict[str, Any],
     *,
@@ -709,6 +744,9 @@ def collect_openclaw_terminals(
             / request_id
         )
         proof, proof_digest = copy_proof(proof_receipt, destination_root / "PROOF.md")
+        original_report = preserve_openclaw_report(
+            run_root / "review_output.txt", destination_root / "review_output.txt"
+        )
         artifact = {
             "schema": runtime.OPENCLAW_ARTIFACT_SCHEMA,
             "request_id": request_id,
@@ -724,6 +762,7 @@ def collect_openclaw_terminals(
             "reviewer_actor": config.get("review_policy", {}).get("reviewers", {}).get("openclaw", "spark-openclaw"),
             "proof_ref": str(proof),
             "proof_sha256": proof_digest,
+            "original_report": original_report,
         }
         if config.get("review_policy"):
             artifact["review_scope"] = status["review_scope"]

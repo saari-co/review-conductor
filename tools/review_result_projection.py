@@ -15,6 +15,8 @@ import re
 import urllib.parse
 from typing import Any
 
+import review_conductor as core
+
 
 CONTENT_CLEAN = "clean"
 CONTENT_FINDINGS = "findings"
@@ -317,6 +319,7 @@ def check_output(
     artifact_digest: str | None = None,
     report_url: str | None = None,
     request_id: str | None = None,
+    original_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if name not in CHECK_NAMES:
         raise ProjectionError("check name is outside the fixed allowlist")
@@ -344,7 +347,7 @@ def check_output(
     if request_id:
         if not isinstance(request_id, str) or not request_id or "\n" in request_id or len(request_id) > 200:
             raise ProjectionError("request_id must be one bounded identity")
-        lines.append(f"Original report: {request_id}.")
+        lines.append(f"Review request: {request_id}.")
     run_url = workflow_run_url(repository, workflow_run_id)
     if run_url:
         lines.append(f"Workflow run: {run_url}.")
@@ -358,10 +361,34 @@ def check_output(
             lines.append(f"Accepted report: {details}.")
     elif run_url:
         details = run_url
+    report_text = ""
+    if original_report is not None:
+        if name != "OpenClaw Review Rail" or not isinstance(original_report, dict):
+            raise ProjectionError("original report belongs only to OpenClaw")
+        status = original_report.get("status")
+        if status == "available":
+            if set(original_report) != {"status", "sha256", "text"}:
+                raise ProjectionError("original report output has unknown or missing fields")
+            text = original_report["text"]
+            if not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > core.OPENCLAW_REPORT_MAX_BYTES:
+                raise ProjectionError("original report output exceeds its text bound")
+            digest = require_digest(original_report["sha256"], "original report digest")
+            if hashlib.sha256(text.encode("utf-8")).hexdigest() != digest:
+                raise ProjectionError("original report output digest does not match")
+            lines.append(f"Original report: complete native output below (sha256:{digest}).")
+            # Choose the shorter safe fence, bounding even pathological input
+            # while keeping every original character literal, not active Markdown.
+            fences = [char * max(3, 1 + max((len(run) for run in re.findall(re.escape(char) + r"+", text)), default=0)) for char in ("`", "~")]
+            fence = min(fences, key=len)
+            report_text = "\n\n## Original OpenClaw report\n\n" + fence + "text\n" + text + ("" if text.endswith("\n") else "\n") + fence
+        elif isinstance(status, str) and status in core.OPENCLAW_REPORT_UNAVAILABLE and set(original_report) == {"status"}:
+            lines.append(f"Original report unavailable: {status}; full report is not published.")
+        else:
+            raise ProjectionError("original report output status is unsupported")
     output = {
         "title": title,
         "summary": " ".join(lines),
-        "text": "\n".join(lines),
+        "text": "\n".join(lines) + report_text,
     }
     if details:
         output["details_url"] = details

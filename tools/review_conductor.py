@@ -26,6 +26,8 @@ SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
 GENERATION_FD_ENV = "REVIEW_CONDUCTOR_GENERATION_FD"
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 OPENCLAW_EXACT_TUPLE_CONTRACT = "review-conductor-openclaw-v1"
+OPENCLAW_REPORT_MAX_BYTES = 24 * 1024
+OPENCLAW_REPORT_UNAVAILABLE = {"missing", "oversized", "invalid_text"}
 CLASSIFICATIONS = {
     "required_fix",
     "reject_false_positive",
@@ -36,7 +38,7 @@ INTERNAL_EVENT_FIELDS = {
     "openclaw.started": ({"request_id"}, set()),
     "openclaw.terminal": (
         {"request_id", "result", "finding_count", "reviewer_actor", "proof_ref"},
-        {"proof_sha256", "artifact_digest", "review_epoch"},
+        {"proof_sha256", "artifact_digest", "review_epoch", "original_report"},
     ),
     "adjudication.completed": (
         {"request_id", "rail", "classifications", "reviewer_actor", "proof_ref"},
@@ -48,6 +50,23 @@ INTERNAL_EVENT_FIELDS = {
         set(),
     ),
 }
+
+
+def validate_original_report(value: Any) -> dict[str, Any]:
+    """Closed, optional native-output receipt; legacy terminals omit it."""
+    if not isinstance(value, dict):
+        raise ContractError("original_report must be a bounded receipt")
+    status = value.get("status")
+    if status == "available":
+        require_exact_keys(value, {"status", "ref", "sha256"}, set(), "original_report")
+        require_text(value["ref"], "original report ref", 500)
+        if not isinstance(value["sha256"], str) or re.fullmatch(r"[0-9a-f]{64}", value["sha256"]) is None:
+            raise ContractError("original report digest must be lowercase SHA-256")
+    elif isinstance(status, str) and status in OPENCLAW_REPORT_UNAVAILABLE:
+        require_exact_keys(value, {"status"}, set(), "original_report")
+    else:
+        raise ContractError("original report status is unsupported")
+    return dict(value)
 
 
 def generation_pass_fds(
@@ -1503,6 +1522,8 @@ def validate_internal_event(config: dict[str, Any], event: dict[str, Any]) -> di
     require_sha(event["base_sha"], "internal event base_sha")
     require_sha(event["head_sha"], "internal event head_sha")
     if event_type == "openclaw.terminal":
+        if "original_report" in event:
+            validate_original_report(event["original_report"])
         for field in ("proof_sha256", "artifact_digest"):
             if field in event and (not isinstance(event[field], str) or
                                    re.fullmatch(r"[0-9a-f]{64}", event[field]) is None):

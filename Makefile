@@ -13,6 +13,7 @@ test:
 	$(PYTHON) tests/test_review_conductor_activation.py
 	$(PYTHON) tests/test_review_conductor_userland.py
 	$(PYTHON) tests/test_review_result_projection.py
+	$(PYTHON) tests/test_openclaw_report_publication.py
 	$(PYTHON) tests/test_review_conductor_profiles.py
 	$(PYTHON) -m unittest discover -s tests -p 'test_scaffold.py' -v
 	$(PYTHON) -m unittest discover -s tests -p 'test_trusted_admission.py' -v

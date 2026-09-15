@@ -405,6 +405,7 @@ class GitHubAppClient:
             ("POST", rf"/app/installations/{self._app['installation_id']}/access_tokens", "installation-token"),
             ("POST", rf"/repos/{repository}/check-runs", "check-create"),
             ("PATCH", rf"/repos/{repository}/check-runs/[1-9][0-9]*", "check-update"),
+            ("GET", rf"/repos/{repository}/check-runs/[1-9][0-9]*", "check-read"),
             # Approved-policy retrieval is a generalized-profile capability; the
             # legacy allowlist never reaches repository contents.
             *(
@@ -649,12 +650,29 @@ class GitHubAppClient:
     ) -> None:
         if name not in CHECK_NAMES:
             raise GitHubApiError("check name is outside the fixed allowlist")
+        payload = check_payload(name, head_sha, external_id, state, report=report)
+        if name == "OpenClaw Review Rail" and report and "original_report" in report:
+            # Use GitHub's observed page for this very check, never an invented
+            # Actions run or caller-supplied report URL. PATCH remains idempotent.
+            observed = self._call(
+                "GET", f"/repos/{self.repository}/check-runs/{check_id}", None,
+                expected={200}, authority=authority,
+            )
+            url = observed.get("html_url")
+            if (
+                type(observed.get("id")) is not int or observed["id"] != check_id
+                or observed.get("name") != name or observed.get("head_sha") != head_sha
+                or observed.get("external_id") != external_id
+                or not isinstance(observed.get("app"), dict)
+                or type(observed["app"].get("id")) is not int
+                or observed["app"]["id"] != self._app["app_id"]
+                or url != f"https://github.com/{self.repository}/runs/{check_id}"
+            ):
+                raise GitHubApiError("original report check page does not match the owned exact check")
+            payload["details_url"] = url
         self._call(
-            "PATCH",
-            f"/repos/{self.repository}/check-runs/{check_id}",
-            check_payload(name, head_sha, external_id, state, report=report),
-            expected={200},
-            authority=authority,
+            "PATCH", f"/repos/{self.repository}/check-runs/{check_id}", payload,
+            expected={200}, authority=authority,
         )
 
     def _call_list(
@@ -964,6 +982,7 @@ def check_payload(
             artifact_digest=report.get("artifact_digest"),
             report_url=report.get("report_url"),
             request_id=report.get("request_id"),
+            original_report=report.get("original_report"),
         )
         output = {"title": rendered["title"], "summary": rendered["summary"], "text": rendered["text"]}
         if rendered.get("details_url"):
@@ -1087,6 +1106,8 @@ def accepted_openclaw_terminal(
     artifact_digest = payload.get("artifact_digest") or payload.get("artifact_sha256")
     if isinstance(artifact_digest, str) and artifact_digest:
         terminal["artifact_digest"] = artifact_digest
+    if "original_report" in payload:
+        terminal["original_report"] = core.validate_original_report(payload["original_report"])
     report_url = payload.get("report_url")
     if isinstance(report_url, str) and report_url:
         terminal["report_url"] = report_url
@@ -1116,6 +1137,8 @@ def projection_check_report(
             else (check_state or row["state"])
         )
         if openclaw_terminal:
+            if "original_report" in openclaw_terminal:
+                report["original_report"] = openclaw_terminal["original_report"]
             if openclaw_terminal.get("request_id"):
                 report["request_id"] = openclaw_terminal["request_id"]
                 report["reason"] = (
@@ -1561,6 +1584,8 @@ def reconcile_projection(
             }
             quality = effective_quality(connection, row, accepted_quality_row(connection, row))
             openclaw_terminal = accepted_openclaw_terminal(connection, row)
+            if openclaw_terminal and "original_report" in openclaw_terminal:
+                openclaw_terminal["original_report"] = original_report_output(config, openclaw_terminal)
             for name, check_state in state["checks"].items():
                 check_report = projection_check_report(
                     row,
@@ -2393,6 +2418,38 @@ def proof_file(config: dict[str, Any], raw: Any, digest: Any) -> Path:
     return resolved
 
 
+def original_report_output(config: dict[str, Any], terminal: dict[str, Any]) -> dict[str, Any]:
+    """Reverify original output at bridge and publication time; no historical backfill."""
+    report = core.validate_original_report(terminal["original_report"])
+    if report["status"] != "available":
+        return report
+    request_id = core.require_text(terminal.get("request_id"), "original report request", 200)
+    if core.SAFE_ID_RE.fullmatch(request_id) is None:
+        raise RuntimeError("original report request identity is invalid")
+    root = Path(config["paths"]["proof_root"]).resolve(strict=True)
+    expected = root / "openclaw" / request_id / "review_output.txt"
+    path = require_absolute_path(report["ref"], "original report ref")
+    try:
+        metadata = path.lstat()
+        resolved = path.resolve(strict=True)
+        if (not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)
+                or path != expected or resolved != expected or metadata.st_size > core.OPENCLAW_REPORT_MAX_BYTES):
+            raise RuntimeError("original report path or size does not match the exact request")
+        with path.open("rb") as stream:
+            raw = stream.read(core.OPENCLAW_REPORT_MAX_BYTES + 1)
+    except OSError as exc:
+        raise RuntimeError("original report is unavailable") from exc
+    if len(raw) > core.OPENCLAW_REPORT_MAX_BYTES or hashlib.sha256(raw).hexdigest() != report["sha256"]:
+        raise RuntimeError("original report digest or size does not match")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeError as exc:
+        raise RuntimeError("original report is not UTF-8") from exc
+    if not text.strip() or any(ord(char) < 32 and char not in "\n\r\t" for char in text):
+        raise RuntimeError("original report is not publishable text")
+    return {"status": "available", "sha256": report["sha256"], "text": text}
+
+
 def read_terminal_artifact(path: Path, schema: str) -> tuple[dict[str, Any], str]:
     artifact = core.read_json(path, "terminal bridge artifact")
     if artifact.get("schema") != schema:
@@ -2419,7 +2476,7 @@ def bridge_openclaw(config: dict[str, Any], artifact_path: Path) -> dict[str, An
                 "exact_tuple_qualified",
             }
         )
-    core.require_exact_keys(artifact, required, set(), "OpenClaw terminal artifact")
+    core.require_exact_keys(artifact, required, {"original_report"}, "OpenClaw terminal artifact")
     if artifact["repository"] != config["github_app"]["repository"]:
         raise RuntimeError("terminal artifact belongs to another repository")
     if policy and (
@@ -2436,6 +2493,8 @@ def bridge_openclaw(config: dict[str, Any], artifact_path: Path) -> dict[str, An
         artifact["review_epoch"], "OpenClaw terminal review_epoch"
     )
     proof = proof_file(config, artifact["proof_ref"], artifact["proof_sha256"])
+    if "original_report" in artifact:
+        original_report_output(config, artifact)
     connection = core.open_database(Path(config["paths"]["state_root"]), config["github_app"]["repository"])
     try:
         connection.execute("BEGIN IMMEDIATE")
@@ -2485,6 +2544,8 @@ def bridge_openclaw(config: dict[str, Any], artifact_path: Path) -> dict[str, An
             "artifact_digest": artifact_digest,
             "review_epoch": artifact["review_epoch"],
         }
+        if "original_report" in artifact:
+            event["original_report"] = core.validate_original_report(artifact["original_report"])
         if config.get("review_policy"):
             event["review_scope"] = artifact["review_scope"]
             event["review_epoch"] = artifact["review_epoch"]
