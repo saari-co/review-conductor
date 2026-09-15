@@ -3,7 +3,7 @@
 ## Route and ownership
 
 - Lane/type: bounded report-publication source repair.
-- Initial owner: `suite_producer_pin`; round-one repair owner: `conductor10_round1_repairs`; coordinator/closer: root.
+- Initial owner: `suite_producer_pin`; round-one repair owner: `conductor10_round1_repairs`; final bounded repair owner: `conductor10_final_read_fix`; coordinator/closer: root.
 - Repository: `saari-co/review-conductor`.
 - Branch: `codex/openclaw-original-report-20260915`.
 - Worktree: isolated sibling `review-conductor-codex-openclaw-original-report-20260915`, prepared with `smoky worktree new` after fetching origin.
@@ -145,3 +145,44 @@ all precise applied-P3 mutants, then passed.
 | `tools/review_result_projection.py` | `f17dd818ea5b111f5d8e4e626dadcc4f8dd832290eee8e8becdf7c2484d4f587` |
 | `tests/test_openclaw_report_publication.py` | `3f01b90ccf2612ada575e891897515b3399131aa8057e2b1a17c06b9cdf355a9` |
 | `tests/test_review_conductor_userland.py` | `d1c093a2f633ee18c918b10e55364f4301cef91f036c9b7eec37accd2153a196` |
+
+## Copilot round 2 final bounded publication-read repair
+
+- Starting/reviewed head: `f3cc1d0eeb42597beb6e56d1e8cb4a3094fc57d5`.
+- [Publication read race](https://github.com/saari-co/review-conductor/pull/10#discussion_r4016372783): `required_fix`, repaired under the owner's explicit direction to route this final fix and then merge.
+- Review budget is exhausted at **2/2**. No third Copilot or other review was requested by this lane. The final repair is tested, not independently re-reviewed; parent owns merge adjudication and execution.
+
+The publication reader now keeps request/ref comparison lexical, opens the trusted
+proof root and each exact request descendant as no-follow directory descriptors,
+and opens the report leaf once with `O_NOFOLLOW | O_NONBLOCK`. Regular-file type
+and stat size are checked on that descriptor; a bounded read of at most 24 KiB + 1
+from the same descriptor is checked against the accepted SHA-256. Path replacement
+cannot redirect the read, and a FIFO substituted before open cannot hang it.
+Open/read failures retain the existing unavailable error. Every opened descriptor
+is closed on success or failure. Missing receipts, exact-request/digest binding,
+UTF-8/text validation and the original output's literal rendering remain intact.
+
+### Final bounded validation
+
+- `python3 tests/test_openclaw_report_publication.py`: **19/19 PASS**.
+- Three new grouped production-reader regressions cover replacement before open
+  with FIFO, symlink, directory, missing or oversized file; leaf replacement with
+  FIFO after descriptor validation; symlinked request ancestors; ancestor-directory
+  replacement after opening; and descriptor closure on success/failure.
+- The new tests fail against the pre-repair function loaded from the starting
+  commit in memory. No source checkout was switched or reverted for that check.
+- `make check`: **PASS**, exit 0; full existing suites, Blocks compatibility,
+  provenance/compilation and whitespace retained.
+- `make build`: **PASS**, exit 0.
+- `git diff --check`: **PASS**.
+- Exact published head/tree and hosted CI are recorded in the PR body and parent
+  handoff. The hashes below bind the actual tested code.
+- Limits: offline synthetic proof; no live APIs, report publication, deployment,
+  protection changes or merge from this lane. This does not promise immutability
+  against trusted same-user in-place writes; digest and byte bounds remain enforced.
+
+| Final source | SHA-256 |
+| --- | --- |
+| `tools/review_conductor_runtime.py` | `9b3237d36434c6b9a23979589f074f2fda1c9d809d332eeec97d871bbbc017e7` |
+| `tests/test_openclaw_report_publication.py` | `e366cbb1d9d4d84f8dec0ca37d95bd2cf158a8595062336f56cba51b72a8de74` |
+| `docs/provenance.json` | `285aee09d10e4702eb424fc4ed72ee94a6dd3738b3b1cc185e4e6b07a8ff9df6` |

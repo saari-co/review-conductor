@@ -350,6 +350,119 @@ class OriginalReportTests(unittest.TestCase):
             self.collect(None)
         self.assertFalse(self.artifact_path.exists())
 
+    def test_publication_rejects_leaf_replacement_before_open_and_closes_descriptors(self):
+        artifact = self.collect(b"request-bound report\n")
+        source = Path(artifact["original_report"]["ref"])
+        other = self.fixture.root / "unrelated-report.txt"
+        other.write_text("unrelated bytes")
+        real_open = os.open
+        for replacement in ("fifo", "symlink", "directory", "missing", "oversized"):
+            with self.subTest(replacement=replacement):
+                opened = []
+                replaced = []
+
+                def replace_before_open(path, flags, **kwargs):
+                    if str(path) == "review_output.txt":
+                        # Fail the regression instead of hanging if nonblocking is lost.
+                        self.assertTrue(flags & os.O_NONBLOCK)
+                        self.assertTrue(flags & os.O_NOFOLLOW)
+                        source.unlink()
+                        if replacement == "fifo":
+                            os.mkfifo(source)
+                        elif replacement == "symlink":
+                            source.symlink_to(other)
+                        elif replacement == "directory":
+                            source.mkdir()
+                        elif replacement == "oversized":
+                            source.write_bytes(b"x" * (core.OPENCLAW_REPORT_MAX_BYTES + 1))
+                        replaced.append(True)
+                    fd = real_open(path, flags, **kwargs)
+                    opened.append(fd)
+                    return fd
+
+                try:
+                    with patch.object(runtime.os, "open", side_effect=replace_before_open):
+                        with self.assertRaises(runtime.RuntimeError):
+                            runtime.original_report_output(self.config, artifact)
+                    self.assertEqual(replaced, [True])
+                    for fd in opened:
+                        with self.assertRaises(OSError):
+                            os.fstat(fd)
+                finally:
+                    if source.is_dir():
+                        source.rmdir()
+                    else:
+                        source.unlink(missing_ok=True)
+                    source.write_bytes(b"request-bound report\n")
+
+    def test_publication_reads_validated_descriptor_after_leaf_replacement(self):
+        raw = b"original request assessment\n"
+        artifact = self.collect(raw)
+        source = Path(artifact["original_report"]["ref"])
+        real_open, real_fstat = os.open, os.fstat
+        opened = []
+        leaf = []
+        replaced = []
+
+        def track_open(path, flags, **kwargs):
+            fd = real_open(path, flags, **kwargs)
+            opened.append(fd)
+            if str(path) == "review_output.txt":
+                leaf.append(fd)
+            return fd
+
+        def replace_after_stat(fd):
+            metadata = real_fstat(fd)
+            if fd in leaf:
+                source.unlink()
+                os.mkfifo(source)
+                replaced.append(True)
+            return metadata
+
+        with patch.object(runtime.os, "open", side_effect=track_open), \
+                patch.object(runtime.os, "fstat", side_effect=replace_after_stat):
+            output = runtime.original_report_output(self.config, artifact)
+        self.assertEqual(replaced, [True])
+        self.assertEqual(output["text"], raw.decode())
+        self.assertEqual(output["sha256"], hashlib.sha256(raw).hexdigest())
+        for fd in opened:
+            with self.assertRaises(OSError):
+                os.fstat(fd)
+
+    def test_publication_directory_binding_rejects_links_and_survives_replacement(self):
+        artifact = self.collect(b"original directory assessment\n")
+        source = Path(artifact["original_report"]["ref"])
+        for directory in (source.parent, source.parent.parent):
+            with self.subTest(symlinked_ancestor=directory.name):
+                moved = directory.with_name(directory.name + "-original")
+                directory.rename(moved)
+                directory.symlink_to(moved, target_is_directory=True)
+                try:
+                    with self.assertRaisesRegex(runtime.RuntimeError, "unavailable"):
+                        runtime.original_report_output(self.config, artifact)
+                finally:
+                    directory.unlink()
+                    moved.rename(directory)
+        other = self.fixture.root / "unrelated-directory"
+        other.mkdir()
+        (other / "review_output.txt").write_text("unrelated assessment")
+        original = source.parent.with_name(source.parent.name + "-original")
+        real_open = os.open
+        replaced = []
+
+        def replace_directory_after_open(path, flags, **kwargs):
+            fd = real_open(path, flags, **kwargs)
+            if str(path) == self.request_id:
+                source.parent.rename(original)
+                source.parent.symlink_to(other, target_is_directory=True)
+                replaced.append(True)
+            return fd
+
+        with patch.object(runtime.os, "open", side_effect=replace_directory_after_open):
+            output = runtime.original_report_output(self.config, artifact)
+        self.assertEqual(replaced, [True])
+        self.assertEqual(output["text"], "original directory assessment\n")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

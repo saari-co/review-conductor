@@ -2429,14 +2429,26 @@ def original_report_output(config: dict[str, Any], terminal: dict[str, Any]) -> 
     root = Path(config["paths"]["proof_root"]).resolve(strict=True)
     expected = root / "openclaw" / request_id / "review_output.txt"
     path = require_absolute_path(report["ref"], "original report ref")
+    if path != expected:
+        raise RuntimeError("original report path or size does not match the exact request")
     try:
-        metadata = path.lstat()
-        resolved = path.resolve(strict=True)
-        if (not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)
-                or path != expected or resolved != expected or metadata.st_size > core.OPENCLAW_REPORT_MAX_BYTES):
-            raise RuntimeError("original report path or size does not match the exact request")
-        with path.open("rb") as stream:
-            raw = stream.read(core.OPENCLAW_REPORT_MAX_BYTES + 1)
+        with contextlib.ExitStack() as stack:
+            # Resolve only the configured root; bind descendants to opened directories.
+            directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            directory = os.open(root, directory_flags)
+            stack.callback(os.close, directory)
+            for component in ("openclaw", request_id):
+                directory = os.open(component, directory_flags, dir_fd=directory)
+                stack.callback(os.close, directory)
+            fd = os.open("review_output.txt", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         dir_fd=directory)
+            stack.callback(os.close, fd)
+            metadata = os.fstat(fd)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > core.OPENCLAW_REPORT_MAX_BYTES:
+                raise RuntimeError("original report path or size does not match the exact request")
+            # One inode supplies shape, bound and bytes; growth is bounded independently.
+            with os.fdopen(fd, "rb", closefd=False) as stream:
+                raw = stream.read(core.OPENCLAW_REPORT_MAX_BYTES + 1)
     except OSError as exc:
         raise RuntimeError("original report is unavailable") from exc
     if len(raw) > core.OPENCLAW_REPORT_MAX_BYTES or hashlib.sha256(raw).hexdigest() != report["sha256"]:
