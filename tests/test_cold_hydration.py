@@ -1,5 +1,6 @@
 """Independent object-store proof; synthetic auth only, no live GitHub calls."""
 import copy
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -229,6 +230,183 @@ class ColdHydrationTest(unittest.TestCase):
                 authority_client=self.client, runner=fail)
         with self.assertRaises(OSError):
             os.fstat(self.fetch_fd)
+
+    def test_revocation_after_credential_yield_prevents_fetch(self):
+        original = self.client.hydration_credentials
+        revoked = False
+        @contextlib.contextmanager
+        def credentials(authority):
+            nonlocal revoked
+            with original(authority) as pair:
+                revoked = True
+                yield pair
+        def guard(method, operation, authority):
+            if revoked:
+                raise core.AuthorityDenied("synthetic revocation after yield")
+        self.client.set_authority_guard(guard)
+        with patch.object(self.client, "hydration_credentials", credentials):
+            with self.assertRaises(core.AuthorityDenied):
+                userland.hydrate_exact_pr_head(self.config, self.action,
+                    authority_client=self.client, runner=self.runner)
+        self.assertEqual(self.fetches, 0)
+
+    def test_revocation_while_opening_pack_prevents_import(self):
+        original = Path.open
+        revoked = False
+        def opening(path, mode="r", *args, **kwargs):
+            nonlocal revoked
+            result = original(path, mode, *args, **kwargs)
+            if path.name == "objects.pack" and mode == "rb":
+                revoked = True
+            return result
+        def guard(method, operation, authority):
+            if revoked:
+                raise core.AuthorityDenied("synthetic revocation at pack open")
+        self.client.set_authority_guard(guard)
+        with patch.object(Path, "open", opening):
+            with self.assertRaises(core.AuthorityDenied):
+                userland.hydrate_exact_pr_head(self.config, self.action,
+                    authority_client=self.client, runner=self.runner)
+        self.assertNotEqual(self.git(self.checkout, "cat-file", "-e", self.head, check=False).returncode, 0)
+
+    def test_pipe_resource_failures_are_closed_and_owned_fds_close(self):
+        for operation in ("pipe", "fpathconf", "write"):
+            with self.subTest(operation=operation):
+                opened = []
+                original_pipe = os.pipe
+                def pipe():
+                    descriptors = original_pipe()
+                    opened.extend(descriptors)
+                    return descriptors
+                with contextlib.ExitStack() as stack:
+                    if operation != "pipe":
+                        stack.enter_context(patch.object(runtime.os, "pipe", pipe))
+                    stack.enter_context(patch.object(runtime.os, operation,
+                        side_effect=OSError("synthetic local resource detail")))
+                    with self.assertRaisesRegex(core.ContractError, "hydration credential resource unavailable"):
+                        with self.client.hydration_credentials(self.action):
+                            self.fail("resource failure must not yield")
+                for descriptor in opened:
+                    with self.assertRaises(OSError):
+                        os.fstat(descriptor)
+
+    def test_short_pipe_write_is_closed(self):
+        with patch.object(runtime.os, "write", return_value=1):
+            with self.assertRaisesRegex(core.ContractError, "pipe incomplete"):
+                with self.client.hydration_credentials(self.action):
+                    self.fail("short write must not yield")
+
+    def test_temp_and_pack_resource_errors_are_closed(self):
+        original_open = Path.open
+        original_stat = Path.stat
+        for operation in ("temporary", "mkdir", "pack_open", "pack_stat"):
+            with self.subTest(operation=operation), contextlib.ExitStack() as stack:
+                def opening(path, *args, **kwargs):
+                    if path.name == "objects.pack":
+                        raise OSError("synthetic resource detail")
+                    return original_open(path, *args, **kwargs)
+                def statting(path, *args, **kwargs):
+                    if path.name == "objects.pack":
+                        raise OSError("synthetic resource detail")
+                    return original_stat(path, *args, **kwargs)
+                if operation == "temporary":
+                    stack.enter_context(patch.object(userland.tempfile, "TemporaryDirectory", side_effect=OSError("detail")))
+                elif operation == "mkdir":
+                    stack.enter_context(patch.object(Path, "mkdir", side_effect=OSError("detail")))
+                elif operation == "pack_open":
+                    stack.enter_context(patch.object(Path, "open", opening))
+                else:
+                    stack.enter_context(patch.object(Path, "stat", statting))
+                with self.assertRaisesRegex(userland.HydrationFailure, "local_resource_unavailable"):
+                    userland.hydrate_exact_pr_head(self.config, self.action,
+                        authority_client=self.client, runner=self.runner)
+                self.assertNotEqual(self.git(self.checkout, "cat-file", "-e", self.head, check=False).returncode, 0)
+
+    def test_stored_and_expanded_object_budgets_prevent_checkout_import(self):
+        # Very compressible data: final pack bytes alone cannot bound this.
+        (self.remote / "large").write_bytes(b"x" * 100_000)
+        self.git(self.remote, "add", "large")
+        self.git(self.remote, "commit", "-m", "large synthetic blob")
+        self.head = self.git(self.remote, "rev-parse", "HEAD").stdout.strip()
+        self.action["head_sha"] = self.head
+        self.git(self.remote, "update-ref", "refs/pull/4/head", self.head)
+        for bound, value, error in (
+            ("HYDRATION_PACK_BYTES", 32, "fetched_object_budget_exceeded"),
+            ("HYDRATION_EXPANDED_BYTES", 1024, "expanded_object_budget_exceeded"),
+            ("HYDRATION_OBJECT_LIMIT", 1, "expanded_object_budget_exceeded"),
+        ):
+            with self.subTest(bound=bound), patch.object(userland, bound, value, create=True):
+                with self.assertRaisesRegex(userland.HydrationFailure, error):
+                    userland.hydrate_exact_pr_head(self.config, self.action,
+                        authority_client=self.client, runner=self.runner)
+                self.assertNotEqual(self.git(self.checkout, "cat-file", "-e", self.head, check=False).returncode, 0)
+
+    def test_fetch_file_size_limit_applies_during_transport(self):
+        (self.remote / "random").write_bytes(os.urandom(32_000))
+        self.git(self.remote, "add", "random")
+        self.git(self.remote, "commit", "-m", "incompressible synthetic blob")
+        self.head = self.git(self.remote, "rev-parse", "HEAD").stdout.strip()
+        self.action["head_sha"] = self.head
+        self.git(self.remote, "update-ref", "refs/pull/4/head", self.head)
+        def bounded_runner(command, **kwargs):
+            if "fetch" in command:
+                self.assertIn("fetch.unpackLimit=0", command)
+                helper = str(userland.TOOLS / "git_hydration_exec.py")
+                self.assertEqual(command[:3], [sys.executable, "-I", helper])
+                # Lower only this child limit, never the parent process.
+                code = ("import runpy,sys; m=runpy.run_path(sys.argv[1]); "
+                        "m['main'].__globals__['FILE_BYTES']=4096; "
+                        "sys.argv=sys.argv[1:]; sys.exit(m['main']())")
+                command = [sys.executable, "-I", "-c", code, *command[2:]]
+            return self.runner(command, **kwargs)
+        with self.assertRaisesRegex(userland.HydrationFailure, "authenticated_fetch_failed"):
+            userland.hydrate_exact_pr_head(self.config, self.action,
+                authority_client=self.client, runner=bounded_runner)
+        self.assertEqual(self.fetches, 1)
+        self.assertNotEqual(self.git(self.checkout, "cat-file", "-e", self.head, check=False).returncode, 0)
+
+    def test_pending_failures_persist_once_and_revocation_stays_pending(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import test_review_conductor_userland as fixture
+        for case in ("missing", "legacy", "fetch", "resource", "revoked"):
+            with self.subTest(case=case):
+                root = self.root / case
+                root.mkdir()
+                config = fixture.config_fixture(root)
+                config["paths"]["blocks_checkout"] = str(self.checkout)
+                self.git(self.checkout, "remote", "set-url", "origin", "https://github.com/dinkuskit/blocks.git")
+                pr = fixture.pr_payload(4, self.head)
+                pr["pull_request"]["base"]["sha"] = self.base
+                fixture.ingress(config, "pull_request", "fixture-pr", pr)
+                ci = fixture.ci_payload(4, 101, self.head)
+                ci["workflow_run"]["pull_requests"][0]["base"]["sha"] = self.base
+                fixture.ingress(config, "workflow_run", "fixture-ci", ci)
+                legacy = runtime.GitHubAppClient(config, "synthetic-key")
+                client = legacy if case == "legacy" else None
+                original_hydrate = userland.hydrate_exact_pr_head
+                def hydrating(cfg, action, **kwargs):
+                    if case == "fetch":
+                        raise userland.HydrationFailure("authenticated_fetch_failed")
+                    if case == "resource":
+                        raise userland.HydrationFailure("local_resource_unavailable")
+                    if case == "revoked":
+                        raise core.AuthorityDenied("synthetic revoked")
+                    return original_hydrate(cfg, action, runner=self.runner, **kwargs)
+                with patch.object(userland, "hydrate_exact_pr_head", hydrating):
+                    if case == "revoked":
+                        with self.assertRaises(core.AuthorityDenied):
+                            userland.hydrate_pending_openclaw_heads(config, authority_client=client, dry_run=False)
+                    else:
+                        result = userland.hydrate_pending_openclaw_heads(config, authority_client=client, dry_run=False)
+                        self.assertEqual(result[0]["result"], "failed")
+                        self.assertEqual(userland.hydrate_pending_openclaw_heads(config, authority_client=client, dry_run=False), [])
+                saved = fixture.action(config, 4, "openclaw.enqueue")
+                self.assertEqual(saved["status"], "pending" if case == "revoked" else "failed")
+                self.assertEqual(saved["attempts"], 0 if case == "revoked" else 1)
+                if case != "revoked":
+                    reason = {"missing": "service_auth_unavailable", "legacy": "checkout_validation_failed",
+                              "fetch": "authenticated_fetch_failed", "resource": "local_resource_unavailable"}[case]
+                    self.assertEqual(saved["last_error"], f"exact PR head hydration failed ({reason})")
 
 
 if __name__ == "__main__":

@@ -1498,7 +1498,29 @@ class HydrationFailure(UserlandError):
         super().__init__(f"exact PR hydration failed ({reason})")
 
 
+HYDRATION_PACK_BYTES = 256 * 1024 * 1024
+HYDRATION_EXPANDED_BYTES = 512 * 1024 * 1024
+HYDRATION_OBJECT_LIMIT = 100_000
+
+
+def hydration_git_command(directory: Path, *arguments: str) -> list[str]:
+    # Exec wrapper applies inherited OS limits without thread-unsafe preexec_fn.
+    return [sys.executable, "-I", str(TOOLS / "git_hydration_exec.py"),
+            *checkout_git_command(directory, *arguments)]
+
+
 def fetch_hydration_pack(
+    checkout: Path, action: Any, client: Any, *, runner: CommandRunner,
+) -> None:
+    try:
+        _fetch_hydration_pack(checkout, action, client, runner=runner)
+    except OSError:
+        raise HydrationFailure("local_resource_unavailable") from None
+    except runtime.GitHubApiError:
+        raise HydrationFailure("service_auth_unavailable") from None
+
+
+def _fetch_hydration_pack(
     checkout: Path, action: Any, client: Any, *, runner: CommandRunner,
 ) -> None:
     """Fetch in an independent bare store; import only a validated object pack.
@@ -1521,15 +1543,18 @@ def fetch_hydration_pack(
 
         def run(directory: Path, *args: str, input: Any = None,
                 output: Any = subprocess.PIPE, text: bool = True,
-                fd: int | None = None) -> subprocess.CompletedProcess:
+                fd: int | None = None,
+                operation: str | None = None) -> subprocess.CompletedProcess:
             def bound_runner(command: list[str], **kwargs: Any):
                 # Preserve the owned service generation, plus only our pipe.
                 if fd is not None:
                     kwargs["pass_fds"] = (*kwargs["pass_fds"], fd)
+                if operation is not None:
+                    runtime.assert_authority(client, operation, authority)
                 return runner(command, **kwargs)
             try:
                 return core.run_generation_bound(
-                    bound_runner, checkout_git_command(directory, *args),
+                    bound_runner, hydration_git_command(directory, *args),
                     cwd="/", env={**checkout_git_environment(), "HOME": str(staging)}, input=input,
                     stdout=output, stderr=subprocess.DEVNULL, text=text,
                     timeout=180, check=False,
@@ -1546,11 +1571,13 @@ def fetch_hydration_pack(
                 "-c", "credential.useHttpPath=true", "-c", "credential.interactive=false",
                 "-c", "http.followRedirects=false", "-c", "http.sslVerify=true",
                 "-c", "http.proxy=", "-c", "http.extraHeader=",
+                "-c", "fetch.unpackLimit=0", "-c", "pack.threads=1",
                 "-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
                 "fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
                 f"https://github.com/{repository}.git",
                 f"refs/pull/{authority['pr_number']}/head:refs/heads/hydration",
                 base, fd=descriptor, output=subprocess.DEVNULL,
+                operation="checkout-hydration:fetch-spawn",
             )
         if result.returncode:
             raise HydrationFailure("authenticated_fetch_failed")
@@ -1558,11 +1585,33 @@ def fetch_hydration_pack(
         ancestry = run(staging, "merge-base", "--is-ancestor", base, head)
         if resolved.returncode or resolved.stdout.strip() != head or ancestry.returncode:
             raise HydrationFailure("fetched_tuple_mismatch")
+        # Forced packed fetch bounds each incoming pack as it is written via
+        # RLIMIT_FSIZE. Check aggregate stored bytes and all expanded object
+        # headers before repacking/import; no object contents enter Python RAM.
+        stored = sum(path.stat().st_size for path in (staging / "objects").rglob("*")
+                     if path.is_file())
+        if stored > HYDRATION_PACK_BYTES:
+            raise HydrationFailure("fetched_object_budget_exceeded")
+        inventory = Path(temporary) / "object-sizes"
+        with inventory.open("wb") as destination:
+            sized = run(staging, "cat-file", "--batch-all-objects",
+                        "--batch-check=%(objectsize)", output=destination)
+        if sized.returncode:
+            raise HydrationFailure("object_inventory_unavailable")
+        count = expanded = 0
+        with inventory.open("rb") as sizes:
+            while line := sizes.readline(32):
+                if not re.fullmatch(rb"[0-9]{1,20}\n", line):
+                    raise HydrationFailure("object_inventory_invalid")
+                count += 1
+                expanded += int(line)
+                if count > HYDRATION_OBJECT_LIMIT or expanded > HYDRATION_EXPANDED_BYTES:
+                    raise HydrationFailure("expanded_object_budget_exceeded")
         pack = Path(temporary) / "objects.pack"
         with pack.open("wb") as destination:
-            packed = run(staging, "pack-objects", "--stdout", "--revs",
+            packed = run(staging, "pack-objects", "--threads=1", "--window-memory=64m", "--stdout", "--revs",
                          input=f"{head}\n{base}\n".encode(), output=destination, text=False)
-        if packed.returncode or not 0 < pack.stat().st_size <= 256 * 1024 * 1024:
+        if packed.returncode or not 0 < pack.stat().st_size <= HYDRATION_PACK_BYTES:
             raise HydrationFailure("object_pack_unavailable")
         runtime.assert_authority(client, "checkout-hydration:import", authority)
         if checkout_fingerprint(checkout) != checkout_identity:
@@ -1571,8 +1620,13 @@ def fetch_hydration_pack(
         # target local credential/URL configuration therefore cannot redirect it.
         with pack.open("rb") as source:
             try:
+                def import_runner(command: list[str], **kwargs: Any):
+                    runtime.assert_authority(client, "checkout-hydration:import-spawn", authority)
+                    return runner(command, **kwargs)
                 imported = core.run_generation_bound(
-                    runner, checkout_git_command(checkout, "index-pack", "--stdin", "--strict"),
+                    import_runner, hydration_git_command(checkout, "index-pack", "--threads=1",
+                                                        "--stdin", "--strict",
+                                                        f"--max-input-size={HYDRATION_PACK_BYTES}"),
                     cwd="/", env=checkout_git_environment(), stdin=source,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     timeout=180, check=False,
