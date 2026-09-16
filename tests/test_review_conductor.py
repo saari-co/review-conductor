@@ -557,6 +557,50 @@ def reach_clawsweeper_result(
     return workflow_run_id
 
 
+def insert_clawsweeper_quality(
+    state: Path,
+    pr: int,
+    head: str,
+    workflow_run_id: int | str,
+    *,
+    review_epoch: int = 0,
+) -> None:
+    with sqlite3.connect(state / "review-conductor.sqlite3") as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS clawsweeper_quality (
+              repository TEXT NOT NULL,
+              pr_number INTEGER NOT NULL,
+              base_sha TEXT NOT NULL,
+              head_sha TEXT NOT NULL,
+              review_epoch INTEGER NOT NULL,
+              workflow_run_id TEXT NOT NULL,
+              report_sha256 TEXT NOT NULL,
+              content_verdict TEXT,
+              PRIMARY KEY(repository, pr_number, base_sha, head_sha, review_epoch)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO clawsweeper_quality(
+              repository, pr_number, base_sha, head_sha, review_epoch,
+              workflow_run_id, report_sha256, content_verdict
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "dinkuskit/blocks",
+                pr,
+                BASE,
+                head,
+                review_epoch,
+                str(workflow_run_id),
+                "a" * 64,
+                "proof_deficient",
+            ),
+        )
+
+
 def reach_clawsweeper_human_gate(temp: Path, state: Path, pr: int, head: str, *, ci_run: int) -> int:
     return reach_clawsweeper_result(
         temp,
@@ -1590,6 +1634,7 @@ def test_clawsweeper_human_gate_owner_adjudication_reaches_ready_without_rerun(t
     state = temp / "state-claw-proof-gap"
     head = "a" * 40
     workflow_run_id = reach_clawsweeper_human_gate(temp, state, 301, head, ci_run=9301)
+    insert_clawsweeper_quality(state, 301, head, workflow_run_id)
     before = status(state, 301)
     adjudicated = internal_event(
         temp,
@@ -1808,6 +1853,42 @@ def test_clawsweeper_waiting_human_adjudication_requires_human_gate_terminal(tem
     assert all(item["kind"] != "merge" for item in exhausted_current["actions"])
 
 
+def test_clawsweeper_waiting_human_adjudication_rejects_mismatched_quality_workflow_run(
+    temp: Path,
+) -> None:
+    state = temp / "state-claw-mismatched-quality"
+    head = "9" * 40
+    workflow_run_id = reach_clawsweeper_human_gate(temp, state, 306, head, ci_run=9306)
+    insert_clawsweeper_quality(state, 306, head, int(workflow_run_id) + 1)
+    rejected = internal_event(
+        temp,
+        state,
+        "mismatched-quality-workflow-run",
+        adjudication_event(
+            "internal:mismatched-quality-workflow-run",
+            306,
+            head,
+            str(workflow_run_id),
+            ["defer", "reject_false_positive"],
+            reviewer="saari-clawsweeper",
+            rail="clawsweeper",
+            review_epoch=0,
+        ),
+        expected=2,
+    )
+    assert "workflow_run_id does not match the exact request" in rejected["stderr"]
+    current = status(state, 306)
+    assert current["head"]["state"] == "waiting_human"
+    assert current["head"]["rail"] == "clawsweeper"
+    assert current["head"]["review_request_id"] == str(workflow_run_id)
+    assert current["head"]["review_epoch"] == 0
+    assert current["head"]["reviewer_actor"] == "saari-clawsweeper"
+    assert current["projection"]["merge_authorized"] is False
+    assert len([item for item in current["actions"] if item["kind"] == "clawsweeper.dispatch"]) == 1
+    assert all(item["kind"] != "repair.route" for item in current["actions"])
+    assert all(item["kind"] != "merge" for item in current["actions"])
+
+
 def test_openclaw_human_gate_adjudication_remains_fail_closed(temp: Path) -> None:
     state = temp / "state-openclaw-human-gate"
     head = "d" * 40
@@ -1899,6 +1980,12 @@ def test_precise_openclaw_exact_contract_mutants() -> None:
             '            if False and (terminal is None or terminal.get("result") != "human_gate"):\n',
             "test_clawsweeper_waiting_human_adjudication_requires_human_gate_terminal",
         ),
+        (
+            "accept mismatched clawsweeper quality workflow_run_id",
+            "    if str(quality_workflow_run_id) != workflow_run_id:\n",
+            "    if False and str(quality_workflow_run_id) != workflow_run_id:\n",
+            "test_clawsweeper_waiting_human_adjudication_rejects_mismatched_quality_workflow_run",
+        ),
     )
     for label, old, new, test_name in mutants:
         assert source.count(old) == 1, f"mutant anchor drifted: {label}"
@@ -1945,6 +2032,7 @@ def main() -> int:
         "test_clawsweeper_human_gate_owner_adjudication_reaches_ready_without_rerun": test_clawsweeper_human_gate_owner_adjudication_reaches_ready_without_rerun,
         "test_clawsweeper_waiting_human_adjudication_rejects_stale_and_unsupported": test_clawsweeper_waiting_human_adjudication_rejects_stale_and_unsupported,
         "test_clawsweeper_waiting_human_adjudication_requires_human_gate_terminal": test_clawsweeper_waiting_human_adjudication_requires_human_gate_terminal,
+        "test_clawsweeper_waiting_human_adjudication_rejects_mismatched_quality_workflow_run": test_clawsweeper_waiting_human_adjudication_rejects_mismatched_quality_workflow_run,
         "test_openclaw_human_gate_adjudication_remains_fail_closed": test_openclaw_human_gate_adjudication_remains_fail_closed,
         "test_precise_openclaw_exact_contract_mutants": lambda _temp: test_precise_openclaw_exact_contract_mutants(),
     }

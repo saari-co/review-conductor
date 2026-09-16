@@ -791,6 +791,8 @@ def main() -> int:
         test_report_links_bind_repository_and_allowed_paths,
         test_old_quality_and_exact_adjudication_projection,
         test_clawsweeper_proof_gap_adjudication_projects_effective_success,
+        test_mismatched_quality_workflow_run_id_fails_closed,
+        test_precise_quality_workflow_run_binding_mutant,
         test_clean_completed_review_is_success_while_merge_stays_human,
         test_keep_open_is_not_blindly_success,
         test_execution_failure_and_human_policy_stay_distinct,
@@ -811,9 +813,14 @@ def main() -> int:
         test_report_links_reject_all_reviewed_pr_variants,
         test_check_client_typeerror_never_retries_mutation,
     ]
-    for test in tests:
+    selected = {argument for argument in sys.argv[1:] if not argument.startswith("-")}
+    names = {test.__name__: test for test in tests}
+    if selected - set(names):
+        raise SystemExit(f"unknown review result projection tests: {sorted(selected - set(names))}")
+    chosen = [names[name] for name in names if not selected or name in selected]
+    for test in chosen:
         test()
-    print(f"review result projection tests passed ({len(tests)})")
+    print(f"review result projection tests passed ({len(chosen)})")
     return 0
 
 
@@ -946,6 +953,7 @@ def test_clawsweeper_proof_gap_adjudication_projects_effective_success() -> None
         check_state="success",
     )
     assert report["content_verdict"] == "clean"
+    assert report["workflow_run_id"] == RUN_ID
     assert "proof-gap-1" in report["reason"]
 
     class PublicationClient(RecordingGitHub):
@@ -966,6 +974,119 @@ def test_clawsweeper_proof_gap_adjudication_projects_effective_success() -> None
     assert projection.desired_owned_labels(effective["content_verdict"]) == {
         "status: 👀 ready for maintainer look"
     }
+
+
+def test_mismatched_quality_workflow_run_id_fails_closed() -> None:
+    import sqlite3
+
+    other_run = "34898456781"
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.execute(
+        "CREATE TABLE clawsweeper_quality(repository, pr_number, base_sha, head_sha, review_epoch, report_sha256, workflow_run_id, content_verdict, process_gates_json)"
+    )
+    db.execute(
+        "INSERT INTO clawsweeper_quality VALUES(?,?,?,?,?,?,?,?,?)",
+        (REPO, 19, BASE, HEAD, 0, DIGEST, other_run, "proof_deficient", "[]"),
+    )
+    row = dict(
+        repository=REPO,
+        pr_number=19,
+        base_sha=BASE,
+        head_sha=HEAD,
+        review_epoch=0,
+        state="ready_for_human_merge",
+        rail="clawsweeper",
+        review_request_id=RUN_ID,
+        blocker="human merge authority required",
+    )
+    try:
+        runtime.accepted_quality_row(db, row)
+    except RuntimeError as exc:
+        assert "workflow_run_id does not match the exact request" in str(exc)
+    else:
+        raise AssertionError("mismatched quality row must fail closed")
+    db.execute(
+        "CREATE TABLE events(sequence INTEGER PRIMARY KEY, event_id, kind, repository, pr_number, base_sha, head_sha, stale, payload_json)"
+    )
+    db.execute(
+        "INSERT INTO events VALUES(1,'proof-gap-mismatch','adjudication.completed',?,?,?,?,0,?)",
+        (
+            REPO,
+            19,
+            BASE,
+            HEAD,
+            json.dumps(
+                dict(
+                    review_epoch=0,
+                    rail="clawsweeper",
+                    request_id=RUN_ID,
+                    classifications=["defer", "reject_false_positive"],
+                )
+            ),
+        ),
+    )
+    quality = {
+        "report_sha256": DIGEST,
+        "workflow_run_id": other_run,
+        "content_verdict": "proof_deficient",
+        "process_gates_json": "[]",
+    }
+    try:
+        runtime.effective_quality(db, row, quality)
+    except RuntimeError as exc:
+        assert "workflow_run_id does not match the exact request" in str(exc)
+    else:
+        raise AssertionError("mismatched projected quality must fail closed")
+    try:
+        runtime.projection_check_report(
+            row,
+            quality,
+            check_name="ClawSweeper Review Rail",
+            check_state="success",
+        )
+    except RuntimeError as exc:
+        assert "workflow_run_id does not match the exact request" in str(exc)
+    else:
+        raise AssertionError("mismatched projected quality report must fail closed")
+    assert quality["content_verdict"] == "proof_deficient"
+
+
+def test_precise_quality_workflow_run_binding_mutant() -> None:
+    import shutil
+    import subprocess
+    import tempfile
+
+    source = (ROOT / "tools" / "review_conductor.py").read_text(encoding="utf-8")
+    old = "    if str(quality_workflow_run_id) != workflow_run_id:\n"
+    new = "    if False and str(quality_workflow_run_id) != workflow_run_id:\n"
+    assert source.count(old) == 1
+    with tempfile.TemporaryDirectory(prefix="review-conductor-quality-mutant-") as temp_name:
+        copy_root = Path(temp_name) / "copy"
+        for name in ("tools", "tests", "contracts"):
+            shutil.copytree(ROOT / name, copy_root / name)
+        target = copy_root / "tools" / "review_conductor.py"
+        target.write_text(source.replace(old, new, 1), encoding="utf-8")
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(copy_root / "tests" / "test_review_result_projection.py"),
+                "test_mismatched_quality_workflow_run_id_fails_closed",
+            ],
+            cwd=copy_root,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={
+                "PATH": "/usr/bin:/bin",
+                "HOME": temp_name,
+                "PYTHONDONTWRITEBYTECODE": "1",
+            },
+        )
+    assert completed.returncode != 0, f"mutant survived\n{completed.stderr}"
+    assert "AssertionError" in completed.stderr or "assert " in completed.stderr, (
+        f"mutant did not fail its intended assertion\n{completed.stderr}"
+    )
 
 
 if __name__ == "__main__":

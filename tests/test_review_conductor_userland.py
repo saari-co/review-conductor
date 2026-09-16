@@ -990,9 +990,12 @@ def test_completed_clawsweeper_human_gate_owner_adjudication_projects_ready() ->
         try:
             quality = runtime.accepted_quality_row(connection, ready)
             assert quality["content_verdict"] == "proof_deficient"
+            assert quality["workflow_run_id"] == str(run_id)
             effective = runtime.effective_quality(connection, ready, quality)
             assert quality["content_verdict"] == "proof_deficient"
+            assert quality["workflow_run_id"] == str(run_id)
             assert effective["content_verdict"] == "clean"
+            assert effective["workflow_run_id"] == str(run_id)
             assert "Original review content: proof_deficient" in effective["adjudication_reason"]
             assert "userland-claw-proof-gap" in effective["adjudication_reason"]
             report = runtime.projection_check_report(
@@ -1004,6 +1007,7 @@ def test_completed_clawsweeper_human_gate_owner_adjudication_projects_ready() ->
         finally:
             connection.close()
         assert report["content_verdict"] == "clean"
+        assert report["workflow_run_id"] == str(run_id)
         assert "Original review content: proof_deficient" in report["reason"]
         import review_result_projection as projection
 

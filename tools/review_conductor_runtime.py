@@ -1133,10 +1133,23 @@ def accepted_quality_row(connection: sqlite3.Connection, row: sqlite3.Row) -> di
     result = dict(quality)
     result.setdefault("content_verdict", None)
     result.setdefault("process_gates_json", None)
+    bind_projected_clawsweeper_quality(row, result)
     return result
 
 
+def bind_projected_clawsweeper_quality(row: sqlite3.Row, quality: Any) -> None:
+    if quality is None:
+        return
+    request_id = row["review_request_id"]
+    if row["rail"] != "clawsweeper" or not request_id:
+        return
+    core.require_bound_clawsweeper_quality_workflow_run(
+        str(request_id), quality["workflow_run_id"]
+    )
+
+
 def effective_quality(connection: sqlite3.Connection, row: sqlite3.Row, quality: Any) -> Any:
+    bind_projected_clawsweeper_quality(row, quality)
     if quality is None or row["state"] != "ready_for_human_merge":
         return quality
     events = connection.execute(
@@ -1273,6 +1286,7 @@ def projection_check_report(
             row["repository"], str(request_id)
         )
     if quality is not None:
+        bind_projected_clawsweeper_quality(row, quality)
         if "adjudication_reason" in quality.keys():
             report["reason"] = quality["adjudication_reason"]
         report["artifact_digest"] = quality["report_sha256"]

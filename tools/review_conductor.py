@@ -1609,6 +1609,53 @@ def tuple_action(
     ).fetchone()
 
 
+def require_bound_clawsweeper_quality_workflow_run(
+    workflow_run_id: str,
+    quality_workflow_run_id: Any,
+) -> None:
+    if str(quality_workflow_run_id) != workflow_run_id:
+        raise ContractError(
+            "clawsweeper quality workflow_run_id does not match the exact request"
+        )
+
+
+def accepted_clawsweeper_quality(
+    connection: sqlite3.Connection,
+    identity: dict[str, Any],
+    *,
+    review_epoch: int,
+    workflow_run_id: str,
+) -> dict[str, Any] | None:
+    tables = {
+        name
+        for (name,) in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    if "clawsweeper_quality" not in tables:
+        return None
+    quality = connection.execute(
+        """
+        SELECT * FROM clawsweeper_quality
+        WHERE repository = ? AND pr_number = ? AND base_sha = ? AND head_sha = ?
+          AND review_epoch = ?
+        """,
+        (
+            identity["repository"],
+            identity["pr_number"],
+            identity["base_sha"],
+            identity["head_sha"],
+            review_epoch,
+        ),
+    ).fetchone()
+    if quality is None:
+        return None
+    require_bound_clawsweeper_quality_workflow_run(
+        workflow_run_id, quality["workflow_run_id"]
+    )
+    return dict(quality)
+
+
 def accepted_clawsweeper_terminal(
     connection: sqlite3.Connection,
     identity: dict[str, Any],
@@ -1842,6 +1889,12 @@ def process_internal_event(connection: sqlite3.Connection, config: dict[str, Any
                 raise ContractError(
                     "waiting_human clawsweeper adjudication requires the exact human_gate terminal"
                 )
+            accepted_clawsweeper_quality(
+                connection,
+                identity,
+                review_epoch=int(row["review_epoch"]),
+                workflow_run_id=str(row["review_request_id"]),
+            )
             next_state, action_id, action_created = continue_after_adjudication(
                 connection, config, row, identity, event["rail"]
             )

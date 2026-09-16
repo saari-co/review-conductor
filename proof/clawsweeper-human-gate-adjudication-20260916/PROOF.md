@@ -104,3 +104,54 @@ stop/cleanup and this packet's waiting_human adjudication are unchanged.
 | `make build` | wrote `dist/review-conductor.pyz` |
 
 No third Copilot review will be requested from this lane.
+
+## Frozen post-cap source acceptance — 2026-09-16
+
+This is source acceptance of the exact-proof binding repair only. It is not
+reviewer clearance, review PASS, merge authority, or a third Copilot request.
+The retained Copilot ledger remains **2/2**.
+
+- Reviewer: `copilot-pull-request-reviewer[bot]`
+- Review: [5226583017](https://github.com/saari-co/review-conductor/pull/17#pullrequestreview-5226583017)
+- Inline [4029305388](https://github.com/saari-co/review-conductor/pull/17#discussion_r4029305388) (`tools/review_conductor.py:1847`)
+- Exact submitted head at that review: `e4fba327eebfccd3c7997ed0e2a11479be047585`
+- Disposition: `required_fix` — projected/adjudicated `clawsweeper_quality` could
+  reference a later collector upsert `workflow_run_id` than the exact
+  adjudicated request.
+
+### Repair
+
+`accepted_clawsweeper_quality` now binds any tuple/epoch quality row to
+`row["review_request_id"]` before `waiting_human` `continue_after_adjudication`.
+Accepted, effective, and projected ClawSweeper quality use the same exact
+`workflow_run_id` bind. Mismatched quality/evidence fails closed. Matching
+quality still advances defer/reject-only `waiting_human` to
+`ready_for_human_merge` with no reviewer rerun, new epoch, repair/merge action,
+or merge authority.
+
+Suppressed round-2 notes (enabled-profile coverage, lifecycle marker/counter
+races) remain out of this frozen scope.
+
+### Local proof
+
+All commands ran in this worktree against the candidate source. Fixture PASS
+is not a deployed review PASS.
+
+| Command | Result |
+| --- | --- |
+| `python3 tests/test_review_conductor.py` selected happy-path, stale/mismatch, human_gate-terminal provenance, mismatched quality `workflow_run_id`, OpenClaw fail-closed, and `test_precise_openclaw_exact_contract_mutants` | `review conductor integration tests passed` |
+| `python3 tests/test_review_result_projection.py` selected exact-adjudication projection, proof-gap happy path, mismatched quality fail-closed, and `test_precise_quality_workflow_run_binding_mutant` | `review result projection tests passed (4)` |
+| `tests/test_review_conductor_userland.py` happy-path projected quality/report `workflow_run_id` bind | passed |
+| `make check` | passed, including userland `(22)`, provenance `14 files`, `py_compile`, and `git diff --check` |
+| `make build` | wrote `dist/review-conductor.pyz` |
+| `python3 scripts/check_provenance.py` | `extraction hashes verified (14 files); Python compilation passed` |
+| `git diff --check` | clean |
+
+Interpreters exercised: Homebrew `python3` / `python3.14` (`/opt/homebrew/opt/python@3.14/bin/python3.14`, 3.14.6) for focused tests, `make check`, `make build`, and compilation; Apple CLT `/usr/bin/python3` (3.9.6) for the focused conductor suite only. Projection import on 3.9 fails on the pre-existing runtime `tuple[...] | tuple[...]` annotation.
+
+Exact-head whitespace is `scripts/check_whitespace.py` against
+`e5824afe876b28ce8cb74e97080b1d1b1f23482b` and the post-commit HEAD. That
+script requires the checkout to equal HEAD, so it runs after the candidate
+commit.
+
+No third Copilot review was requested.
