@@ -5,13 +5,13 @@
   "captured_date": "2026-09-16",
   "binding_scheme": "A commit cannot contain its own SHA. base_sha and starting_head_sha are the required clean start. Per-file sha256 values are of this candidate source. The branch head after commit is the exact candidate SHA for hosted CI.",
   "files": {
-    "docs/provenance.json": "31848bc52b7898b28360376544a55f03cca2d4c412a4a4da0594ff51a8d460f1",
-    "proof/clawsweeper-human-gate-adjudication-20260916/PROOF.md": "18e16b625e8dd7f977cd970b67f7395c2f9739ac6ab981a137e3e8e659595b5e",
+    "docs/provenance.json": "d7a1a240b8e2709a400b405cd75cac23111a6222cbc91d51eb03cdf4e2368e75",
+    "proof/clawsweeper-human-gate-adjudication-20260916/PROOF.md": "367b4c9dce76cc01df2ecc818c812cbe44b9a989f1a1c7896dfa165c1d1caf5b",
     "proof/runtime-lifecycle-sigterm-determinism-20260916/PROOF.md": "85936724f58c8dae2c0fb80c4b5cdde96dd087c9eaf10e885e9778136dc1b139",
-    "tests/test_review_conductor.py": "1cff790f659816d5a93d848d5471a6f4aa836924cbb490dbb56800e08c5b79f0",
+    "tests/test_review_conductor.py": "024fe7db9e5a905cf2dba8532eb710ef292be7cf4f38f40805f9bc95a29c22bc",
     "tests/test_review_conductor_userland.py": "33393289d2568c2680734cf1d6877e9362d7223d4bb319cf138ccbce1ef6c3db",
     "tests/test_review_result_projection.py": "f12d248e744c98b7d72749ef84e265db825b189a6dae80c785dd5e152fc0e777",
     "tests/test_runtime_lifecycle.py": "3a6f14fdda510223188aad0c5eb750b65b24159413169929e6d72abd6bee4a47",
-    "tools/review_conductor.py": "d47aceca49ff158c7d042c834f49ae7d794b2960fb6ebf9b40bca91e2c1226e5"
+    "tools/review_conductor.py": "1093666c7c5af302bc996a1642b8ebde04eec167f2760705c8c380752c91f160"
   }
 }

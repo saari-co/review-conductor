@@ -77,3 +77,30 @@ failed on exact-base run 35089876605. The repair is confined to lifecycle
 fixtures/tests and is recorded in
 `proof/runtime-lifecycle-sigterm-determinism-20260916/PROOF.md`. Production
 stop/cleanup and this packet's waiting_human adjudication are unchanged.
+
+## Copilot review round 1 — 2026-09-16
+
+- Reviewer: `copilot-pull-request-reviewer[bot]`
+- Review: [5226361943](https://github.com/saari-co/review-conductor/pull/17#pullrequestreview-5226361943)
+- Exact submitted head: `de56bb1b9f0e68394ece8b6a29df297d251dfa46`
+- Check: [35130580531](https://github.com/saari-co/review-conductor/actions/runs/35130580531)
+- Ledger after this request: **1/2**. One remaining Copilot request is reserved for the repaired head.
+
+| Finding | Disposition | Evidence |
+| --- | --- | --- |
+| Inline [4029129906](https://github.com/saari-co/review-conductor/pull/17#discussion_r4029129906) (`tools/review_conductor.py:1787`) | `required_fix` | `waiting_human` plus ClawSweeper rail/request also occurs after findings → `human_gate` classification and after `required_fix` at the two-cycle limit. Those rows keep a `clawsweeper.terminal` of `result=findings`. The waiting_human path now requires the exact bound terminal `result=human_gate` before `continue_after_adjudication`. |
+| Suppressed body note at `tools/review_conductor.py:1802` | `defer` | `queue_notifications` still requires raw `clawsweeper_quality.ready_qualified`. That skip is the existing fail-closed gate for proof-deficient artifacts; the ready notification template also claims exact-head clean. Projection already consumes `effective_quality`. Changing notification eligibility or copy is nonblocking and out of this repair's scope. |
+
+### Repair and local proof
+
+`accepted_clawsweeper_terminal` selects the latest non-stale exact-tuple ClawSweeper terminal whose `workflow_run_id` matches the current request. A later `defer` / `reject_false_positive` from a findings-origin `waiting_human` row fails closed. The completed `human_gate` owner path is unchanged. Merge remains human-only; no reviewer rerun or new epoch is created.
+
+| Command | Result |
+| --- | --- |
+| `python3 tests/test_review_conductor.py` selected happy-path, stale/mismatch, human_gate-terminal provenance, OpenClaw fail-closed, and `test_precise_openclaw_exact_contract_mutants` | `review conductor integration tests passed` |
+| `python3 tests/test_review_conductor_userland.py` | `review conductor userland tests passed (22)` |
+| `python3 tests/test_review_result_projection.py` | `review result projection tests passed (23)` |
+| `make check` | passed, including provenance, `py_compile`, and `git diff --check` |
+| `make build` | wrote `dist/review-conductor.pyz` |
+
+No third Copilot review will be requested from this lane.

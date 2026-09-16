@@ -498,7 +498,17 @@ def dispatch_clawsweeper(temp: Path, state: Path, pr: int, head: str) -> int:
     return 4242
 
 
-def reach_clawsweeper_human_gate(temp: Path, state: Path, pr: int, head: str, *, ci_run: int) -> int:
+def reach_clawsweeper_result(
+    temp: Path,
+    state: Path,
+    pr: int,
+    head: str,
+    *,
+    ci_run: int,
+    result: str,
+    findings: int,
+    expected_state: str,
+) -> int:
     github_event(temp, state, "pull_request", f"delivery-{state.name}-pr", pr_payload(pr, head))
     github_event(
         temp,
@@ -526,25 +536,51 @@ def reach_clawsweeper_human_gate(temp: Path, state: Path, pr: int, head: str, *,
     terminal = internal_event(
         temp,
         state,
-        f"{state.name}-clawsweeper-human-gate",
+        f"{state.name}-clawsweeper-{result}",
         clawsweeper_event(
-            f"internal:{state.name}-clawsweeper-human-gate",
+            f"internal:{state.name}-clawsweeper-{result}",
             pr,
             head,
             workflow_run_id,
-            result="human_gate",
-            findings=0,
+            result=result,
+            findings=findings,
         ),
     )
-    assert terminal["state"] == "waiting_human"
+    assert terminal["state"] == expected_state
     assert terminal["repair_cycle"] == 0
     current = status(state, pr)
-    assert current["head"]["state"] == "waiting_human"
+    assert current["head"]["state"] == expected_state
     assert current["head"]["rail"] == "clawsweeper"
     assert current["head"]["review_request_id"] == str(workflow_run_id)
     assert current["head"]["review_epoch"] == 0
     assert current["head"]["reviewer_actor"] == "saari-clawsweeper"
     return workflow_run_id
+
+
+def reach_clawsweeper_human_gate(temp: Path, state: Path, pr: int, head: str, *, ci_run: int) -> int:
+    return reach_clawsweeper_result(
+        temp,
+        state,
+        pr,
+        head,
+        ci_run=ci_run,
+        result="human_gate",
+        findings=0,
+        expected_state="waiting_human",
+    )
+
+
+def reach_clawsweeper_findings(temp: Path, state: Path, pr: int, head: str, *, ci_run: int) -> int:
+    return reach_clawsweeper_result(
+        temp,
+        state,
+        pr,
+        head,
+        ci_run=ci_run,
+        result="findings",
+        findings=1,
+        expected_state="awaiting_adjudication",
+    )
 
 
 def test_official_hmac_vector() -> None:
@@ -1674,6 +1710,104 @@ def test_clawsweeper_waiting_human_adjudication_rejects_stale_and_unsupported(te
     assert all(item["kind"] != "repair.route" for item in current["actions"])
 
 
+def test_clawsweeper_waiting_human_adjudication_requires_human_gate_terminal(temp: Path) -> None:
+    findings_state = temp / "state-claw-findings-human-gate"
+    findings_head = "e" * 40
+    findings_run = reach_clawsweeper_findings(temp, findings_state, 304, findings_head, ci_run=9304)
+    findings_request = str(findings_run)
+    classified = internal_event(
+        temp,
+        findings_state,
+        "findings-human-gate",
+        adjudication_event(
+            "internal:findings-human-gate",
+            304,
+            findings_head,
+            findings_request,
+            ["human_gate"],
+            reviewer="saari-clawsweeper",
+            rail="clawsweeper",
+            review_epoch=0,
+        ),
+    )
+    assert classified["state"] == "waiting_human"
+    rejected_findings = internal_event(
+        temp,
+        findings_state,
+        "findings-human-gate-defer",
+        adjudication_event(
+            "internal:findings-human-gate-defer",
+            304,
+            findings_head,
+            findings_request,
+            ["defer"],
+            reviewer="saari-clawsweeper",
+            rail="clawsweeper",
+            review_epoch=0,
+        ),
+        expected=2,
+    )
+    assert "requires the exact human_gate terminal" in rejected_findings["stderr"]
+    findings_current = status(findings_state, 304)
+    assert findings_current["head"]["state"] == "waiting_human"
+    assert findings_current["head"]["rail"] == "clawsweeper"
+    assert findings_current["head"]["review_request_id"] == findings_request
+    assert findings_current["head"]["review_epoch"] == 0
+    assert all(item["kind"] != "repair.route" for item in findings_current["actions"])
+    assert all(item["kind"] != "merge" for item in findings_current["actions"])
+
+    exhausted_state = temp / "state-claw-exhausted-repair"
+    exhausted_head = "f" * 40
+    exhausted_run = reach_clawsweeper_findings(temp, exhausted_state, 305, exhausted_head, ci_run=9305)
+    exhausted_request = str(exhausted_run)
+    with sqlite3.connect(exhausted_state / "review-conductor.sqlite3") as connection:
+        updated = connection.execute(
+            "UPDATE heads SET repair_cycle = 2 WHERE pr_number = ? AND is_current = 1",
+            (305,),
+        )
+        assert updated.rowcount == 1
+    exhausted = internal_event(
+        temp,
+        exhausted_state,
+        "exhausted-required-fix",
+        adjudication_event(
+            "internal:exhausted-required-fix",
+            305,
+            exhausted_head,
+            exhausted_request,
+            ["required_fix"],
+            reviewer="saari-clawsweeper",
+            rail="clawsweeper",
+            review_epoch=0,
+        ),
+    )
+    assert exhausted["state"] == "waiting_human"
+    rejected_exhausted = internal_event(
+        temp,
+        exhausted_state,
+        "exhausted-required-fix-defer",
+        adjudication_event(
+            "internal:exhausted-required-fix-defer",
+            305,
+            exhausted_head,
+            exhausted_request,
+            ["reject_false_positive"],
+            reviewer="saari-clawsweeper",
+            rail="clawsweeper",
+            review_epoch=0,
+        ),
+        expected=2,
+    )
+    assert "requires the exact human_gate terminal" in rejected_exhausted["stderr"]
+    exhausted_current = status(exhausted_state, 305)
+    assert exhausted_current["head"]["state"] == "waiting_human"
+    assert exhausted_current["head"]["repair_cycle"] == 2
+    assert exhausted_current["head"]["rail"] == "clawsweeper"
+    assert exhausted_current["head"]["review_request_id"] == exhausted_request
+    assert all(item["kind"] != "repair.route" for item in exhausted_current["actions"])
+    assert all(item["kind"] != "merge" for item in exhausted_current["actions"])
+
+
 def test_openclaw_human_gate_adjudication_remains_fail_closed(temp: Path) -> None:
     state = temp / "state-openclaw-human-gate"
     head = "d" * 40
@@ -1759,6 +1893,12 @@ def test_precise_openclaw_exact_contract_mutants() -> None:
             '            if not classifications <= {"defer", "reject_false_positive", "required_fix"}:\n',
             "test_clawsweeper_waiting_human_adjudication_rejects_stale_and_unsupported",
         ),
+        (
+            "accept waiting_human without human_gate terminal",
+            '            if terminal is None or terminal.get("result") != "human_gate":\n',
+            '            if False and (terminal is None or terminal.get("result") != "human_gate"):\n',
+            "test_clawsweeper_waiting_human_adjudication_requires_human_gate_terminal",
+        ),
     )
     for label, old, new, test_name in mutants:
         assert source.count(old) == 1, f"mutant anchor drifted: {label}"
@@ -1804,6 +1944,7 @@ def main() -> int:
         "test_openclaw_queue_rejects_unbound_payload_review_epoch": test_openclaw_queue_rejects_unbound_payload_review_epoch,
         "test_clawsweeper_human_gate_owner_adjudication_reaches_ready_without_rerun": test_clawsweeper_human_gate_owner_adjudication_reaches_ready_without_rerun,
         "test_clawsweeper_waiting_human_adjudication_rejects_stale_and_unsupported": test_clawsweeper_waiting_human_adjudication_rejects_stale_and_unsupported,
+        "test_clawsweeper_waiting_human_adjudication_requires_human_gate_terminal": test_clawsweeper_waiting_human_adjudication_requires_human_gate_terminal,
         "test_openclaw_human_gate_adjudication_remains_fail_closed": test_openclaw_human_gate_adjudication_remains_fail_closed,
         "test_precise_openclaw_exact_contract_mutants": lambda _temp: test_precise_openclaw_exact_contract_mutants(),
     }
