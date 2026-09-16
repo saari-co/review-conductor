@@ -655,6 +655,31 @@ def test_openclaw_human_gate_is_terminal_without_dispatching_clawsweeper() -> No
         result = runtime.bridge_openclaw(config, artifact_path)
         assert result["state"] == "waiting_human"
         assert current(config, pr)["state"] == "waiting_human"
+        try:
+            core.ingest_internal_event(
+                config_path=Path(config["core_config"]),
+                state_root=Path(config["paths"]["state_root"]),
+                event_payload={
+                    "schema": core.INTERNAL_EVENT_SCHEMA,
+                    "event_id": "userland-openclaw-human-gate-adjudication",
+                    "type": "adjudication.completed",
+                    "repository": "dinkuskit/blocks",
+                    "pr_number": pr,
+                    "base_sha": BASE,
+                    "head_sha": HEAD,
+                    "request_id": payload["queue_request_id"],
+                    "rail": "openclaw",
+                    "classifications": ["defer"],
+                    "reviewer_actor": "spark-openclaw",
+                    "proof_ref": "proof/adjudication/openclaw-human-gate/ADJUDICATION.md",
+                    "review_epoch": 0,
+                },
+            )
+        except core.ContractError as exc:
+            assert "adjudication is invalid from state waiting_human" in str(exc)
+        else:
+            raise AssertionError("OpenClaw human_gate must remain fail-closed")
+        assert current(config, pr)["state"] == "waiting_human"
         connection = core.open_database(Path(config["paths"]["state_root"]))
         try:
             assert connection.execute(
@@ -897,6 +922,113 @@ def test_sub_platinum_or_insufficient_proof_stops_at_human_gate() -> None:
             "signal",
         ]
         assert all("No merge was attempted" in message for _channel, message in notifier.sent)
+
+
+def test_completed_clawsweeper_human_gate_owner_adjudication_projects_ready() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config = config_fixture(root)
+        pr = 75
+        run_id = 2075
+        prepare_openclaw(config, root, pr)
+        prepare_clawsweeper_run(config, pr, run_id)
+        collected = userland.collect_clawsweeper_terminals(
+            config,
+            FakeGitHub(
+                run_id,
+                claw_bundle(
+                    run_id=run_id,
+                    pr=pr,
+                    overall="D",
+                    proof="D",
+                    proof_status="insufficient",
+                ),
+            ),
+            dry_run=False,
+        )
+        assert collected[0]["verdict"] == "human_gate"
+        runtime.drain_bridge_inboxes(config)
+        waiting = current(config, pr)
+        assert waiting["state"] == "waiting_human"
+        assert waiting["rail"] == "clawsweeper"
+        assert waiting["review_request_id"] == str(run_id)
+        assert waiting["review_epoch"] == 0
+        claw_action = action(config, pr, "clawsweeper.dispatch")
+        outcome = core.ingest_internal_event(
+            config_path=Path(config["core_config"]),
+            state_root=Path(config["paths"]["state_root"]),
+            event_payload={
+                "schema": core.INTERNAL_EVENT_SCHEMA,
+                "event_id": "userland-claw-proof-gap",
+                "type": "adjudication.completed",
+                "repository": "dinkuskit/blocks",
+                "pr_number": pr,
+                "base_sha": BASE,
+                "head_sha": HEAD,
+                "request_id": str(run_id),
+                "rail": "clawsweeper",
+                "classifications": ["defer", "reject_false_positive"],
+                "reviewer_actor": "clawsweeper",
+                "proof_ref": "proof/adjudication/userland-claw-proof-gap/ADJUDICATION.md",
+                "review_epoch": 0,
+            },
+        )
+        assert outcome["state"] == "ready_for_human_merge"
+        assert outcome["action_created"] is False
+        assert outcome["merge_dispatched"] is False
+        ready = current(config, pr)
+        assert ready["state"] == "ready_for_human_merge"
+        assert ready["rail"] == "clawsweeper"
+        assert ready["review_request_id"] == str(run_id)
+        assert ready["review_epoch"] == 0
+        assert ready["reviewer_actor"] == "clawsweeper"
+        assert action(config, pr, "clawsweeper.dispatch")["action_id"] == claw_action["action_id"]
+        projected = core.state_projection(dict(ready))
+        assert projected["checks"]["ClawSweeper Review Rail"] == "success"
+        assert projected["merge_authorized"] is False
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            quality = runtime.accepted_quality_row(connection, ready)
+            assert quality["content_verdict"] == "proof_deficient"
+            assert quality["workflow_run_id"] == str(run_id)
+            effective = runtime.effective_quality(connection, ready, quality)
+            assert quality["content_verdict"] == "proof_deficient"
+            assert quality["workflow_run_id"] == str(run_id)
+            assert effective["content_verdict"] == "clean"
+            assert effective["workflow_run_id"] == str(run_id)
+            assert "Original review content: proof_deficient" in effective["adjudication_reason"]
+            assert "userland-claw-proof-gap" in effective["adjudication_reason"]
+            report = runtime.projection_check_report(
+                ready,
+                effective,
+                check_name="ClawSweeper Review Rail",
+                check_state="success",
+            )
+        finally:
+            connection.close()
+        assert report["content_verdict"] == "clean"
+        assert report["workflow_run_id"] == str(run_id)
+        assert "Original review content: proof_deficient" in report["reason"]
+        import review_result_projection as projection
+
+        rendered = projection.check_output(
+            "ClawSweeper Review Rail",
+            "success",
+            repository=ready["repository"],
+            pr_number=int(ready["pr_number"]),
+            head_sha=ready["head_sha"],
+            stage=report.get("stage"),
+            content_verdict=report.get("content_verdict"),
+            process_gates=report.get("process_gates"),
+            reason=report.get("reason"),
+            workflow_run_id=report.get("workflow_run_id"),
+            artifact_digest=report.get("artifact_digest"),
+            report_url=report.get("report_url"),
+        )
+        assert "Review content: clean." in rendered["text"]
+        assert "Original review content: proof_deficient" in rendered["text"]
+        assert "Merge authorized: no" in rendered["text"]
+        assert current(config, pr)["state"] == "ready_for_human_merge"
 
 
 def test_unbound_clawsweeper_workflow_failure_alerts_without_guessing_a_pr() -> None:
@@ -1352,6 +1484,7 @@ def main() -> None:
         test_keep_open_without_defects_is_review_success_not_merge,
         test_clawsweeper_finding_waits_for_adjudication_and_notifies_discord_only,
         test_sub_platinum_or_insufficient_proof_stops_at_human_gate,
+        test_completed_clawsweeper_human_gate_owner_adjudication_projects_ready,
         test_unbound_clawsweeper_workflow_failure_alerts_without_guessing_a_pr,
         test_bound_failed_workflow_without_bundle_is_execution_failure,
         test_failed_clawsweeper_publisher_binds_exact_artifact_and_fails_pr,

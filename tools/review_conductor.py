@@ -42,7 +42,7 @@ INTERNAL_EVENT_FIELDS = {
     ),
     "adjudication.completed": (
         {"request_id", "rail", "classifications", "reviewer_actor", "proof_ref"},
-        {"repair_owner", "mutation_handoff"},
+        {"repair_owner", "mutation_handoff", "review_epoch"},
     ),
     "clawsweeper.started": ({"workflow_run_id"}, set()),
     "clawsweeper.terminal": (
@@ -1574,6 +1574,8 @@ def validate_internal_event(config: dict[str, Any], event: dict[str, Any]) -> di
             require_text(handoff["to"], "mutation_handoff to", 200)
             if handoff["authorized"] is not True:
                 raise ContractError("mutation handoff must be explicitly authorized")
+        if "review_epoch" in event and (type(event["review_epoch"]) is not int or event["review_epoch"] < 0):
+            raise ContractError("internal event requires an exact review epoch")
     return event
 
 
@@ -1605,6 +1607,88 @@ def tuple_action(
         """,
         (*identity.values(), kind, review_epoch),
     ).fetchone()
+
+
+def require_bound_clawsweeper_quality_workflow_run(
+    workflow_run_id: str,
+    quality_workflow_run_id: Any,
+) -> None:
+    if str(quality_workflow_run_id) != workflow_run_id:
+        raise ContractError(
+            "clawsweeper quality workflow_run_id does not match the exact request"
+        )
+
+
+def accepted_clawsweeper_quality(
+    connection: sqlite3.Connection,
+    identity: dict[str, Any],
+    *,
+    review_epoch: int,
+    workflow_run_id: str,
+) -> dict[str, Any] | None:
+    tables = {
+        name
+        for (name,) in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    if "clawsweeper_quality" not in tables:
+        return None
+    quality = connection.execute(
+        """
+        SELECT * FROM clawsweeper_quality
+        WHERE repository = ? AND pr_number = ? AND base_sha = ? AND head_sha = ?
+          AND review_epoch = ?
+        """,
+        (
+            identity["repository"],
+            identity["pr_number"],
+            identity["base_sha"],
+            identity["head_sha"],
+            review_epoch,
+        ),
+    ).fetchone()
+    if quality is None:
+        return None
+    require_bound_clawsweeper_quality_workflow_run(
+        workflow_run_id, quality["workflow_run_id"]
+    )
+    return dict(quality)
+
+
+def accepted_clawsweeper_terminal(
+    connection: sqlite3.Connection,
+    identity: dict[str, Any],
+    *,
+    review_epoch: int,
+    workflow_run_id: str,
+) -> dict[str, Any] | None:
+    found = connection.execute(
+        """
+        SELECT payload_json FROM events
+        WHERE kind = 'clawsweeper.terminal'
+          AND repository = ? AND pr_number = ? AND base_sha = ? AND head_sha = ?
+          AND stale = 0
+        ORDER BY sequence DESC
+        """,
+        (
+            identity["repository"],
+            identity["pr_number"],
+            identity["base_sha"],
+            identity["head_sha"],
+        ),
+    )
+    for candidate in found:
+        payload = json.loads(candidate["payload_json"])
+        if not isinstance(payload, dict):
+            continue
+        epoch = payload.get("review_epoch")
+        if epoch is not None and (type(epoch) is not int or epoch != review_epoch):
+            continue
+        if str(payload.get("workflow_run_id", "")) != workflow_run_id:
+            continue
+        return payload
+    return None
 
 
 def continue_after_adjudication(
@@ -1778,12 +1862,43 @@ def process_internal_event(connection: sqlite3.Connection, config: dict[str, Any
             next_state = "clawsweeper_failed"
             update_exact_head(connection, identity, state=next_state, rail="clawsweeper", review_request_id=str(event["workflow_run_id"]), reviewer_actor=event["reviewer_actor"], blocker="ClawSweeper rail failed; human/operator recovery required")
     else:
-        if row["state"] != "awaiting_adjudication":
+        classifications = set(event["classifications"])
+        if row["state"] == "waiting_human":
+            if row["rail"] != "clawsweeper":
+                raise ContractError(f"adjudication is invalid from state {row['state']}")
+            if not classifications <= {"defer", "reject_false_positive"}:
+                raise ContractError(
+                    "waiting_human clawsweeper adjudication supports only defer and reject_false_positive"
+                )
+            if type(event.get("review_epoch")) is not int or event["review_epoch"] != row["review_epoch"]:
+                raise ContractError("internal event review epoch is stale")
+            if event.get("reviewer_actor") != row["reviewer_actor"]:
+                raise ContractError("adjudication reviewer must match the authoritative repository reviewer")
+        elif row["state"] != "awaiting_adjudication":
             raise ContractError(f"adjudication is invalid from state {row['state']}")
         if row["rail"] != event["rail"] or row["review_request_id"] != event["request_id"]:
             raise ContractError("adjudication does not match the exact rail request")
-        classifications = set(event["classifications"])
-        if "human_gate" in classifications:
+        if row["state"] == "waiting_human":
+            terminal = accepted_clawsweeper_terminal(
+                connection,
+                identity,
+                review_epoch=int(row["review_epoch"]),
+                workflow_run_id=str(row["review_request_id"]),
+            )
+            if terminal is None or terminal.get("result") != "human_gate":
+                raise ContractError(
+                    "waiting_human clawsweeper adjudication requires the exact human_gate terminal"
+                )
+            accepted_clawsweeper_quality(
+                connection,
+                identity,
+                review_epoch=int(row["review_epoch"]),
+                workflow_run_id=str(row["review_request_id"]),
+            )
+            next_state, action_id, action_created = continue_after_adjudication(
+                connection, config, row, identity, event["rail"]
+            )
+        elif "human_gate" in classifications:
             next_state = "waiting_human"
             update_exact_head(connection, identity, state=next_state, blocker="adjudication classified a human gate")
         elif "required_fix" in classifications:

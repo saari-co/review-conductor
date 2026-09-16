@@ -237,6 +237,17 @@ def mark(stage):
     (state / "startup-stage").write_text(stage)
     print(f"entrypoint-fixture stage={stage}", file=sys.stderr, flush=True)
 
+def write_count(path, value):
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(str(value))
+    temporary.replace(path)
+
+def read_count(path):
+    if not path.exists():
+        return 0
+    text = path.read_text().strip()
+    return int(text) if text else 0
+
 mark("imports")
 config = {
     "enrollment": {"enabled": True, "blockers": []},
@@ -261,6 +272,8 @@ class Client:
 
 class ReportingServer(runtime.BoundedHTTPServer):
     def __init__(self, *args, **kwargs):
+        self._serving_thread_ident = None
+        self._loop_left = threading.Event()
         mark("server-init")
         super().__init__(*args, **kwargs)
         mark("server-bound")
@@ -269,6 +282,32 @@ class ReportingServer(runtime.BoundedHTTPServer):
         os.write(status_fd, f"{os.getpid()} {os.getpgrp()} {port} {lock_path}\n".encode())
         os.close(status_fd)
         mark("ready")
+
+    def serve_forever(self, poll_interval=0.5):
+        self._serving_thread_ident = threading.get_ident()
+        (state / "serve-loop-entered").write_text(str(self._serving_thread_ident))
+        try:
+            return super().serve_forever(poll_interval=poll_interval)
+        finally:
+            (state / "serve-loop-left").write_text("1")
+            self._loop_left.set()
+
+    def shutdown(self):
+        caller = threading.current_thread()
+        same = (
+            self._serving_thread_ident is not None
+            and threading.get_ident() == self._serving_thread_ident
+        )
+        (state / "shutdown-called").write_text(
+            f"{caller.name} ident={threading.get_ident()} same_serving_thread={int(same)}\n"
+        )
+        if same:
+            # Documented BaseServer.shutdown contract: the serving thread cannot
+            # finish this wait. Do not depend on platform Event/signal timing.
+            (state / "shutdown-on-serve-thread").write_text("1")
+            self._loop_left.wait()
+            return
+        super().shutdown()
 
     def server_close(self):
         super().server_close()
@@ -324,8 +363,8 @@ with patch.object(entry, "load_supervised_profile", return_value=config), patch.
     real_drain = entry.drain_owned_session
     def wrapped_drain(*args, **kwargs):
         path = state / "drain-attempts"
-        attempt = int(path.read_text()) if path.exists() else 0
-        path.write_text(str(attempt + 1))
+        attempt = read_count(path)
+        write_count(path, attempt + 1)
         if drain_mode == "fail-once" and attempt == 0:
             raise entry.service.ServiceError(
                 "owned service generation could not be signaled"
@@ -344,8 +383,8 @@ with patch.object(entry, "load_supervised_profile", return_value=config), patch.
         def __init__(self, *args, **kwargs):
             if kwargs.get("name") == "review-conductor-shutdown":
                 helper_path = state / "shutdown-helpers"
-                count = int(helper_path.read_text()) if helper_path.exists() else 0
-                helper_path.write_text(str(count + 1))
+                count = read_count(helper_path)
+                write_count(helper_path, count + 1)
             super().__init__(*args, **kwargs)
     threading.Thread = CountingThread
     mark("calling-serve")
@@ -402,6 +441,16 @@ def _wait_until(predicate, timeout=3.0, message="condition"):
             return
         time.sleep(0.02)
     raise AssertionError(f"timed out waiting for {message}")
+
+
+def _read_counter(path: Path) -> int:
+    try:
+        text = path.read_text().strip()
+    except FileNotFoundError:
+        return 0
+    if not text:
+        return 0
+    return int(text)
 
 
 def _group_absent(pgid: int) -> bool:
@@ -582,6 +631,18 @@ class RuntimeLifecycleTests(unittest.TestCase):
             os.close(status_read)
         pid, pgid, port = map(int, identity[:3])
         lock_path = Path(identity[3].strip())
+        _wait_until(
+            lambda: (state_root / "serve-loop-entered").exists()
+            or process.poll() is not None,
+            message="serve_forever entered",
+        )
+        self.assertIsNone(
+            process.poll(),
+            self._entrypoint_startup_evidence(
+                process, error_file, error_path, state_root
+            ),
+        )
+        self.assertTrue((state_root / "serve-loop-entered").exists())
         return process, parent_write, pid, pgid, port, lock_path, state_root
 
     def _own_spawned_session(self, process, parent_owner):
@@ -890,14 +951,19 @@ os._exit(1)
             SERVE_THREAD_SHUTDOWN_ANCHOR,
             SERVE_THREAD_SHUTDOWN_DEFECT,
         )
-        process, parent_write, pid, _pgid, port, lock_path, _state = (
+        process, parent_write, pid, _pgid, port, lock_path, state_root = (
             self.spawn_entrypoint_service(blocked=False, tools=tools)
         )
         self._assert_listener_accepts(port)
         self.assertFalse(_lock_released(lock_path))
         os.kill(pid, signal.SIGTERM)
-        time.sleep(1.0)
+        _wait_until(
+            lambda: (state_root / "shutdown-on-serve-thread").exists(),
+            message="same-thread shutdown entered",
+        )
         self.assertIsNone(process.poll())
+        self.assertFalse((state_root / "serve-loop-left").exists())
+        self.assertFalse((state_root / "server-closed").exists())
         self.assertFalse(_port_free(port))
         self.assertFalse(_lock_released(lock_path))
         with contextlib.suppress(OSError):
@@ -937,12 +1003,25 @@ os._exit(1)
         self._assert_entrypoint_signal_stops(signal.SIGHUP)
 
     def _assert_entrypoint_signal_stops(self, signum):
-        process, parent_write, pid, pgid, port, lock_path, _state = (
+        process, parent_write, pid, pgid, port, lock_path, state_root = (
             self.spawn_entrypoint_service(blocked=False)
         )
         self._assert_listener_accepts(port)
         self.assertFalse(_lock_released(lock_path))
         os.kill(pid, signum)
+        _wait_until(
+            lambda: (state_root / "shutdown-called").exists(),
+            message=f"entrypoint {signum} scheduled shutdown",
+        )
+        self.assertIn(
+            "same_serving_thread=0",
+            (state_root / "shutdown-called").read_text(),
+        )
+        self.assertFalse((state_root / "shutdown-on-serve-thread").exists())
+        _wait_until(
+            lambda: (state_root / "serve-loop-left").exists(),
+            message=f"entrypoint {signum} left serve_forever",
+        )
         _wait_until(lambda: process.poll() is not None, message=f"entrypoint {signum} exit")
         _wait_until(lambda: _port_free(port), message="listener released after signal")
         _wait_until(lambda: _lock_released(lock_path), message="lock released after signal")
@@ -1051,7 +1130,7 @@ os._exit(1)
         self.assertIsNone(process.poll())
         self.assertFalse(_lock_released(lock_path))
         self.assertFalse(_group_absent(pgid))
-        self.assertEqual((state_root / "drain-attempts").read_text(), "1")
+        self.assertEqual(_read_counter(state_root / "drain-attempts"), 1)
         self.assertFalse((state_root / "tick-finished").exists())
         with contextlib.suppress(ProcessLookupError):
             os.kill(pid, 0)
@@ -1067,7 +1146,7 @@ os._exit(1)
             message="retried drain after signaling error",
         )
         _wait_until(lambda: _group_absent(pgid), timeout=4, message="retried session drain")
-        self.assertGreaterEqual(int((state_root / "drain-attempts").read_text()), 2)
+        self.assertGreaterEqual(_read_counter(state_root / "drain-attempts"), 2)
         self.assertTrue(_port_free(port))
         self.assertTrue(_lock_released(lock_path))
         self.assertFalse((state_root / "tick-finished").exists())
@@ -1134,11 +1213,10 @@ os._exit(1)
         )
         self._close_parent_write(parent_write)
         _wait_until(
-            lambda: (state_root / "drain-attempts").exists()
-            and int((state_root / "drain-attempts").read_text()) >= 6,
+            lambda: _read_counter(state_root / "drain-attempts") >= 6,
             message="repeated drain failures",
         )
-        self.assertGreaterEqual(int((state_root / "shutdown-helpers").read_text()), 6)
+        self.assertGreaterEqual(_read_counter(state_root / "shutdown-helpers"), 6)
         self.assertIsNone(process.poll())
         self.assertFalse(_lock_released(lock_path))
         self.assertFalse(_group_absent(pgid))
@@ -1154,8 +1232,8 @@ os._exit(1)
             message="fail-many drain eventually succeeded",
         )
         _wait_until(lambda: _group_absent(pgid), timeout=4, message="retried fail-many drain")
-        self.assertEqual(int((state_root / "shutdown-helpers").read_text()), 1)
-        self.assertGreaterEqual(int((state_root / "drain-attempts").read_text()), 7)
+        self.assertEqual(_read_counter(state_root / "shutdown-helpers"), 1)
+        self.assertGreaterEqual(_read_counter(state_root / "drain-attempts"), 7)
         self.assertTrue(_port_free(port))
         self.assertTrue(_lock_released(lock_path))
         with self.assertRaises(ProcessLookupError):
