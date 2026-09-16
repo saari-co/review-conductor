@@ -22,13 +22,16 @@
 - Independent offline manifest contract, tests, zipapp build, and CI.
 - A native standalone foreground supervisor now invokes the registry-aware
   entrypoint with inherited webhook/App descriptors, an allowlisted child
-  environment, an inherited generation-lifetime descriptor, an entrypoint-verified
+  environment, inherited generation-lifetime, leader, and parent-lifetime
+  descriptors, an entrypoint-verified
   exact SMCBD config/state identity and fail-closed
-  health/start/stop/restart behavior. The 1Password-aware launcher now has a
+  health/start/stop/restart behavior. The service drains its owned generation
+  when that parent-lifetime write end closes. The 1Password-aware launcher now has a
   source-only `standalone` path: `preflight` validates registry/bootstrap only,
-  `start` forwards inherited webhook/App descriptors into that supervisor, and
+  `start` forwards inherited webhook/App descriptors into that supervisor, waits
+  through the supervisor drain budget, and treats SIGHUP as orderly stop, and
   `health` only queries it. Neither path is installed, and neither starts a
-  tunnel.
+  tunnel. This source repair is not a deployed host change.
 - `provenance.json` is a versioned extraction/provenance ledger: it records
   `source_branch`, the source commit, original hashes and current destination
   hashes/adaptations. Recording a branch name does not push that branch. The

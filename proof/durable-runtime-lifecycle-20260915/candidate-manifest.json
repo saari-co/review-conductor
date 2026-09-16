@@ -1,0 +1,21 @@
+{
+  "schema": "review-conductor.candidate-manifest.v1",
+  "base_sha": "8cefc3548d40b3868263cacd54a9568d51fbe67f",
+  "captured_date": "2026-09-16",
+  "files": {
+    "Makefile": "78e061fdecb5c95eaf0058a0430558f4858cb3ab396c768d00b0950baf9f6b72",
+    "README.md": "219dec35e8842a1ea0af7edcaa8f29c0bdd5cb7d50f9e347a8676fda9cec3d2e",
+    "SECURITY.md": "4f2e8291fb0bdd852beb9804b07bcb5fd8a184c48da6a7bfdb393e0bd7f49d46",
+    "docs/integration-contract.md": "59fdf2baca6f809dfb5ddc6dbd9cda7f9696f514e438b4e78d5105177e004ce8",
+    "docs/migration.md": "ff235ab840d18eb1356fc35dd4297a91537405eb00d21ef32f436bc4c45c4e31",
+    "docs/provenance.json": "818f848e013f1eff833c39e7532bdf1e99387927f49adab41697b4292dcb189d",
+    "docs/smcbd-pilot-handoff.md": "cafd53cdfb60a6a314eec2ead106e79e50649ae49b23a6c2090d6d723a22e48e",
+    "proof/durable-runtime-lifecycle-20260915/PROOF.md": "7e62c9f166456b302a8546547b20066c8b3c0e1d4be0cfd16bf7b03b88fc5176",
+    "tests/test_runtime_lifecycle.py": "69214f23e5a8e4d3f3e49bedc671c35056c82a29bf4803acda601f1b3e1b976b",
+    "tests/test_standalone_supervisor.py": "25167ef17348b3743c5a1ded46c7da1b719feeab2b5b8ebedfb2994d4ae828f3",
+    "tests/test_suite_activation_launcher.py": "0f4b838dd0c3c11e68ce01f8bde5d6239846ccfff268c3849c43b28938df3d1a",
+    "tools/review_conductor_userland_launcher.py": "398a6615e8c5c0957aeacc415d08b1e916998a0a18aa3c08e2bf41dd25a57616",
+    "tools/service_entrypoint.py": "866dfed1727f56be6d9db4a61bf8975dc80e1e24af43e563ec7717ee599ae632",
+    "tools/standalone_supervisor.py": "b4f4d084630fbaeb9326af08c999b380e9d1dcee8b1829c6dc0f7f5adc7727b0"
+  }
+}

@@ -107,7 +107,11 @@ descriptors after creating verified anonymous copies, rewinds those copies befor
 each explicit child start, and closes them plus the socket on every exit path.
 The service starts in its own process session; stop and restart signal that owned
 process group independently of whether the leader has already exited. Distinct
-inherited descriptors track the leader and the complete service generation. The
+inherited descriptors track the leader and the complete service generation, and a
+reciprocal parent-lifetime descriptor lets the service fail closed and drain that
+still-owned session when the supervisor disappears. The standalone launcher also
+handles SIGHUP and waits through the supervisor's full TERM-then-KILL drain
+budget; legacy Blocks `start` keeps its original ten-second child stop. The
 leader descriptor is made close-on-exec by the entrypoint, so every supported
 host can report leader exit without reaping and releasing its process-group
 identity. Every direct adapter subprocess is launched through the generation

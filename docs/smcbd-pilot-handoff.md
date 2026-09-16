@@ -121,9 +121,11 @@ through inherited file descriptors while supplying only the non-secret profile
 and registry paths plus fixed lifecycle verbs as arguments. It binds local health/stop/restart control to the complete
 validated profile, registry path, tenant roots and loopback port; a crashed
 service remains failed pending explicit restart. Explicit stop/restart also
-holds inherited leader and generation descriptors while signaling the owned
+holds inherited leader, generation, and parent-lifetime descriptors while
+signaling the owned
 service process group independently of leader exit, then reaps only after every
-generation holder closes its descriptor. The close-on-exec leader descriptor
+generation holder closes its descriptor. The service fails closed if the
+parent-lifetime write end disappears. The close-on-exec leader descriptor
 reports crashes without reaping on every supported host, and the shared adapter
 command boundary preserves the generation descriptor through `close_fds`. The
 entrypoint verifies

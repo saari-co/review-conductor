@@ -57,14 +57,19 @@ and GitHub App credentials move only through explicitly inherited descriptors.
 The foreground supervisor exposes identity-bound local health/stop/restart
 control, retains anonymous descriptor copies for explicit restart, and leaves a
 crashed service failed until that restart is requested. The service runs in an
-owned process session and inherits dedicated leader and generation descriptors
-alongside the credential descriptors. The entrypoint makes the leader descriptor
-close-on-exec, while every direct adapter command uses one authoritative wrapper
-that explicitly preserves the generation descriptor and selector through
-`close_fds`. Explicit stop/restart keeps the unreaped leader and generation
-descriptor as race-free identities, signals the process group, and reaps the
-leader only after every inheritor has closed the generation descriptor; no
-numeric PGID is probed after identity release. The entrypoint verifies the
+owned process session and inherits dedicated leader, generation, and
+parent-lifetime descriptors alongside the credential descriptors. The entrypoint
+makes the leader and parent-lifetime descriptors close-on-exec, while every
+direct adapter command uses one authoritative wrapper that explicitly preserves
+the generation descriptor and selector through `close_fds`. If the supervisor
+exits or is killed, the service observes EOF on the parent-lifetime descriptor
+and drains its still-owned session instead of remaining a listening orphan.
+Standalone launcher stop waits through the supervisor drain budget and treats
+SIGHUP as orderly stop; legacy Blocks `start` is unchanged. Explicit
+stop/restart keeps the unreaped leader and generation descriptor as race-free
+identities, signals the process group, and reaps the leader only after every
+inheritor has closed the generation descriptor; no numeric PGID is probed after
+identity release. The entrypoint verifies the
 supervisor's digest of the complete
 normalized profile before registry or state access. Restart and stop control
 wait longer than the shutdown bound; failed normal or exceptional shutdown

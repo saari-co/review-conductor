@@ -43,6 +43,10 @@ STANDALONE_ROLES = ("webhook-verify", "github-installation")
 STANDALONE_SUPERVISOR = ROOT / "tools/standalone_supervisor.py"
 SERVICE_TOKEN_RE = re.compile(r"^[^\x00-\x20\x7f]{20,4096}$")
 ACCOUNT_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+LEGACY_CHILD_STOP_SECONDS = 10
+# Must exceed standalone supervisor TERM+KILL drain (10+10) plus control slack.
+STANDALONE_CHILD_STOP_SECONDS = 22
+STANDALONE_STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 
 class LauncherError(core.ContractError):
@@ -397,15 +401,17 @@ def credential_descriptor(value: bytes) -> int:
         raise LauncherError("anonymous runtime descriptor preparation failed") from None
 
 
-def stop_child(process: Any) -> None:
+def stop_child(process: Any, timeout: float | None = None) -> None:
     """Bound graceful shutdown, then kill and reap a surviving child."""
+    if timeout is None:
+        timeout = LEGACY_CHILD_STOP_SECONDS
     if process.poll() is None:
         process.terminate()
     try:
-        process.wait(timeout=10)
+        process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         process.kill()
-        process.wait(timeout=10)
+        process.wait(timeout=timeout)
 
 
 def child_environment(config: dict[str, Any], webhook_fd: int, github_fd: int) -> dict[str, str]:
@@ -651,7 +657,7 @@ def start_standalone(
             child.terminate()
 
     try:
-        for signum in (signal.SIGINT, signal.SIGTERM):
+        for signum in STANDALONE_STOP_SIGNALS:
             previous_handlers[signum] = signal.signal(signum, request_stop)
         # Own stop handlers before spawn so a startup-time signal cannot
         # leave the supervisor child running without its foreground launcher.
@@ -678,7 +684,7 @@ def start_standalone(
     finally:
         if child is not None:
             request_stop(signal.SIGTERM, None)
-            stop_child(child)
+            stop_child(child, timeout=STANDALONE_CHILD_STOP_SECONDS)
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
     return child.returncode or 0

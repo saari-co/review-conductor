@@ -32,9 +32,11 @@ MAX_CONTROL_BYTES = 4096
 GROUP_SHUTDOWN_SECONDS = 10
 CONTROL_REQUEST_SECONDS = 2
 SHUTDOWN_CONTROL_SECONDS = GROUP_SHUTDOWN_SECONDS * 2 + CONTROL_REQUEST_SECONDS
+STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 PROFILE_DIGEST_ENV = "REVIEW_CONDUCTOR_EXPECTED_PROFILE_SHA256"
 GENERATION_FD_ENV = "REVIEW_CONDUCTOR_GENERATION_FD"
 LEADER_FD_ENV = "REVIEW_CONDUCTOR_LEADER_FD"
+PARENT_LIFETIME_FD_ENV = "REVIEW_CONDUCTOR_PARENT_LIFETIME_FD"
 
 
 class SupervisorError(core.ContractError):
@@ -146,6 +148,7 @@ def child_environment(
     credentials: tuple[int, int],
     generation_fd: int,
     leader_fd: int,
+    parent_lifetime_fd: int,
 ) -> dict[str, str]:
     environment = legacy_launcher.clean_environment(config)
     environment["PYTHONUNBUFFERED"] = "1"
@@ -156,6 +159,7 @@ def child_environment(
     environment[PROFILE_DIGEST_ENV] = profile_config_digest(config)
     environment[GENERATION_FD_ENV] = str(generation_fd)
     environment[LEADER_FD_ENV] = str(leader_fd)
+    environment[PARENT_LIFETIME_FD_ENV] = str(parent_lifetime_fd)
     for name in (
         config["notifications"]["discord_target_env"],
         config["notifications"]["signal_target_env"],
@@ -170,10 +174,17 @@ def child_environment(
 class ServiceGeneration:
     """A service leader plus a descriptor retained by credential-bearing forks."""
 
-    def __init__(self, leader: Any, lifetime_fd: int, leader_fd: int) -> None:
+    def __init__(
+        self,
+        leader: Any,
+        lifetime_fd: int,
+        leader_fd: int,
+        parent_lifetime_fd: int = -1,
+    ) -> None:
         self.leader = leader
         self.lifetime_fd = lifetime_fd
         self.leader_fd = leader_fd
+        self.parent_lifetime_fd = parent_lifetime_fd
 
     @property
     def pid(self) -> int:
@@ -210,6 +221,34 @@ def leader_exited(generation: ServiceGeneration) -> bool:
     return True
 
 
+def _open_supervised_pipes() -> tuple[int, int, int, int, int, int]:
+    """Create child-lifetime, leader, and reciprocal parent-lifetime pipes."""
+    opened: list[int] = []
+    try:
+        lifetime_read, lifetime_write = os.pipe()
+        opened.extend((lifetime_read, lifetime_write))
+        leader_read, leader_write = os.pipe()
+        opened.extend((leader_read, leader_write))
+        parent_read, parent_write = os.pipe()
+        opened.extend((parent_read, parent_write))
+        os.set_blocking(lifetime_read, False)
+        os.set_blocking(leader_read, False)
+        os.set_blocking(parent_read, False)
+        os.set_inheritable(parent_write, False)
+        return (
+            lifetime_read,
+            lifetime_write,
+            leader_read,
+            leader_write,
+            parent_read,
+            parent_write,
+        )
+    except BaseException:
+        for descriptor in opened:
+            _close_descriptor(descriptor)
+        raise
+
+
 def _close_generation(generation: ServiceGeneration) -> None:
     if generation.lifetime_fd >= 0:
         _close_descriptor(generation.lifetime_fd)
@@ -217,6 +256,9 @@ def _close_generation(generation: ServiceGeneration) -> None:
     if generation.leader_fd >= 0:
         _close_descriptor(generation.leader_fd)
         generation.leader_fd = -1
+    if generation.parent_lifetime_fd >= 0:
+        _close_descriptor(generation.parent_lifetime_fd)
+        generation.parent_lifetime_fd = -1
 
 
 def spawn_service(
@@ -246,31 +288,36 @@ def spawn_service(
         "--apply",
         "serve",
     ]
-    lifetime_read, lifetime_write = os.pipe()
-    leader_read, leader_write = os.pipe()
-    os.set_blocking(lifetime_read, False)
-    os.set_blocking(leader_read, False)
+    try:
+        lifetime_read, lifetime_write, leader_read, leader_write, parent_read, parent_write = (
+            _open_supervised_pipes()
+        )
+    except OSError as exc:
+        raise SupervisorError("standalone service lifetime handles are unavailable") from exc
     try:
         leader = popen(
             command,
             cwd=str(ROOT),
             env=child_environment(
-                config, credentials, lifetime_write, leader_write
+                config, credentials, lifetime_write, leader_write, parent_read
             ),
-            pass_fds=(*credentials, lifetime_write, leader_write),
+            pass_fds=(*credentials, lifetime_write, leader_write, parent_read),
             stdin=subprocess.DEVNULL,
             start_new_session=True,
         )
     except BaseException as exc:
         _close_descriptor(lifetime_read)
         _close_descriptor(leader_read)
+        _close_descriptor(parent_read)
+        _close_descriptor(parent_write)
         if isinstance(exc, OSError):
             raise SupervisorError("standalone service could not be started") from exc
         raise
     finally:
         _close_descriptor(lifetime_write)
         _close_descriptor(leader_write)
-    return ServiceGeneration(leader, lifetime_read, leader_read)
+        _close_descriptor(parent_read)
+    return ServiceGeneration(leader, lifetime_read, leader_read, parent_write)
 
 
 def _missing_process_group(exc: BaseException) -> bool:
@@ -669,7 +716,7 @@ def run_supervisor(
 
         try:
             if install_signals:
-                for signum in (signal.SIGINT, signal.SIGTERM):
+                for signum in STOP_SIGNALS:
                     previous_handlers[signum] = signal.signal(signum, request_stop)
             # Install handlers before spawning so a startup-time signal cannot
             # leave the service child running without its foreground supervisor.
