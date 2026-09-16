@@ -2,6 +2,7 @@
 
 Date: 2026-09-15. Lane/owner: `rich_publication_implementation`; closer: root.
 Round 1 repair owner: `conductor15_round1_repairs`; root retains review/closeout.
+Final repair owner: `conductor15_final_proof_status_fix`; root retains adjudication.
 Task: restore native presentation through Conductor's existing publication owner.
 Mode: source/tests/docs/proof and draft PR only. No runtime activation or review verdict.
 
@@ -16,6 +17,7 @@ changes were performed or authorized by this proof.
 - Branch: `codex/restore-rich-clawsweeper-publication-20260915`, isolated sibling worktree.
 - Fresh base: `8cefc3548d40b3868263cacd54a9568d51fbe67f`.
 - Round 1 repair baseline: `b99e1d4289a53e2b1f48dea7b0a9224c78e07078`.
+- Final repair baseline: `75e5753634ab3e6d0e71ad8dd18ff397d1a9c3fe`.
 - Producer contract: `saari-co/clawsweeper@f1d79d1234897abca168807faf8a2088525a0e98`.
 - [Source hashes](source-hashes.json) bind the tested implementation/fixture files.
 - [Provenance ledger](../../docs/provenance.json) records the extracted-file
@@ -25,13 +27,17 @@ changes were performed or authorized by this proof.
   selectors), `src/clawsweeper-rating.ts` (overall rating selector),
   `src/clawsweeper-report-comment-presentation.ts` (public section layout),
   `src/clawsweeper-report-helpers.ts` (safe diagram boundary),
-  `src/clawsweeper-types.ts` (evidence kinds).
+  `src/clawsweeper-types.ts` (evidence kinds),
+  `src/clawsweeper-report-parser.ts` (native maintainer proof override origin),
+  `src/clawsweeper-promotion-facts.ts` (producer override proof evidence).
 
 There is no producer change, Node dependency, second publisher, new evidence
 store or database schema. The existing terminal receipt now retains its already
 validated report digest; an existing-event-log ownership receipt precedes native
-publication mutations. Classifications, adjudication, check conclusions, four
+publication mutations. Existing precedence, adjudication, four
 Conductor status-label meanings and human-only merge are unchanged.
+The final repair below corrects classification admission of producer-valid proof
+statuses; it does not change their producer meaning or create owner authority.
 
 ## Reviewable synthetic artifacts
 
@@ -132,9 +138,55 @@ admission/evidence, no-regrading, adjudication and human-only merge boundaries.
 Only the renderer/tests, sanitized proof/provenance and contract text changed. No raw report,
 credential, runtime configuration or service state was added.
 
+## Final Copilot repair — proof-status contract
+
+The coordinator adjudicated the sole finding
+[4021290511](https://github.com/saari-co/review-conductor/pull/15#discussion_r4021290511)
+from [review 5217081204](https://github.com/saari-co/review-conductor/pull/15#pullrequestreview-5217081204)
+as `required_fix`. **Copilot budget: 2/2 rounds closed. These final fixes are
+TESTED, NOT RE-REVIEWED; no further review request is authorized or made.**
+
+The pinned producer's `REAL_BEHAVIOR_PROOF_STATUSES` contains exactly
+`sufficient`, `missing`, `mock_only`, `insufficient`, `not_applicable`, `override`.
+Its rating code treats `mock_only` like deficient `insufficient`; native
+`override` originates from recorded maintainer `proof: override` and is existing
+proof evidence. Conductor now admits and renders this exact six-value vocabulary.
+It rejects obsolete `not_needed` / `failed` / `required` and unknown values before
+failure, findings, maintainer or contributor-action precedence could skip their
+validation. This is a native compatibility correction, not an admission-policy
+or producer change.
+
+| Native evidence | Qualified behavior |
+| --- | --- |
+| `mock_only` | Materializes, renders its unchanged status, publishes `status: 📣 needs proof`, retracts stale `proof: sufficient`; never becomes clean or ready through its rating. |
+| `override`, otherwise clean | Materializes and renders unchanged as native proof evidence, retains `owner_merge_authority` and `merge_authorized: false`; cannot mint `proof: override` or `proof: sufficient`. |
+| `override` with findings / maintainer question / contributor action | Existing findings, human-policy, or proof-deficient status retains precedence; override cannot clear any of these gates. Execution-failure and non-ready-rating precedence are also regression checked. |
+| Human-owned `proof: override` already present | Preserved outside native ownership; no POST or DELETE creates/removes that owner authority. |
+| Notification qualification | `READY_PROOF_STATUSES = {"sufficient"}` remains byte-for-byte unchanged; both newly supported values store `ready_qualified = 0`. |
+| Repeated reconciliation | One rich comment, unchanged final labels and no repeated native label additions. Existing ready-status/check reconciliation may repeat its idempotent calls; this repair does not change that separate behavior. |
+
+The [tracked regression receipt](proof-status-regression.json) binds the final
+test-file hash, exact archived baseline and reproduction command. On archived
+`75e5753634ab3e6d0e71ad8dd18ff397d1a9c3fe`, with **only** the updated test file
+copied into disposable extraction, five primary tests yielded 21 expected
+assertion failures and two expected valid-status rejection errors. On repaired
+source the same five tests pass. All 28 focused tests pass, including six-value
+acceptance, 20 invalid-value/precedence combinations, synthetic accepted-bundle
+collection → materialization → bridge → rich publication → repeat, preserved
+actual findings/gates, human label preservation, and rejected findings-bearing
+noncontract evidence before report/terminal materialization.
+
+Only two production modules change in this final repair. Repository/PR/base/head/
+epoch/digest/actor binding, action/admission authority, sole Conductor publication,
+unowned-label protection, human-only merge, profile/registry and notification
+policy are unchanged. No historical stored evidence is rewritten. Existing
+compact-summary and Blocks fallback remain; newly parsed native bundles validate
+the producer vocabulary. No live report, database, credential, runtime or Suite /
+ClawSweeper source/PR was changed or used in the synthetic final-repair tests.
+
 ## Validation and gates
 
-Focused synthetic suite: 18 tests passed. Existing projection (22), original
+Focused synthetic suite: 28 tests passed. Existing projection (22), original
 OpenClaw/publication (31), and profile/Blocks compatibility (31) suites passed
 during implementation. Full required checks and build are recorded below after
 terminal execution; CI URLs and exact PR head are bound in the draft PR and
@@ -151,11 +203,20 @@ test programs also completed successfully, including userland (21) and
 projection (22). No aggregate count is inferred for the other two custom programs.
 No checks were skipped; no live credentials or runtime service were used.
 
-Exact-head CI and the published repair SHA are recorded in the draft PR and the
-external Round 1 repair receipt after push; this tracked proof does not claim a
-self-referential commit or external-review clearance. The repair worker made no
-review request; the coordinator owns the separately authorized final review round.
+The final proof-status repair also passed all 16 `make check` suites and
+`make build`: the 12 unittest suites reported 285 tests (including the 28 focused
+tests), and all four custom programs passed, including userland (21) and
+projection (22). Final provenance/source/producer hashes, unchanged synthetic
+preview, local documentation links, staged repository hygiene and whitespace
+were checked. No checks were skipped; this final-repair qualification used only
+mocked synthetic fixtures and disposable local state.
 
-Remaining gates: independent exact-head review via the coordinator;
-prerequisite merge order, refreshed final qualification, explicit human merge
-and separate activation. No deployed parity claim is made.
+Exact-head CI and the published final repair SHA are recorded in the draft PR and
+external final repair receipt after push; this tracked proof does not claim a
+self-referential commit or external-review clearance. Copilot rounds are exhausted
+at 2/2; no third round or replacement precommit-review gate is introduced.
+
+Remaining gates: final fixes are TESTED, NOT RE-REVIEWED; coordinator adjudication,
+prerequisite merge order, refreshed final qualification, required human owner
+acknowledgements, explicit human merge and separate activation remain held.
+PR 15 stays draft. No deployed parity or live GitHub-rendering claim is made.

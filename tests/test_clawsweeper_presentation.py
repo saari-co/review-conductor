@@ -53,6 +53,67 @@ def plan_for(identity, report, comments=None, labels=None, content="clean"):
 
 
 class PresentationTests(unittest.TestCase):
+    def test_exact_native_proof_status_contract(self):
+        expected = {
+            "sufficient": "clean", "missing": "proof_deficient",
+            "mock_only": "proof_deficient", "insufficient": "proof_deficient",
+            "not_applicable": "clean", "override": "clean",
+        }
+        self.assertEqual(projection.NONBLOCKING_PROOF_STATUSES, {"sufficient", "not_applicable", "override"})
+        self.assertEqual(projection.DEFICIENT_PROOF_STATUSES, {"missing", "mock_only", "insufficient"})
+        self.assertEqual(native.PROOF_STATUSES, set(expected))
+        self.assertEqual(userland.READY_PROOF_STATUSES, {"sufficient"})
+        for status, verdict in expected.items():
+            with self.subTest(status=status):
+                identity, report = presentation(FIXTURE.read_text().replace(
+                    "real_behavior_proof_status: sufficient", "real_behavior_proof_status: " + status))
+                classified = projection.classify_from_frontmatter(report["fields"], finding_count=0)
+                self.assertEqual(classified["content_verdict"], verdict)
+                self.assertFalse(classified["merge_authorized"])
+                self.assertEqual(classified["merge_policy"], "human_only")
+                if verdict == "clean":
+                    self.assertIn("owner_merge_authority", classified["process_gates"])
+                self.assertEqual(set(report["labels"]) & native.FAMILIES["proof"],
+                                 {"proof: sufficient"} if status == "sufficient" else set())
+                self.assertNotIn("proof: override", native.managed_labels(report))
+                self.assertIn("Native proof status: " + status, plan_for(identity, report)["comment"]["body"])
+
+    def test_noncontract_proof_status_rejected_before_verdict_precedence(self):
+        cases = ({}, {"review_terminal_failure": "true"}, {"finding_count": 1},
+                 {"maintainer_decision": '{"required":true}'},
+                 {"real_behavior_proof_needs_contributor_action": "true"})
+        for status in ("not_needed", "failed", "required", "unknown"):
+            for case in cases:
+                with self.subTest(status=status, case=case):
+                    text = FIXTURE.read_text().replace(
+                        "real_behavior_proof_status: sufficient", "real_behavior_proof_status: " + status)
+                    fields = userland.parse_frontmatter(text)
+                    fields.update({key: value for key, value in case.items() if key != "finding_count"})
+                    with self.assertRaisesRegex(projection.ProjectionError, "proof_status"):
+                        projection.classify_from_frontmatter(fields, finding_count=case.get("finding_count", 0))
+                    for key, value in case.items():
+                        if key != "finding_count":
+                            text = text.replace(key + ": " + userland.parse_frontmatter(text)[key], key + ": " + value)
+                    with self.assertRaisesRegex(native.PresentationError, "proof status"):
+                        presentation(text)
+
+    def test_native_override_retains_actual_defect_precedence(self):
+        _, report = presentation(FIXTURE.read_text().replace(
+            "real_behavior_proof_status: sufficient", "real_behavior_proof_status: override"))
+        cases = (
+            ({"review_terminal_failure": "true", "maintainer_decision": '{"required":true}'}, 1, "failed"),
+            ({"maintainer_decision": '{"required":true}'}, 1, "findings"),
+            ({"maintainer_decision": '{"required":true}', "real_behavior_proof_needs_contributor_action": "true"}, 0, "human_policy"),
+            ({"real_behavior_proof_needs_contributor_action": "true"}, 0, "proof_deficient"),
+            ({"pr_rating_overall": "D", "process_gates": "[]"}, 0, "human_policy"),
+        )
+        for changes, count, verdict in cases:
+            with self.subTest(verdict=verdict, changes=changes):
+                classified = projection.classify_from_frontmatter({**report["fields"], **changes}, finding_count=count)
+                self.assertEqual(classified["content_verdict"], verdict)
+                self.assertFalse(classified["merge_authorized"])
+                self.assertEqual(classified["merge_policy"], "human_only")
+
     def test_rich_sections_native_scores_diagram_and_allowlisted_labels(self):
         identity, report = presentation()
         plan = plan_for(identity, report)
@@ -196,7 +257,8 @@ class ArtifactPublicationTests(unittest.TestCase):
     def db(self):
         return core.open_database(Path(self.config["paths"]["state_root"]), profiles.REPO)
 
-    def prepare(self, *, proof_status="sufficient", finding=False):
+    def prepare(self, *, proof_status="sufficient", finding=False, maintainer_required=False,
+                needs_contributor_action=False):
         runtime.bridge_openclaw(self.config, self.fixture.terminal(self.config, self.action))
         action = legacy.action(self.config, 7, "clawsweeper.dispatch")
         legacy.mark_dispatched(self.config, action["action_id"])
@@ -206,7 +268,13 @@ class ArtifactPublicationTests(unittest.TestCase):
         text = FIXTURE.read_text().replace("example/synthetic-review", profiles.REPO).replace(
             "1" * 40, profiles.BASE).replace("2" * 40, profiles.HEAD).replace(
             "synthetic-clawsweeper", "fixture-suite-clawsweeper").replace(
-            "real_behavior_proof_status: sufficient", "real_behavior_proof_status: " + proof_status)
+            "real_behavior_proof_status: sufficient", "real_behavior_proof_status: " + proof_status).replace(
+            "Status: sufficient", "Status: " + proof_status)
+        if maintainer_required:
+            text = text.replace('maintainer_decision: {"required":false}', 'maintainer_decision: {"required":true}')
+        if needs_contributor_action:
+            text = text.replace("real_behavior_proof_needs_contributor_action: false",
+                                "real_behavior_proof_needs_contributor_action: true")
         if finding:
             text = text.replace("None. This synthetic clean fixture", "- **[P1] Synthetic finding:** keep the fixture guarded.\n\nThis synthetic findings fixture")
         self.report = text
@@ -219,10 +287,84 @@ class ArtifactPublicationTests(unittest.TestCase):
         class Artifacts(legacy.FakeGitHub):
             def list_run_artifacts(self, run_id):
                 return [{"id": 9001, "name": f"smcbd-suite-review-{run_id}-1", "expired": False}]
-        userland.collect_clawsweeper_terminals(self.config, Artifacts(801, bundle.getvalue()), dry_run=False)
+        self.collected = userland.collect_clawsweeper_terminals(self.config, Artifacts(801, bundle.getvalue()), dry_run=False)
         terminal = Path(self.config["clawsweeper_bridge"]["terminal_inbox"]) / "801.terminal.json"
         runtime.bridge_clawsweeper(self.config, terminal)
         self.report_path = Path(json.loads(terminal.read_text())["proof_ref"])
+
+    def assert_proof_status_publication(self, status, verdict, label, **prepare_options):
+        self.http.labels.add("proof: sufficient")  # Retract stale owned sufficiency.
+        self.prepare(proof_status=status, **prepare_options)
+        self.assertEqual(self.collected[0]["result"], "terminal_materialized")
+        self.assertFalse(self.collected[0]["ready_qualified"])
+        self.assertEqual(self.report_path.read_text(), self.report)
+        with closing(self.db()) as db:
+            quality = db.execute("SELECT * FROM clawsweeper_quality").fetchone()
+            self.assertEqual(quality["proof_status"], status)
+            self.assertEqual(quality["content_verdict"], verdict)
+            self.assertEqual(quality["ready_qualified"], 0)
+            if verdict == "clean":
+                self.assertIn("owner_merge_authority", json.loads(quality["process_gates_json"]))
+        first = self.project()
+        self.assertFalse(first["merge_authorized"])
+        self.assertEqual(first["projected"][0]["publication"]["result"], "published")
+        self.assertIn(label, self.http.labels)
+        self.assertNotIn("proof: sufficient", self.http.labels)
+        self.assertIn("docs", self.http.labels)
+        body = self.http.comments[0]["body"]
+        for expected in ("## What This Changes", "## Review scores", "Native proof status: " + status,
+                         "Review content: " + verdict, "human_only"):
+            self.assertIn(expected, body)
+        before = len(self.http.calls)
+        labels_before = set(self.http.labels)
+        repeated = self.project()["projected"][0]["publication"]
+        self.assertEqual(repeated["result"], "unchanged")
+        self.assertFalse(repeated["writes"])
+        self.assertEqual(len(self.http.comments), 1)
+        self.assertEqual(self.http.labels, labels_before)
+        self.assertFalse(any(method != "GET" and "/comments" in path
+                             for method, path, _body in self.http.calls[before:]))
+        # Existing ready-status reconciliation can repeat; rich native labels cannot.
+        self.assertFalse(any(method == "POST" and "/labels" in path and set(payload["labels"]) & native.NATIVE_LABELS
+                             for method, path, payload in self.http.calls[before:]))
+        self.assertFalse(any(method == "POST" and "/labels" in path and
+                             {"proof: override", "proof: sufficient"} & set(payload["labels"])
+                             for method, path, payload in self.http.calls))
+
+    def test_mock_only_bundle_materialization_rich_publication_and_idempotency(self):
+        self.assert_proof_status_publication("mock_only", "proof_deficient", "status: 📣 needs proof")
+        self.assertNotIn(runtime.READY_LABEL, self.http.labels)
+        self.assertNotIn("proof: override", self.http.labels)
+
+    def test_override_bundle_materialization_rich_publication_and_idempotency(self):
+        self.assert_proof_status_publication("override", "clean", "status: 👀 ready for maintainer look")
+        self.assertNotIn("proof: override", self.http.labels)
+
+    def test_override_preserves_human_owned_label_without_minting_authority(self):
+        self.http.labels.add("proof: override")
+        self.assert_proof_status_publication("override", "clean", "status: 👀 ready for maintainer look")
+        self.assertIn("proof: override", self.http.labels)
+
+    def test_override_does_not_clear_findings(self):
+        self.assert_proof_status_publication("override", "findings", "status: ⏳ waiting on author", finding=True)
+        self.assertNotIn(runtime.READY_LABEL, self.http.labels)
+
+    def test_override_does_not_clear_maintainer_decision(self):
+        self.assert_proof_status_publication("override", "human_policy", "status: needs maintainer proof decision",
+                                           maintainer_required=True)
+        self.assertNotIn(runtime.READY_LABEL, self.http.labels)
+
+    def test_override_does_not_clear_contributor_action(self):
+        self.assert_proof_status_publication("override", "proof_deficient", "status: 📣 needs proof",
+                                           needs_contributor_action=True)
+        self.assertNotIn(runtime.READY_LABEL, self.http.labels)
+
+    def test_noncontract_status_with_findings_rejected_before_materialization(self):
+        with self.assertRaisesRegex(userland.UserlandError, "proof_status"):
+            self.prepare(proof_status="required", finding=True)
+        self.assertFalse((Path(self.config["clawsweeper_bridge"]["terminal_inbox"]) / "801.terminal.json").exists())
+        self.assertFalse((Path(self.config["paths"]["proof_root"]) / "clawsweeper/801/7.md").exists())
+        self.assertEqual(self.http.calls, [])
 
     def project(self):
         return runtime.reconcile_projection(self.config, self.client, pr_number=7)

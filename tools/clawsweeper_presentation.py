@@ -18,6 +18,8 @@ from typing import Any
 REPORT_MAX_BYTES = 512 * 1024  # Native exact-tuple export bound.
 COMMENT_MAX_BYTES = 48 * 1024  # Conservative local publication budget.
 RICH_MARKER = "<!-- review-conductor:native-presentation-v1 -->"
+# Producer REAL_BEHAVIOR_PROOF_STATUSES; report evidence is not owner authority.
+PROOF_STATUSES = frozenset({"sufficient", "missing", "mock_only", "insufficient", "not_applicable", "override"})
 RATINGS = {
     "S": ("🦀 challenger crab", "6/6"),
     "A": ("🦞 diamond lobster", "5/6"),
@@ -109,9 +111,7 @@ def parse_report(text: str, identity: dict[str, Any], *, actor: str | None) -> d
         if priority != "none":
             labels.add(priority)
     if "real_behavior_proof_status" in fields:
-        if fields["real_behavior_proof_status"] not in {
-            "sufficient", "not_applicable", "not_needed", "insufficient", "missing", "failed", "required",
-        }:
+        if fields["real_behavior_proof_status"] not in PROOF_STATUSES:
             raise PresentationError("native proof status is invalid")
         families.add("proof")
         if fields["real_behavior_proof_status"] == "sufficient":

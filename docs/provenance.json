@@ -105,15 +105,31 @@
   "native_presentation_provenance": {
     "repository": "saari-co/clawsweeper",
     "commit": "f1d79d1234897abca168807faf8a2088525a0e98",
-    "mode": "presentation and native label vocabulary only; no scoring/readiness/apply/workflow logic imported",
+    "mode": "native report vocabulary, proof-status compatibility and presentation only; no scoring/readiness/apply/workflow logic imported",
     "source_sha256": {
       "src/clawsweeper-policy.ts": "9a3d0341c573772b3f4b03e345a8e4f0b230e0a29adff69917762064b4c65477",
       "src/clawsweeper-label-selection.ts": "d4ff9481e36248571bcfcd527bea86605e48f1910e296033df0ccc213df631e9",
       "src/clawsweeper-rating.ts": "85658a274d11b2277130de3d573f2289f347008d3444d10e3cc51e39702e108e",
       "src/clawsweeper-report-comment-presentation.ts": "16c6d84ef6db01a6d68265f92ae290c800e2d0d6c08160796a918f5146591c93",
       "src/clawsweeper-report-helpers.ts": "c5b93149ad2f7740bbc1997157ec2515c8f98ea0de67b7721bc1b9fe78429d3d",
-      "src/clawsweeper-types.ts": "c699212976944a600806172e0d0eadd1e969b8c6dd8e2d819f79a410830525d5"
+      "src/clawsweeper-types.ts": "c699212976944a600806172e0d0eadd1e969b8c6dd8e2d819f79a410830525d5",
+      "src/clawsweeper-report-parser.ts": "8d1eca893ea448e334aab393301ad925e035260be2d851e3df8cce970de2ee70",
+      "src/clawsweeper-promotion-facts.ts": "9213e1b8151d1d7d208e1e34d77e52eeebed2cec90c23fc6b36eac22e618a154"
     },
-    "diagram_declaration_contract": "src/clawsweeper-report-helpers.ts:sanitizeArchitectureDiagram accepts flowchart keyword and direction case-insensitively; unsafe-content rejection remains mandatory"
+    "diagram_declaration_contract": "src/clawsweeper-report-helpers.ts:sanitizeArchitectureDiagram accepts flowchart keyword and direction case-insensitively; unsafe-content rejection remains mandatory",
+    "proof_status_contract": {
+      "source": "src/clawsweeper-policy.ts:REAL_BEHAVIOR_PROOF_STATUSES",
+      "values": [
+        "sufficient",
+        "missing",
+        "mock_only",
+        "insufficient",
+        "not_applicable",
+        "override"
+      ],
+      "mock_only": "deficient like insufficient (clawsweeper-rating.ts)",
+      "override": "producer maintainer proof evidence (clawsweeper-report-parser.ts); nonblocking proof compatibility only, no new owner authorization, no proof:override/sufficient label, no merge; notification READY_PROOF_STATUSES remains sufficient-only",
+      "rejection": "validate all native statuses before verdict precedence; reject not_needed/failed/required/unknown"
+    }
   }
 }

@@ -2,15 +2,17 @@
   "base_commit": "8cefc3548d40b3868263cacd54a9568d51fbe67f",
   "files": {
     "Makefile": "90f27a3025e12ed0bb0a430f148ef339d94419209eea2f8c1a5aea3dd53a03e8",
-    "tools/clawsweeper_presentation.py": "bac49f10bf7f03283ac2802acf203aff44d4bda5eea226ae1c3cbde912937198",
+    "tools/clawsweeper_presentation.py": "88e645235389876a64cfb2d30bd26be947d6bd2a54bd78665ac6904b4b71a8ab",
     "tools/review_conductor.py": "471b51b2e9cf099fcb1931a787f20fad3e134afa236eb672a89178c8cafe1341",
     "tools/review_conductor_runtime.py": "09254ee46d75d8e4aba1792dcfc2c647d695bc23962f1915c480b77686e95dc6",
-    "tools/review_result_projection.py": "82ee967ea908a40ad4841dfdf7d20b2c7595b73ef0bcd195594f22906e61c983",
-    "tests/test_clawsweeper_presentation.py": "502c896c048c543a4f06bfad2592e37804ad8d5b804352c06834abfae6a4aff5",
+    "tools/review_result_projection.py": "a27a5267bd6741b47c1f81fd8a842f57b4e8f812559fcf3b2c741753128206c6",
+    "tests/test_clawsweeper_presentation.py": "fa6e431d140dd119b9ccd1b540c283e2995ecd725a7a8a0313c6e5e88c8b4204",
     "tests/fixtures/clawsweeper-rich-report.md": "e3f50107948fb599db190dedc4dfab3f9e36fde9287e7e252606bea002f56611",
     "docs/architecture.md": "6a8f0b96c61318b2a104b1fa381ca98b6b72a585b161794c836643e0d29630f5",
-    "docs/integration-contract.md": "91bfb81d01a4b328e6da850644b9ae5a8b0bef7f862a9512cb518392085809a4",
-    "docs/provenance.json": "e8e0828b7bf75e492bd2f63d18fd653fa2685ef5ce839dfe98e5a546b5cd83d9"
+    "docs/integration-contract.md": "479c6a4dadef50522ba2d7e4b1833f59336ef565124b874ea5e2668e9d1a2168",
+    "docs/provenance.json": "3dcc69b987accc07a0f08055b60aad95bbab8202d1c01e70826bc506a04d34d9",
+    "proof/rich-clawsweeper-publication-20260915/proof-status-regression.json": "4d8bea552d188b87e2c1b1e1af17d231b280673aef079ae4b9cd2f83ad0e1c17"
   },
-  "repair_baseline_commit": "b99e1d4289a53e2b1f48dea7b0a9224c78e07078"
+  "repair_baseline_commit": "b99e1d4289a53e2b1f48dea7b0a9224c78e07078",
+  "final_repair_baseline_commit": "75e5753634ab3e6d0e71ad8dd18ff397d1a9c3fe"
 }

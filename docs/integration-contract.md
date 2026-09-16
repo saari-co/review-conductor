@@ -247,6 +247,20 @@ label or rejected API operation is an explicit publication failure, not success.
 Already-absent DELETE remains idempotent. See the existing GitHub
 [issue label API](https://docs.github.com/en/rest/issues/labels).
 
+Native report admission and presentation accept exactly the producer's six proof
+statuses: `sufficient`, `missing`, `mock_only`, `insufficient`, `not_applicable`,
+and `override`. Unknown and obsolete `not_needed` / `failed` / `required` proof
+values are rejected before execution-failure, findings or maintainer precedence
+can bypass validation. `mock_only` remains proof-deficient. Native `override`
+records the producer's existing maintainer-proof evidence; it is not rewritten
+as `sufficient`, cannot mint `proof: override` or `proof: sufficient`, and cannot
+remove a human-owned override label. It does not bypass actual findings,
+maintainer decisions, contributor action, rating/process gates, or human-only
+merge. Clean content retains `owner_merge_authority`. The separate enrolled
+ready-notification policy remains `sufficient`-only; neither new status qualifies
+that notification. Stored historical summaries and legacy Blocks fallback remain
+unchanged; this validation is for newly parsed native evidence, not a backfill.
+
 Before native publication writes, the existing event log durably records the
 exact tuple/digest and explicitly owned families. Repeated ticks update one
 App-owned marker-bound comment and reconcile only label deltas. Interrupted

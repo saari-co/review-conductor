@@ -41,8 +41,9 @@ KNOWN_PROCESS_GATES = frozenset({PROCESS_OWN_CHECK, PROCESS_OWNER_MERGE})
 RAIL_RESULTS = frozenset({"clean", "findings", "failed", "human_gate"})
 KNOWN_DECISIONS = frozenset({"keep_open", "close", "none"})
 READY_OVERALL_TIERS = frozenset({"S", "A", "B"})
-NONBLOCKING_PROOF_STATUSES = frozenset({"sufficient", "not_applicable", "not_needed"})
-DEFICIENT_PROOF_STATUSES = frozenset({"insufficient", "missing", "failed", "required"})
+# Native override is existing producer proof evidence, never merge authorization.
+NONBLOCKING_PROOF_STATUSES = frozenset({"sufficient", "not_applicable", "override"})
+DEFICIENT_PROOF_STATUSES = native.PROOF_STATUSES - NONBLOCKING_PROOF_STATUSES
 
 CONDUCTOR_ISSUER_APP_ID = 4916376
 CHECK_NAMES = ("OpenClaw Review Rail", "ClawSweeper Review Rail")
@@ -176,6 +177,9 @@ def classify_native_review(
         raise ProjectionError("finding_count must be a non-negative integer")
     decision = parse_optional_decision(decision)
     typed_gates = parse_process_gates(process_gates)
+    # Validate the native contract even when a higher-precedence defect exists.
+    if not isinstance(proof_status, str) or proof_status not in native.PROOF_STATUSES:
+        raise ProjectionError("proof_status is not a validated native value")
 
     if terminal_failure:
         return _classification(CONTENT_FAILED, (), "failed", decision)
@@ -185,9 +189,6 @@ def classify_native_review(
         return _classification(CONTENT_HUMAN_POLICY, (), "human_gate", decision)
     if needs_contributor_action or proof_status in DEFICIENT_PROOF_STATUSES:
         return _classification(CONTENT_PROOF_DEFICIENT, (), "human_gate", decision)
-    if proof_status not in NONBLOCKING_PROOF_STATUSES:
-        raise ProjectionError("proof_status is not a validated non-blocking or deficient value")
-
     content_ready = overall_tier in READY_OVERALL_TIERS
     if not content_ready:
         if typed_gates and PROCESS_OWN_CHECK in typed_gates:
