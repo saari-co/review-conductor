@@ -196,6 +196,28 @@ for fd in sys.argv[1:]:
         self.assertEqual(child.returncode, -9)
         self.assertEqual(child.waits, 2)
 
+    def test_legacy_start_stop_keeps_ten_second_default(self):
+        class TimedChild(legacy.FakeProcess):
+            def __init__(self):
+                super().__init__(['synthetic'], {})
+                self.timeouts = []
+
+            def wait(self, timeout):
+                self.timeouts.append(timeout)
+                return self.returncode
+
+        conductor = TimedChild()
+        tunnel = TimedChild()
+        calls = []
+
+        def popen(*args, **kwargs):
+            calls.append(1)
+            return conductor if len(calls) == 1 else tunnel
+
+        self.assertEqual(self.run_start(popen), 0)
+        self.assertEqual(conductor.timeouts, [launcher.LEGACY_CHILD_STOP_SECONDS])
+        self.assertEqual(tunnel.timeouts, [launcher.LEGACY_CHILD_STOP_SECONDS])
+
 
 if __name__ == '__main__':
     unittest.main()

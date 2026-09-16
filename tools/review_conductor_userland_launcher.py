@@ -414,6 +414,16 @@ def stop_child(process: Any, timeout: float | None = None) -> None:
         process.wait(timeout=timeout)
 
 
+def stop_standalone_child(process: Any) -> None:
+    """Reap a standalone supervisor child through STANDALONE_CHILD_STOP_SECONDS.
+
+    Installed callers keep ``stop_child`` for Blocks and tunnel children. Only
+    the conductor/supervisor stop uses this helper. This is not a
+    service-manager API.
+    """
+    stop_child(process, timeout=STANDALONE_CHILD_STOP_SECONDS)
+
+
 def child_environment(config: dict[str, Any], webhook_fd: int, github_fd: int) -> dict[str, str]:
     environment = clean_environment(config)
     environment["PYTHONUNBUFFERED"] = "1"
@@ -684,7 +694,7 @@ def start_standalone(
     finally:
         if child is not None:
             request_stop(signal.SIGTERM, None)
-            stop_child(child, timeout=STANDALONE_CHILD_STOP_SECONDS)
+            stop_standalone_child(child)
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
     return child.returncode or 0

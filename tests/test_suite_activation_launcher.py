@@ -798,12 +798,12 @@ print('ok', file=sys.stderr)
         child = LiveChild()
         stops = []
         timeouts = []
-        real_stop = launcher.stop_child
+        real_stop = launcher.stop_standalone_child
 
-        def stop(process, timeout=None):
+        def stop(process):
             stops.append(process)
-            timeouts.append(timeout)
-            return real_stop(process, timeout=timeout)
+            timeouts.append(launcher.STANDALONE_CHILD_STOP_SECONDS)
+            return real_stop(process)
 
         def popen(command, **kwargs):
             child.command = command
@@ -811,7 +811,7 @@ print('ok', file=sys.stderr)
             child.returncode = 0
             return child
 
-        with patch.object(launcher, "stop_child", side_effect=stop):
+        with patch.object(launcher, "stop_standalone_child", side_effect=stop):
             self.assertEqual(self.start(config, path, popen), 0)
         self.assertEqual(stops, [child])
         self.assertEqual(timeouts, [launcher.STANDALONE_CHILD_STOP_SECONDS])
@@ -1024,7 +1024,7 @@ class SuiteActivationLauncherMutationTests(unittest.TestCase):
         (
             "keep standalone outer stop on the Blocks ten-second budget",
             "tools/review_conductor_userland_launcher.py",
-            "            stop_child(child, timeout=STANDALONE_CHILD_STOP_SECONDS)\n",
+            "            stop_standalone_child(child)\n",
             "            stop_child(child)\n",
             "test_suite_activation_launcher.SuiteActivationLauncherTests.test_normal_exit_restores_handlers_and_reaps_child_once",
         ),

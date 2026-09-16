@@ -115,7 +115,9 @@ bootstrap status only. `start` forwards already-prepared webhook and GitHub
 App descriptors into `tools/standalone_supervisor.py` and does not read live
 secrets from reviewed-profile `onepassword` selectors. `health` only queries
 the supervisor. None of these verbs resolve or start cloudflared. Legacy
-`start` remains the Blocks 9443 consumer and refuses this profile. The
+`start` remains the Blocks 9443 consumer and refuses this profile.
+Standalone stop uses `stop_standalone_child`; Blocks/tunnel callers keep
+`stop_child`. No launchd unit is stored here. The
 supervisor passes those two credentials to `tools/service_entrypoint.py`
 through inherited file descriptors while supplying only the non-secret profile
 and registry paths plus fixed lifecycle verbs as arguments. It binds local health/stop/restart control to the complete

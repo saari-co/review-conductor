@@ -7,9 +7,10 @@
   `codex/durable-suite-runtime-20260915`.
 - Fresh fetched base: `8cefc3548d40b3868263cacd54a9568d51fbe67f`.
 - Mode: source mutation only. Root owns runtime activation, final review, and
-  merge. This patch is not deployed and does not change credentials, launchd,
-  profiles, or Suite6 source.
-- Capture time: `2026-09-16T02:06:32Z`.
+  merge. This patch is not deployed and does not change credentials,
+  profiles, Suite6 source, or existing consumer credential/resolver/profile
+  paths and values. No real launchd unit is stored in Git.
+- Capture time: `2026-09-16T02:20:00Z`.
 - Local interpreter exercised: Python 3.14.6.
 
 ## Confirmed defect and correction
@@ -24,15 +25,37 @@ holds the write end and the service watches the read end. EOF on that
 descriptor fails closed and drains the still-owned service session. The service
 signals only its current session/group while it remains the leader; it does not
 probe released PGIDs. Standalone launcher/supervisor also handle SIGHUP.
-Standalone outer `stop_child` waits
+Standalone outer stop uses `stop_standalone_child`, which waits
 `STANDALONE_CHILD_STOP_SECONDS` (22), matching
 `SHUTDOWN_CONTROL_SECONDS`, so the launcher cannot SIGKILL the supervisor
-before the 10s TERM plus 10s KILL drain. Legacy Blocks `start` keeps the
-ten-second budget. Credentials remain descriptor-only; no values are logged.
+before the 10s TERM plus 10s KILL drain. Legacy Blocks `start` keeps
+`stop_child`'s ten-second default for both the conductor and tunnel. Credentials
+remain descriptor-only; no values are logged.
 
-No new orchestration framework, credential consumer, hosted dependency, or
-production unit is added. A durable launchd host remains a separate root-owned
-activation.
+No new orchestration framework, credential consumer, hosted dependency, service
+manager, or production unit is added. A durable launchd host remains a separate
+root-owned activation.
+
+## Root caller adaptation after merge
+
+Do not edit this repository's consumer or invent a service manager. The
+installed fixed consumer stays root-owned. After this lands, change only the
+one conductor/supervisor stop call:
+
+```text
+- launcher.stop_child(conductor)
++ launcher.stop_standalone_child(conductor)
+```
+
+Leave the tunnel (and any other Blocks child) on `launcher.stop_child(...)`.
+`stop_child` without a timeout remains 10 seconds. `stop_standalone_child`
+uses 22 seconds (`STANDALONE_CHILD_STOP_SECONDS`). Worst-case outer reap is
+TERM wait plus KILL wait, `2 * 22 = 44` seconds.
+
+Root prepares the external launchd unit with KeepAlive=false (no automatic
+retry), RunAtLoad=true, AbandonProcessGroup=false, and ExitTimeOut longer than
+that complete standalone stack drain. Existing consumer credential, resolver,
+and profile paths and values stay unchanged.
 
 ## Verification
 
@@ -45,8 +68,11 @@ activation.
 - Partial parent-pipe setup closes already-created descriptors and does not
   spawn. Missing or closed parent descriptors fail before registry access.
 - Drain refuses to signal when the process is not the owned session leader.
-- Existing standalone supervisor suite (36 tests) and suite activation launcher
-  suite (20 tests) remain PASS, including their mutant batteries.
+- `stop_child()` records the legacy 10s budget; `stop_standalone_child()`
+  records 22s; legacy `start` still uses `stop_child` for conductor and tunnel.
+- Existing standalone supervisor suite and suite activation launcher suite
+  remain PASS, including their mutant batteries. A mutant that routes
+  standalone stop back through bare `stop_child` fails.
 - New `tests/test_runtime_lifecycle.py` is registered in `Makefile` `test`.
 - Full `make check` and `make build` are recorded after this proof's commit.
 
@@ -56,12 +82,13 @@ activation.
 | --- | --- |
 | `tools/standalone_supervisor.py` | `b4f4d084630fbaeb9326af08c999b380e9d1dcee8b1829c6dc0f7f5adc7727b0` |
 | `tools/service_entrypoint.py` | `866dfed1727f56be6d9db4a61bf8975dc80e1e24af43e563ec7717ee599ae632` |
-| `tools/review_conductor_userland_launcher.py` | `398a6615e8c5c0957aeacc415d08b1e916998a0a18aa3c08e2bf41dd25a57616` |
-| `tests/test_runtime_lifecycle.py` | `69214f23e5a8e4d3f3e49bedc671c35056c82a29bf4803acda601f1b3e1b976b` |
+| `tools/review_conductor_userland_launcher.py` | `d05f5e5b6e17fbe6ec2b5a477066c4d47dbf119cc4f0439a5a00b9f948ac2a30` |
+| `tests/test_runtime_lifecycle.py` | `b60c296e23bbbe3d32ba4dd73442372279139789432ff837c22b544df8777a30` |
 | `tests/test_standalone_supervisor.py` | `25167ef17348b3743c5a1ded46c7da1b719feeab2b5b8ebedfb2994d4ae828f3` |
-| `tests/test_suite_activation_launcher.py` | `0f4b838dd0c3c11e68ce01f8bde5d6239846ccfff268c3849c43b28938df3d1a` |
+| `tests/test_suite_activation_launcher.py` | `233da2540e80dac5b020401979cff21facaf59df5fe87d2d42ca07dfc35a036e` |
+| `tests/test_launcher_transport.py` | `5933b688ea9260dfa44403ea024b540e13c365632f33f6a36705e385503d400f` |
 | `Makefile` | `78e061fdecb5c95eaf0058a0430558f4858cb3ab396c768d00b0950baf9f6b72` |
-| `docs/provenance.json` | `818f848e013f1eff833c39e7532bdf1e99387927f49adab41697b4292dcb189d` |
+| `docs/provenance.json` | `36551a5c73e561477bd99f36fd4ef340e9f9d9d045664db9a98a19ae91b5c438` |
 
 ## Limits
 

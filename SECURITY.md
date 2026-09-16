@@ -111,7 +111,10 @@ inherited descriptors track the leader and the complete service generation, and 
 reciprocal parent-lifetime descriptor lets the service fail closed and drain that
 still-owned session when the supervisor disappears. The standalone launcher also
 handles SIGHUP and waits through the supervisor's full TERM-then-KILL drain
-budget; legacy Blocks `start` keeps its original ten-second child stop. The
+budget via `stop_standalone_child`; legacy Blocks `start` keeps
+`stop_child`'s original ten-second default. The helper is the one installed
+conductor-stop adaptation; it is not a service-manager API, and no launchd
+unit is stored in Git. The
 leader descriptor is made close-on-exec by the entrypoint, so every supported
 host can report leader exit without reaping and releasing its process-group
 identity. Every direct adapter subprocess is launched through the generation

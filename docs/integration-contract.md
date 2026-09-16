@@ -65,7 +65,13 @@ the generation descriptor and selector through `close_fds`. If the supervisor
 exits or is killed, the service observes EOF on the parent-lifetime descriptor
 and drains its still-owned session instead of remaining a listening orphan.
 Standalone launcher stop waits through the supervisor drain budget and treats
-SIGHUP as orderly stop; legacy Blocks `start` is unchanged. Explicit
+SIGHUP as orderly stop via `stop_standalone_child`; legacy Blocks `start`
+keeps `stop_child`'s ten-second default. An installed caller that stops both
+the conductor and tunnel through `stop_child` changes only the conductor call
+to `stop_standalone_child` after this lands. This repository does not contain
+a launchd unit; root prepares that host externally with KeepAlive=false, no
+automatic retry, RunAtLoad=true, AbandonProcessGroup=false, and ExitTimeOut
+longer than the complete standalone stack drain. Explicit
 stop/restart keeps the unreaped leader and generation descriptor as race-free
 identities, signals the process group, and reaps the leader only after every
 inheritor has closed the generation descriptor; no numeric PGID is probed after

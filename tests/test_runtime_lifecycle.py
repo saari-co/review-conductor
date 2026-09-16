@@ -369,10 +369,40 @@ os._exit(1)
         self.assertEqual(entrypoint.OWNED_GENERATION_SHUTDOWN_SECONDS, 10)
         self.assertIn(signal.SIGHUP, supervisor.STOP_SIGNALS)
         self.assertIn(signal.SIGHUP, launcher.STANDALONE_STOP_SIGNALS)
-        self.assertNotIn(
-            "STANDALONE_STOP_SIGNALS",
-            Path(launcher.__file__).read_text().split("def start(")[1].split("def inherit_standalone")[0],
+        legacy_start = (
+            Path(launcher.__file__).read_text().split("def start(")[1].split("def inherit_standalone")[0]
         )
+        self.assertNotIn("STANDALONE_STOP_SIGNALS", legacy_start)
+        self.assertNotIn("stop_standalone_child", legacy_start)
+        self.assertIn("stop_child(conductor)", legacy_start)
+        self.assertIn("stop_child(process)", legacy_start)
+
+    def test_standalone_stop_helper_uses_qualified_budget_blocks_keeps_default(self):
+        recorded = []
+
+        class Child:
+            def __init__(self):
+                self.returncode = None
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                return None
+
+            def wait(self, timeout):
+                recorded.append(timeout)
+                self.returncode = 0
+                return 0
+
+            def kill(self):
+                return None
+
+        launcher.stop_child(Child())
+        self.assertEqual(recorded, [launcher.LEGACY_CHILD_STOP_SECONDS])
+        recorded.clear()
+        launcher.stop_standalone_child(Child())
+        self.assertEqual(recorded, [launcher.STANDALONE_CHILD_STOP_SECONDS])
 
     def test_parent_lifetime_eof_is_not_data(self):
         read_fd, write_fd = os.pipe()
@@ -418,6 +448,12 @@ class MutationTests(unittest.TestCase):
             "STANDALONE_CHILD_STOP_SECONDS = 22\n",
             "STANDALONE_CHILD_STOP_SECONDS = 10\n",
             "test_runtime_lifecycle.RuntimeLifecycleTests.test_standalone_outer_budget_exceeds_supervisor_drain_blocks_stays_legacy",
+        ),
+        (
+            "tools/review_conductor_userland_launcher.py",
+            "    stop_child(process, timeout=STANDALONE_CHILD_STOP_SECONDS)\n",
+            "    stop_child(process)\n",
+            "test_runtime_lifecycle.RuntimeLifecycleTests.test_standalone_stop_helper_uses_qualified_budget_blocks_keeps_default",
         ),
         (
             "tools/service_entrypoint.py",
