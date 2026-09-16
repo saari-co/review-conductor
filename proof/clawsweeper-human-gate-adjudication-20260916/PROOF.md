@@ -68,3 +68,12 @@ commit.
 - No Suite source, PR #15, PR #6, protection body, or runtime registry.
 - No review rail was requested. Hosted CI and owner review remain later
   exact-head work. This PR does not merge or activate.
+
+## Inherited lifecycle-test follow-up
+
+Hosted candidate run 35127137575 failed the inherited serving-loop SIGTERM
+baseline and its precise mutant on Python 3.11 / Ubuntu. That family also
+failed on exact-base run 35089876605. The repair is confined to lifecycle
+fixtures/tests and is recorded in
+`proof/runtime-lifecycle-sigterm-determinism-20260916/PROOF.md`. Production
+stop/cleanup and this packet's waiting_human adjudication are unchanged.
