@@ -109,7 +109,9 @@ The service starts in its own process session; stop and restart signal that owne
 process group independently of whether the leader has already exited. Distinct
 inherited descriptors track the leader and the complete service generation, and a
 reciprocal parent-lifetime descriptor lets the service fail closed and drain that
-still-owned session when the supervisor disappears. The standalone launcher also
+still-owned session when the supervisor disappears. Entrypoint stop signals
+schedule `serve_forever` shutdown off the serving thread, and parent-loss drain
+does not wait for an in-flight worker tick. The standalone launcher also
 handles SIGHUP and waits through the supervisor's full TERM-then-KILL drain
 budget via `stop_standalone_child`; legacy Blocks `start` keeps
 `stop_child`'s original ten-second default. The helper is the one installed

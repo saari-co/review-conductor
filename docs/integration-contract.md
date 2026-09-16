@@ -64,6 +64,9 @@ direct adapter command uses one authoritative wrapper that explicitly preserves
 the generation descriptor and selector through `close_fds`. If the supervisor
 exits or is killed, the service observes EOF on the parent-lifetime descriptor
 and drains its still-owned session instead of remaining a listening orphan.
+Entrypoint SIGINT/SIGTERM/SIGHUP request shutdown on a helper thread so the
+serving loop cannot deadlock, and parent-loss uses a bounded full-session drain
+that does not wait for an in-flight worker tick or admit further work.
 Standalone launcher stop waits through the supervisor drain budget and treats
 SIGHUP as orderly stop via `stop_standalone_child`; legacy Blocks `start`
 keeps `stop_child`'s ten-second default. An installed caller that stops both

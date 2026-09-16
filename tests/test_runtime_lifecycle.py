@@ -88,6 +88,86 @@ else:
 os.close(lock_fd)
 """
 
+ENTRYPOINT_SERVICE = r"""
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+from unittest.mock import patch
+
+sys.path.insert(0, sys.argv[1])
+import review_conductor_runtime as runtime
+import review_conductor_userland as userland
+import service_entrypoint as entry
+import service_runtime as service
+
+state_root = sys.argv[2]
+status_fd = int(sys.argv[3])
+blocked = sys.argv[4] == "blocked"
+resistant = sys.argv[5] == "resistant"
+entry.OWNED_GENERATION_SHUTDOWN_SECONDS = 0.35
+state = Path(state_root)
+state.mkdir(parents=True, exist_ok=True)
+config = {
+    "enrollment": {"enabled": True, "blockers": []},
+    "credentials": {"webhook_secret_fd_env": "TEST_WEBHOOK_SECRET_FD"},
+    "ingress": {
+        "bind_host": "127.0.0.1",
+        "bind_port": 0,
+        "request_timeout_seconds": 1,
+        "max_body_bytes": 4096,
+    },
+    "worker": {"tick_seconds": 0.05},
+    "paths": {
+        "state_root": str(state),
+        "proof_root": str(state / "proof"),
+        "blocks_checkout": str(state / "checkout"),
+    },
+}
+
+class Client:
+    def read_policy(self, *_args, **_kwargs):
+        raise AssertionError("synthetic client must not read policy")
+
+class ReportingServer(runtime.BoundedHTTPServer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        _host, port = self.server_address
+        lock_path = state.resolve() / ".service-operation.lock"
+        os.write(status_fd, f"{os.getpid()} {os.getpgrp()} {port} {lock_path}\n".encode())
+        os.close(status_fd)
+
+def idle_tick(*_args, **_kwargs):
+    return None
+
+def hung_tick(*_args, **_kwargs):
+    (state / "tick-started").write_text("1")
+    if resistant:
+        child = os.fork()
+        if child == 0:
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            while True:
+                time.sleep(1)
+    time.sleep(3600)
+    (state / "tick-finished").write_text("1")
+
+with patch.object(entry, "load_supervised_profile", return_value=config), patch.object(
+    entry, "registry_provider", return_value=lambda: object()
+), patch.object(
+    userland, "read_inherited_value", return_value="fixture-secret"
+), patch.object(
+    userland, "build_client", return_value=Client()
+), patch.object(
+    userland, "OpenClawNotifier", return_value=object()
+), patch.object(
+    service, "run_service_tick", side_effect=hung_tick if blocked else idle_tick
+), patch.object(
+    runtime, "BoundedHTTPServer", ReportingServer
+):
+    entry.serve(state / "profile.json", state / "registry.json")
+"""
+
 
 def _wait_until(predicate, timeout=3.0, message="condition"):
     deadline = time.monotonic() + timeout
@@ -178,6 +258,59 @@ class RuntimeLifecycleTests(unittest.TestCase):
         pid, pgid, port = map(int, identity)
         self.addCleanup(lambda: self._reap_group(process, pgid, parent_write))
         return process, parent_write, pid, pgid, port, lock_path
+
+    def spawn_entrypoint_service(self, *, blocked: bool, resistant: bool = False):
+        parent_read, parent_write = os.pipe()
+        status_read, status_write = os.pipe()
+        state_root = self.root / "entrypoint-state"
+        state_root.mkdir()
+        error_path = self.root / "entrypoint.err"
+        error_file = error_path.open("wb")
+        self.addCleanup(error_file.close)
+        try:
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    ENTRYPOINT_SERVICE,
+                    TOOLS,
+                    str(state_root),
+                    str(status_write),
+                    "blocked" if blocked else "idle",
+                    "resistant" if resistant else "plain",
+                ],
+                env={
+                    "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    entrypoint.PARENT_LIFETIME_FD_ENV: str(parent_read),
+                },
+                pass_fds=(parent_read, status_write),
+                start_new_session=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=error_file,
+            )
+        finally:
+            os.close(parent_read)
+            os.close(status_write)
+        try:
+            readable, _, _ = select_ready(status_read, 5)
+            self.assertEqual(
+                readable,
+                [status_read],
+                msg=error_path.read_text() if error_path.exists() else "no child stderr",
+            )
+            identity = os.read(status_read, 256).decode().split(maxsplit=3)
+        finally:
+            os.close(status_read)
+        pid, pgid, port = map(int, identity[:3])
+        lock_path = Path(identity[3].strip())
+        self.addCleanup(lambda: self._reap_group(process, pgid, parent_write))
+        return process, parent_write, pid, pgid, port, lock_path, state_root
+
+    def _assert_listener_accepts(self, port: int):
+        probe = socket.create_connection(("127.0.0.1", port), timeout=1)
+        probe.close()
 
     def _reap_group(self, process, pgid, parent_write):
         with contextlib.suppress(OSError):
@@ -404,6 +537,46 @@ os._exit(1)
         launcher.stop_standalone_child(Child())
         self.assertEqual(recorded, [launcher.STANDALONE_CHILD_STOP_SECONDS])
 
+    def test_entrypoint_sigterm_stops_real_serving_loop(self):
+        self._assert_entrypoint_signal_stops(signal.SIGTERM)
+
+    def test_entrypoint_sighup_stops_real_serving_loop(self):
+        self._assert_entrypoint_signal_stops(signal.SIGHUP)
+
+    def _assert_entrypoint_signal_stops(self, signum):
+        process, parent_write, pid, pgid, port, lock_path, _state = (
+            self.spawn_entrypoint_service(blocked=False)
+        )
+        self._assert_listener_accepts(port)
+        self.assertFalse(_lock_released(lock_path))
+        os.kill(pid, signum)
+        _wait_until(lambda: process.poll() is not None, message=f"entrypoint {signum} exit")
+        _wait_until(lambda: _port_free(port), message="listener released after signal")
+        _wait_until(lambda: _lock_released(lock_path), message="lock released after signal")
+        self.assertIsNotNone(process.poll())
+        with contextlib.suppress(OSError):
+            os.close(parent_write)
+            parent_write = -1
+
+    def test_entrypoint_parent_loss_drains_blocked_worker_listener_and_lock(self):
+        process, parent_write, pid, pgid, port, lock_path, state_root = (
+            self.spawn_entrypoint_service(blocked=True, resistant=True)
+        )
+        self._assert_listener_accepts(port)
+        self.assertFalse(_lock_released(lock_path))
+        _wait_until(
+            lambda: (state_root / "tick-started").exists(),
+            message="blocked worker entered a tick",
+        )
+        os.close(parent_write)
+        _wait_until(lambda: process.poll() is not None, timeout=4, message="entrypoint parent-loss exit")
+        _wait_until(lambda: _group_absent(pgid), timeout=4, message="blocked session drain")
+        self.assertTrue(_port_free(port))
+        self.assertTrue(_lock_released(lock_path))
+        self.assertFalse((state_root / "tick-finished").exists())
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+
     def test_parent_lifetime_eof_is_not_data(self):
         read_fd, write_fd = os.pipe()
         os.set_blocking(read_fd, False)
@@ -460,6 +633,18 @@ class MutationTests(unittest.TestCase):
             "    if pgid != pid:\n        raise service.ServiceError(\"service is not the owned session leader\")\n",
             "    if False:\n        raise service.ServiceError(\"service is not the owned session leader\")\n",
             "test_runtime_lifecycle.RuntimeLifecycleTests.test_drain_refuses_non_leader_without_signaling_guessed_pgid",
+        ),
+        (
+            "tools/service_entrypoint.py",
+            "            threading.Thread(\n                target=current.shutdown,\n                name=\"review-conductor-shutdown\",\n                daemon=True,\n            ).start()\n",
+            "            current.shutdown()\n",
+            "test_runtime_lifecycle.RuntimeLifecycleTests.test_entrypoint_sigterm_stops_real_serving_loop",
+        ),
+        (
+            "tools/service_entrypoint.py",
+            "        if parent_lost.is_set():\n            # Parent-loss drain is independent of the worker. An in-flight adapter\n            # or TERM-resistant descendant must not delay the session reap after\n            # the original supervisor is already gone.\n            drain_owned_session()\n        elif worker.is_alive():\n            # A tick may be inside a bounded external adapter operation far longer\n            # than the polling interval. Never return while that worker still owns\n            # a claim or subprocess; its adapter timeout remains the upper bound.\n            worker.join()\n",
+            "        if worker.is_alive():\n            worker.join()\n        if parent_lost.is_set():\n            drain_owned_session()\n",
+            "test_runtime_lifecycle.RuntimeLifecycleTests.test_entrypoint_parent_loss_drains_blocked_worker_listener_and_lock",
         ),
     )
 

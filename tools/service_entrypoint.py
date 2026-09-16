@@ -403,26 +403,40 @@ def _serve_with_restrictive_umask(config: dict, registry_path: Path) -> None:
         stop.set()
         current = server
         if current is not None:
-            current.shutdown()
+            # BaseServer.shutdown waits for serve_forever and deadlocks if it
+            # runs on that same thread. Signal handlers share the serving thread.
+            threading.Thread(
+                target=current.shutdown,
+                name="review-conductor-shutdown",
+                daemon=True,
+            ).start()
+
+    def lose_parent() -> None:
+        parent_lost.set()
+        request_stop()
+        current = server
+        if current is not None:
+            with contextlib.suppress(OSError):
+                current.server_close()
 
     def watch_parent() -> None:
         if parent_fd is None:
             return
-        while not stop.is_set():
+        while not stop.is_set() and not parent_lost.is_set():
             try:
                 if parent_lifetime_lost(parent_fd):
-                    parent_lost.set()
-                    request_stop()
+                    lose_parent()
                     return
             except service.ServiceError as exc:
                 failure.append(exc)
-                parent_lost.set()
-                request_stop()
+                lose_parent()
                 return
             time.sleep(0.05)
 
     worker = threading.Thread(
-        target=lambda: _worker_loop(config, provide_registry, client, notifier, stop, failure, lambda: server),
+        target=lambda: _worker_loop(
+            config, provide_registry, client, notifier, stop, failure, lambda: server, parent_lost
+        ),
         name="review-conductor-service",
         daemon=False,
     )
@@ -450,18 +464,22 @@ def _serve_with_restrictive_umask(config: dict, registry_path: Path) -> None:
                 daemon=True,
             ).start()
         worker.start()
-        server.serve_forever(poll_interval=0.5)
+        if not stop.is_set() and not parent_lost.is_set():
+            server.serve_forever(poll_interval=0.5)
     finally:
         stop.set()
         if server is not None:
             server.server_close()
-        if worker.is_alive():
+        if parent_lost.is_set():
+            # Parent-loss drain is independent of the worker. An in-flight adapter
+            # or TERM-resistant descendant must not delay the session reap after
+            # the original supervisor is already gone.
+            drain_owned_session()
+        elif worker.is_alive():
             # A tick may be inside a bounded external adapter operation far longer
             # than the polling interval. Never return while that worker still owns
             # a claim or subprocess; its adapter timeout remains the upper bound.
             worker.join()
-        if parent_lost.is_set():
-            drain_owned_session()
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
         webhook_secret = ""
@@ -471,8 +489,8 @@ def _serve_with_restrictive_umask(config: dict, registry_path: Path) -> None:
         raise ServiceStopped("worker failed; service stopped") from failure[0]
 
 
-def _worker_loop(config, provide_registry, client, notifier, stop, failure, get_server) -> None:
-    while not stop.is_set():
+def _worker_loop(config, provide_registry, client, notifier, stop, failure, get_server, parent_lost=None) -> None:
+    while not stop.is_set() and (parent_lost is None or not parent_lost.is_set()):
         try:
             service.run_service_tick(
                 config, provide_registry, client, notifier, dry_run=False
@@ -486,6 +504,8 @@ def _worker_loop(config, provide_registry, client, notifier, stop, failure, get_
             server = get_server()
             if server is not None:
                 server.shutdown()
+            return
+        if parent_lost is not None and parent_lost.is_set():
             return
         if stop.wait(config["worker"]["tick_seconds"]):
             return
