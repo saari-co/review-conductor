@@ -24,6 +24,32 @@ import standalone_supervisor as supervisor
 
 
 TOOLS = str(ROOT / "tools")
+SERVE_THREAD_SHUTDOWN_ANCHOR = (
+    "            threading.Thread(\n"
+    "                target=current.shutdown,\n"
+    "                name=\"review-conductor-shutdown\",\n"
+    "                daemon=True,\n"
+    "            ).start()\n"
+)
+SERVE_THREAD_SHUTDOWN_DEFECT = "            current.shutdown()\n"
+PARENT_LOSS_DRAIN_ANCHOR = (
+    "        if parent_lost.is_set():\n"
+    "            # Parent-loss drain is independent of the worker. An in-flight adapter\n"
+    "            # or TERM-resistant descendant must not delay the session reap after\n"
+    "            # the original supervisor is already gone.\n"
+    "            drain_owned_session()\n"
+    "        elif worker.is_alive():\n"
+    "            # A tick may be inside a bounded external adapter operation far longer\n"
+    "            # than the polling interval. Never return while that worker still owns\n"
+    "            # a claim or subprocess; its adapter timeout remains the upper bound.\n"
+    "            worker.join()\n"
+)
+PARENT_LOSS_JOIN_FIRST_DEFECT = (
+    "        if worker.is_alive():\n"
+    "            worker.join()\n"
+    "        if parent_lost.is_set():\n"
+    "            drain_owned_session()\n"
+)
 FAKE_SERVICE = r"""
 import fcntl
 import os
@@ -259,7 +285,18 @@ class RuntimeLifecycleTests(unittest.TestCase):
         self.addCleanup(lambda: self._reap_group(process, pgid, parent_write))
         return process, parent_write, pid, pgid, port, lock_path
 
-    def spawn_entrypoint_service(self, *, blocked: bool, resistant: bool = False):
+    def _mutated_tools(self, source_name, anchor, replacement):
+        destination = Path(
+            tempfile.mkdtemp(prefix="review-conductor-baseline-", dir=self.root)
+        )
+        shutil.copytree(ROOT / "tools", destination / "tools")
+        source = destination / source_name
+        text = source.read_text()
+        self.assertEqual(text.count(anchor), 1, f"baseline anchor drifted: {anchor!r}")
+        source.write_text(text.replace(anchor, replacement, 1))
+        return destination / "tools"
+
+    def spawn_entrypoint_service(self, *, blocked: bool, resistant: bool = False, tools=None):
         parent_read, parent_write = os.pipe()
         status_read, status_write = os.pipe()
         state_root = self.root / "entrypoint-state"
@@ -273,7 +310,7 @@ class RuntimeLifecycleTests(unittest.TestCase):
                     sys.executable,
                     "-c",
                     ENTRYPOINT_SERVICE,
-                    TOOLS,
+                    str(tools or TOOLS),
                     str(state_root),
                     str(status_write),
                     "blocked" if blocked else "idle",
@@ -537,6 +574,51 @@ os._exit(1)
         launcher.stop_standalone_child(Child())
         self.assertEqual(recorded, [launcher.STANDALONE_CHILD_STOP_SECONDS])
 
+    def test_baseline_actual_serving_loop_sigterm_deadlocks_on_serve_thread_shutdown(self):
+        tools = self._mutated_tools(
+            "tools/service_entrypoint.py",
+            SERVE_THREAD_SHUTDOWN_ANCHOR,
+            SERVE_THREAD_SHUTDOWN_DEFECT,
+        )
+        process, parent_write, pid, _pgid, port, lock_path, _state = (
+            self.spawn_entrypoint_service(blocked=False, tools=tools)
+        )
+        self._assert_listener_accepts(port)
+        self.assertFalse(_lock_released(lock_path))
+        os.kill(pid, signal.SIGTERM)
+        time.sleep(1.0)
+        self.assertIsNone(process.poll())
+        self.assertFalse(_port_free(port))
+        self.assertFalse(_lock_released(lock_path))
+        with contextlib.suppress(OSError):
+            os.close(parent_write)
+
+    def test_baseline_actual_serving_loop_parent_loss_holds_lock_when_join_precedes_drain(
+        self,
+    ):
+        tools = self._mutated_tools(
+            "tools/service_entrypoint.py",
+            PARENT_LOSS_DRAIN_ANCHOR,
+            PARENT_LOSS_JOIN_FIRST_DEFECT,
+        )
+        process, parent_write, pid, pgid, port, lock_path, state_root = (
+            self.spawn_entrypoint_service(blocked=True, resistant=True, tools=tools)
+        )
+        self._assert_listener_accepts(port)
+        self.assertFalse(_lock_released(lock_path))
+        _wait_until(
+            lambda: (state_root / "tick-started").exists(),
+            message="blocked worker entered a tick",
+        )
+        os.close(parent_write)
+        time.sleep(1.0)
+        self.assertIsNone(process.poll())
+        self.assertFalse(_lock_released(lock_path))
+        self.assertFalse(_group_absent(pgid))
+        self.assertFalse((state_root / "tick-finished").exists())
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, 0)
+
     def test_entrypoint_sigterm_stops_real_serving_loop(self):
         self._assert_entrypoint_signal_stops(signal.SIGTERM)
 
@@ -636,14 +718,14 @@ class MutationTests(unittest.TestCase):
         ),
         (
             "tools/service_entrypoint.py",
-            "            threading.Thread(\n                target=current.shutdown,\n                name=\"review-conductor-shutdown\",\n                daemon=True,\n            ).start()\n",
-            "            current.shutdown()\n",
+            SERVE_THREAD_SHUTDOWN_ANCHOR,
+            SERVE_THREAD_SHUTDOWN_DEFECT,
             "test_runtime_lifecycle.RuntimeLifecycleTests.test_entrypoint_sigterm_stops_real_serving_loop",
         ),
         (
             "tools/service_entrypoint.py",
-            "        if parent_lost.is_set():\n            # Parent-loss drain is independent of the worker. An in-flight adapter\n            # or TERM-resistant descendant must not delay the session reap after\n            # the original supervisor is already gone.\n            drain_owned_session()\n        elif worker.is_alive():\n            # A tick may be inside a bounded external adapter operation far longer\n            # than the polling interval. Never return while that worker still owns\n            # a claim or subprocess; its adapter timeout remains the upper bound.\n            worker.join()\n",
-            "        if worker.is_alive():\n            worker.join()\n        if parent_lost.is_set():\n            drain_owned_session()\n",
+            PARENT_LOSS_DRAIN_ANCHOR,
+            PARENT_LOSS_JOIN_FIRST_DEFECT,
             "test_runtime_lifecycle.RuntimeLifecycleTests.test_entrypoint_parent_loss_drains_blocked_worker_listener_and_lock",
         ),
     )

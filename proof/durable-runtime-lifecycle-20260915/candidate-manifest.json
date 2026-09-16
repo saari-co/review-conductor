@@ -5,17 +5,17 @@
   "files": {
     "Makefile": "78e061fdecb5c95eaf0058a0430558f4858cb3ab396c768d00b0950baf9f6b72",
     "README.md": "009216bf7fc92d6b67b69133212d50f4314121a62dfaefa886641043e0555128",
-    "SECURITY.md": "12011a21c6a37a8f6c97589ae01bbb96fee0032564452f6e13fe596e45bb3bdc",
-    "docs/integration-contract.md": "414744b7b8048d248373cfc66f29cc7daec4280ad9e3e88fadb43fd927675af0",
+    "SECURITY.md": "a7731f8e81b3444200c20c99947d393da7621125645d9ca642b7c888b141cd60",
+    "docs/integration-contract.md": "f24b89db7357d2e72d8928dce9ac7dabdf1188beacdbdb1a889234f8d07f30c5",
     "docs/migration.md": "b007704e90757c6a99131ac1018712f67f34cd53ebb214e58cea3d56a833ca35",
     "docs/provenance.json": "36551a5c73e561477bd99f36fd4ef340e9f9d9d045664db9a98a19ae91b5c438",
     "docs/smcbd-pilot-handoff.md": "bbd295ae254b959280f1bce8e6338a83c1fe50f09cfd9e6e7ef665f0fb798788",
-    "proof/durable-runtime-lifecycle-20260915/PROOF.md": "ef4da1156d9ad2c1e45beb570b3306d410a44e57ce79de915dec0e4f8b7c8253",
-    "tests/test_runtime_lifecycle.py": "b60c296e23bbbe3d32ba4dd73442372279139789432ff837c22b544df8777a30",
+    "proof/durable-runtime-lifecycle-20260915/PROOF.md": "7b412f23b93e26912185ea5566be986d5e9b095975d5c7008d66a925d3dd4924",
+    "tests/test_runtime_lifecycle.py": "a5dca8ae6cb3e136ac300593801d5609518a4e543b5d74cd8197465588a33a59",
     "tests/test_standalone_supervisor.py": "25167ef17348b3743c5a1ded46c7da1b719feeab2b5b8ebedfb2994d4ae828f3",
     "tests/test_suite_activation_launcher.py": "233da2540e80dac5b020401979cff21facaf59df5fe87d2d42ca07dfc35a036e",
     "tools/review_conductor_userland_launcher.py": "d05f5e5b6e17fbe6ec2b5a477066c4d47dbf119cc4f0439a5a00b9f948ac2a30",
-    "tools/service_entrypoint.py": "866dfed1727f56be6d9db4a61bf8975dc80e1e24af43e563ec7717ee599ae632",
+    "tools/service_entrypoint.py": "4c71010307d5e27784977b416ea8d38068ea95f1ecdb65ba91957311e75bbe5d",
     "tools/standalone_supervisor.py": "b4f4d084630fbaeb9326af08c999b380e9d1dcee8b1829c6dc0f7f5adc7727b0"
   }
 }

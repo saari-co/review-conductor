@@ -10,7 +10,8 @@
   merge. This patch is not deployed and does not change credentials,
   profiles, Suite6 source, or existing consumer credential/resolver/profile
   paths and values. No real launchd unit is stored in Git.
-- Capture time: `2026-09-16T02:20:00Z`; lifecycle-wiring repair `2026-09-16T02:30:00Z`.
+- Capture time: `2026-09-16T02:20:00Z`; lifecycle-wiring repair `2026-09-16T02:30:00Z`;
+  serving-loop baseline-negative closeout `2026-09-16T02:40:00Z`.
 - Local interpreter exercised: Python 3.14.6.
 
 ## Confirmed defect and correction
@@ -69,16 +70,20 @@ and profile paths and values stay unchanged.
 - Baseline-negative actual-process test: a sessioned fake service that does not
   watch the parent descriptor remains listening and holds its lock after the
   parent write end closes.
+- Baseline-negative actual serving-loop tests inject the same synthetic
+  client/registry, real loopback `BoundedHTTPServer`, and state-root lock, then
+  restore each unfixed shutdown path in a disposable tools copy. SIGTERM with
+  `shutdown()` on the serving thread leaves the process, listener, and lock
+  held. Parent-loss that `join()`s the worker before drain leaves the process,
+  lock, and session held while the blocked tick does not finish.
 - Repair actual-process tests: graceful parent-write close and abrupt owner
   SIGKILL drain the listener, lock, and session, including a TERM-resistant
   fake child. Synthetic credentials and temporary files only.
-- Actual entrypoint serving-loop tests inject a synthetic client/registry,
-  bind a real loopback `BoundedHTTPServer`, and take the real state-root lock.
-  SIGTERM and SIGHUP stop that loop without deadlock. Parent-loss with a
-  blocked worker plus TERM-resistant descendant still drains the listener,
-  lock, and session; the blocked tick does not finish. Mutants that call
-  `shutdown()` on the serving thread or `join()` the worker before parent-loss
-  drain fail those tests.
+- Repair actual serving-loop tests: SIGTERM and SIGHUP stop that loop without
+  deadlock. Parent-loss with a blocked worker plus TERM-resistant descendant
+  still drains the listener, lock, and session; the blocked tick does not
+  finish. Mutants that call `shutdown()` on the serving thread or `join()` the
+  worker before parent-loss drain fail those repair tests.
 - Partial parent-pipe setup closes already-created descriptors and does not
   spawn. Missing or closed parent descriptors fail before registry access.
 - Drain refuses to signal when the process is not the owned session leader.
@@ -97,7 +102,7 @@ and profile paths and values stay unchanged.
 | `tools/standalone_supervisor.py` | `b4f4d084630fbaeb9326af08c999b380e9d1dcee8b1829c6dc0f7f5adc7727b0` |
 | `tools/service_entrypoint.py` | `4c71010307d5e27784977b416ea8d38068ea95f1ecdb65ba91957311e75bbe5d` |
 | `tools/review_conductor_userland_launcher.py` | `d05f5e5b6e17fbe6ec2b5a477066c4d47dbf119cc4f0439a5a00b9f948ac2a30` |
-| `tests/test_runtime_lifecycle.py` | `97f701fded6babc8194659dd75139c01afbfda1ea80d238ec0702dba774d0a0a` |
+| `tests/test_runtime_lifecycle.py` | `a5dca8ae6cb3e136ac300593801d5609518a4e543b5d74cd8197465588a33a59` |
 | `tests/test_standalone_supervisor.py` | `25167ef17348b3743c5a1ded46c7da1b719feeab2b5b8ebedfb2994d4ae828f3` |
 | `tests/test_suite_activation_launcher.py` | `233da2540e80dac5b020401979cff21facaf59df5fe87d2d42ca07dfc35a036e` |
 | `tests/test_launcher_transport.py` | `5933b688ea9260dfa44403ea024b540e13c365632f33f6a36705e385503d400f` |
