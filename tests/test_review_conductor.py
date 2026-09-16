@@ -212,6 +212,8 @@ def adjudication_event(
     classifications: list[str],
     *,
     reviewer: str = "openclaw-reviewer",
+    rail: str = "openclaw",
+    review_epoch: int | None = None,
     repair_owner: str | None = None,
     handoff: dict | None = None,
 ) -> dict:
@@ -224,16 +226,44 @@ def adjudication_event(
         "base_sha": BASE,
         "head_sha": head,
         "request_id": request_id,
-        "rail": "openclaw",
+        "rail": rail,
         "classifications": classifications,
         "reviewer_actor": reviewer,
         "proof_ref": f"proof/adjudication/{event_id}/ADJUDICATION.md",
     }
+    if review_epoch is not None:
+        event["review_epoch"] = review_epoch
     if repair_owner is not None:
         event["repair_owner"] = repair_owner
     if handoff is not None:
         event["mutation_handoff"] = handoff
     return event
+
+
+def clawsweeper_event(
+    event_id: str,
+    pr: int,
+    head: str,
+    workflow_run_id: int,
+    *,
+    result: str,
+    findings: int,
+    reviewer: str = "saari-clawsweeper",
+) -> dict:
+    return {
+        "schema": "smoky.review-conductor.event.v1",
+        "event_id": event_id,
+        "type": "clawsweeper.terminal",
+        "repository": "dinkuskit/blocks",
+        "pr_number": pr,
+        "base_sha": BASE,
+        "head_sha": head,
+        "workflow_run_id": workflow_run_id,
+        "result": result,
+        "finding_count": findings,
+        "reviewer_actor": reviewer,
+        "proof_ref": f"proof/clawsweeper/{event_id}/PROOF.md",
+    }
 
 
 def create_fake_adapters(temp: Path) -> tuple[Path, Path, Path]:
@@ -442,6 +472,79 @@ def dispatch_openclaw(temp: Path, state: Path, pr: int, head: str) -> str:
     )
     assert dispatched["result"] == "dispatched"
     return actions[0]["payload"]["queue_request_id"]
+
+
+def dispatch_clawsweeper(temp: Path, state: Path, pr: int, head: str) -> int:
+    current = status(state, pr)
+    actions = [item for item in current["actions"] if item["kind"] == "clawsweeper.dispatch"]
+    assert len(actions) == 1
+    _, fake_gh, log = create_fake_adapters(temp)
+    dispatched = run(
+        "dispatch-action",
+        "--config",
+        str(CONFIG),
+        "--state-root",
+        str(state),
+        "--action-id",
+        actions[0]["action_id"],
+        "--apply",
+        env={
+            "SMOKY_REVIEW_CONDUCTOR_GH": str(fake_gh),
+            "FAKE_ADAPTER_LOG": str(log),
+            "FAKE_HEAD": head,
+        },
+    )
+    assert dispatched["result"] == "dispatched"
+    return 4242
+
+
+def reach_clawsweeper_human_gate(temp: Path, state: Path, pr: int, head: str, *, ci_run: int) -> int:
+    github_event(temp, state, "pull_request", f"delivery-{state.name}-pr", pr_payload(pr, head))
+    github_event(
+        temp,
+        state,
+        "workflow_run",
+        f"delivery-{state.name}-ci",
+        workflow_payload(pr, head, "success", ci_run),
+    )
+    request_id = dispatch_openclaw(temp, state, pr, head)
+    internal_event(
+        temp,
+        state,
+        f"{state.name}-openclaw-clean",
+        openclaw_event(
+            f"internal:{state.name}-openclaw-clean",
+            "openclaw.terminal",
+            pr,
+            head,
+            request_id,
+            result="clean",
+            findings=0,
+        ),
+    )
+    workflow_run_id = dispatch_clawsweeper(temp, state, pr, head)
+    terminal = internal_event(
+        temp,
+        state,
+        f"{state.name}-clawsweeper-human-gate",
+        clawsweeper_event(
+            f"internal:{state.name}-clawsweeper-human-gate",
+            pr,
+            head,
+            workflow_run_id,
+            result="human_gate",
+            findings=0,
+        ),
+    )
+    assert terminal["state"] == "waiting_human"
+    assert terminal["repair_cycle"] == 0
+    current = status(state, pr)
+    assert current["head"]["state"] == "waiting_human"
+    assert current["head"]["rail"] == "clawsweeper"
+    assert current["head"]["review_request_id"] == str(workflow_run_id)
+    assert current["head"]["review_epoch"] == 0
+    assert current["head"]["reviewer_actor"] == "saari-clawsweeper"
+    return workflow_run_id
 
 
 def test_official_hmac_vector() -> None:
@@ -1447,6 +1550,182 @@ def test_openclaw_queue_rejects_unbound_payload_review_epoch(temp: Path) -> None
         assert current["actions"][0]["status"] == "pending"
 
 
+def test_clawsweeper_human_gate_owner_adjudication_reaches_ready_without_rerun(temp: Path) -> None:
+    state = temp / "state-claw-proof-gap"
+    head = "a" * 40
+    workflow_run_id = reach_clawsweeper_human_gate(temp, state, 301, head, ci_run=9301)
+    before = status(state, 301)
+    adjudicated = internal_event(
+        temp,
+        state,
+        "claw-proof-gap-adjudication",
+        adjudication_event(
+            "internal:claw-proof-gap-adjudication",
+            301,
+            head,
+            str(workflow_run_id),
+            ["defer", "reject_false_positive"],
+            reviewer="saari-clawsweeper",
+            rail="clawsweeper",
+            review_epoch=0,
+        ),
+    )
+    assert adjudicated["state"] == "ready_for_human_merge"
+    assert adjudicated["merge_dispatched"] is False
+    assert adjudicated["action_created"] is False
+    assert adjudicated["repair_cycle"] == 0
+    after = status(state, 301)
+    assert after["head"]["state"] == "ready_for_human_merge"
+    assert after["head"]["rail"] == "clawsweeper"
+    assert after["head"]["review_request_id"] == str(workflow_run_id)
+    assert after["head"]["review_epoch"] == before["head"]["review_epoch"] == 0
+    assert after["head"]["reviewer_actor"] == "saari-clawsweeper"
+    assert after["head"]["base_sha"] == BASE
+    assert after["head"]["head_sha"] == head
+    assert after["projection"]["ready_for_human_label"] is True
+    assert after["projection"]["merge_policy"] == "human_only"
+    assert after["projection"]["merge_authorized"] is False
+    assert after["projection"]["checks"]["ClawSweeper Review Rail"] == "success"
+    assert [item["kind"] for item in after["actions"] if item["kind"] == "clawsweeper.dispatch"] == [
+        item["kind"] for item in before["actions"] if item["kind"] == "clawsweeper.dispatch"
+    ]
+    assert len([item for item in after["actions"] if item["kind"] == "clawsweeper.dispatch"]) == 1
+    assert all(item["kind"] != "repair.route" for item in after["actions"])
+    assert all(item["kind"] != "merge" for item in after["actions"])
+
+
+def test_clawsweeper_waiting_human_adjudication_rejects_stale_and_unsupported(temp: Path) -> None:
+    state = temp / "state-claw-proof-gap-negatives"
+    head = "b" * 40
+    workflow_run_id = reach_clawsweeper_human_gate(temp, state, 302, head, ci_run=9302)
+    request_id = str(workflow_run_id)
+    valid = {
+        "reviewer": "saari-clawsweeper",
+        "rail": "clawsweeper",
+        "review_epoch": 0,
+    }
+    stale_tuple = internal_event(
+        temp,
+        state,
+        "stale-tuple",
+        adjudication_event(
+            "internal:stale-tuple",
+            302,
+            "c" * 40,
+            request_id,
+            ["defer"],
+            **valid,
+        ),
+    )
+    assert stale_tuple["result"] == "stale"
+    cases = (
+        (
+            "stale-epoch",
+            adjudication_event("internal:stale-epoch", 302, head, request_id, ["defer"], **{**valid, "review_epoch": 1}),
+            "review epoch is stale",
+        ),
+        (
+            "mismatched-request",
+            adjudication_event("internal:mismatched-request", 302, head, "9999", ["defer"], **valid),
+            "does not match the exact rail request",
+        ),
+        (
+            "mismatched-rail",
+            adjudication_event("internal:mismatched-rail", 302, head, request_id, ["defer"], **{**valid, "rail": "openclaw"}),
+            "does not match the exact rail request",
+        ),
+        (
+            "mismatched-actor",
+            adjudication_event("internal:mismatched-actor", 302, head, request_id, ["defer"], **{**valid, "reviewer": "spark-openclaw"}),
+            "authoritative repository reviewer",
+        ),
+        (
+            "required-fix",
+            adjudication_event("internal:required-fix", 302, head, request_id, ["required_fix"], **valid),
+            "supports only defer and reject_false_positive",
+        ),
+        (
+            "human-gate-class",
+            adjudication_event("internal:human-gate-class", 302, head, request_id, ["human_gate"], **valid),
+            "supports only defer and reject_false_positive",
+        ),
+        (
+            "mixed-required-fix",
+            adjudication_event(
+                "internal:mixed-required-fix",
+                302,
+                head,
+                request_id,
+                ["defer", "required_fix"],
+                **valid,
+            ),
+            "supports only defer and reject_false_positive",
+        ),
+    )
+    for name, payload, needle in cases:
+        rejected = internal_event(temp, state, name, payload, expected=2)
+        assert needle in rejected["stderr"], name
+    current = status(state, 302)
+    assert current["head"]["state"] == "waiting_human"
+    assert current["head"]["review_epoch"] == 0
+    assert current["head"]["review_request_id"] == request_id
+    assert current["head"]["rail"] == "clawsweeper"
+    assert len([item for item in current["actions"] if item["kind"] == "clawsweeper.dispatch"]) == 1
+    assert all(item["kind"] != "repair.route" for item in current["actions"])
+
+
+def test_openclaw_human_gate_adjudication_remains_fail_closed(temp: Path) -> None:
+    state = temp / "state-openclaw-human-gate"
+    head = "d" * 40
+    github_event(temp, state, "pull_request", "delivery-openclaw-gate-pr", pr_payload(303, head))
+    github_event(
+        temp,
+        state,
+        "workflow_run",
+        "delivery-openclaw-gate-ci",
+        workflow_payload(303, head, "success", 9303),
+    )
+    request_id = dispatch_openclaw(temp, state, 303, head)
+    terminal = internal_event(
+        temp,
+        state,
+        "openclaw-human-gate",
+        openclaw_event(
+            "internal:openclaw-human-gate",
+            "openclaw.terminal",
+            303,
+            head,
+            request_id,
+            result="human_gate",
+            findings=0,
+        ),
+    )
+    assert terminal["state"] == "waiting_human"
+    rejected = internal_event(
+        temp,
+        state,
+        "openclaw-human-gate-adjudication",
+        adjudication_event(
+            "internal:openclaw-human-gate-adjudication",
+            303,
+            head,
+            request_id,
+            ["defer"],
+            reviewer="openclaw-reviewer",
+            rail="openclaw",
+            review_epoch=0,
+        ),
+        expected=2,
+    )
+    assert "adjudication is invalid from state waiting_human" in rejected["stderr"]
+    current = status(state, 303)
+    assert current["head"]["state"] == "waiting_human"
+    assert current["head"]["rail"] == "openclaw"
+    assert current["head"]["review_request_id"] == request_id
+    assert current["head"]["review_epoch"] == 0
+    assert all(item["kind"] != "clawsweeper.dispatch" for item in current["actions"])
+
+
 def test_precise_openclaw_exact_contract_mutants() -> None:
     source = (ROOT / "tools" / "review_conductor.py").read_text(encoding="utf-8")
     mutants = (
@@ -1467,6 +1746,18 @@ def test_precise_openclaw_exact_contract_mutants() -> None:
             "        review_epoch = bound_openclaw_queue_epoch(action, payload)\n",
             '        review_epoch = payload["review_epoch"]\n',
             "test_openclaw_queue_rejects_unbound_payload_review_epoch",
+        ),
+        (
+            "adjudicate OpenClaw waiting_human",
+            '            if row["rail"] != "clawsweeper":\n',
+            "            if False and row[\"rail\"] != \"clawsweeper\":\n",
+            "test_openclaw_human_gate_adjudication_remains_fail_closed",
+        ),
+        (
+            "allow required_fix from clawsweeper waiting_human",
+            '            if not classifications <= {"defer", "reject_false_positive"}:\n',
+            '            if not classifications <= {"defer", "reject_false_positive", "required_fix"}:\n',
+            "test_clawsweeper_waiting_human_adjudication_rejects_stale_and_unsupported",
         ),
     )
     for label, old, new, test_name in mutants:
@@ -1511,6 +1802,9 @@ def main() -> int:
         "test_legacy_openclaw_queue_omits_exact_tuple_flags": test_legacy_openclaw_queue_omits_exact_tuple_flags,
         "test_openclaw_queue_command_binds_exact_tuple_contract": test_openclaw_queue_command_binds_exact_tuple_contract,
         "test_openclaw_queue_rejects_unbound_payload_review_epoch": test_openclaw_queue_rejects_unbound_payload_review_epoch,
+        "test_clawsweeper_human_gate_owner_adjudication_reaches_ready_without_rerun": test_clawsweeper_human_gate_owner_adjudication_reaches_ready_without_rerun,
+        "test_clawsweeper_waiting_human_adjudication_rejects_stale_and_unsupported": test_clawsweeper_waiting_human_adjudication_rejects_stale_and_unsupported,
+        "test_openclaw_human_gate_adjudication_remains_fail_closed": test_openclaw_human_gate_adjudication_remains_fail_closed,
         "test_precise_openclaw_exact_contract_mutants": lambda _temp: test_precise_openclaw_exact_contract_mutants(),
     }
     if selected - set(named):

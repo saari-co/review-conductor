@@ -1,0 +1,15 @@
+{
+  "schema": "review-conductor.candidate-manifest.v1",
+  "base_sha": "e5824afe876b28ce8cb74e97080b1d1b1f23482b",
+  "starting_head_sha": "e5824afe876b28ce8cb74e97080b1d1b1f23482b",
+  "captured_date": "2026-09-16",
+  "binding_scheme": "A commit cannot contain its own SHA. base_sha and starting_head_sha are the required clean start. Per-file sha256 values are of this candidate source. The branch head after commit is the exact candidate SHA for hosted CI.",
+  "files": {
+    "docs/provenance.json": "31848bc52b7898b28360376544a55f03cca2d4c412a4a4da0594ff51a8d460f1",
+    "proof/clawsweeper-human-gate-adjudication-20260916/PROOF.md": "9cc69f6f9240d194c8ad1cac61f5ab99eb5e5e67fe2d5a798dc9adce6c984df3",
+    "tests/test_review_conductor.py": "1cff790f659816d5a93d848d5471a6f4aa836924cbb490dbb56800e08c5b79f0",
+    "tests/test_review_conductor_userland.py": "33393289d2568c2680734cf1d6877e9362d7223d4bb319cf138ccbce1ef6c3db",
+    "tests/test_review_result_projection.py": "f12d248e744c98b7d72749ef84e265db825b189a6dae80c785dd5e152fc0e777",
+    "tools/review_conductor.py": "d47aceca49ff158c7d042c834f49ae7d794b2960fb6ebf9b40bca91e2c1226e5"
+  }
+}

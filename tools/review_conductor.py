@@ -42,7 +42,7 @@ INTERNAL_EVENT_FIELDS = {
     ),
     "adjudication.completed": (
         {"request_id", "rail", "classifications", "reviewer_actor", "proof_ref"},
-        {"repair_owner", "mutation_handoff"},
+        {"repair_owner", "mutation_handoff", "review_epoch"},
     ),
     "clawsweeper.started": ({"workflow_run_id"}, set()),
     "clawsweeper.terminal": (
@@ -1574,6 +1574,8 @@ def validate_internal_event(config: dict[str, Any], event: dict[str, Any]) -> di
             require_text(handoff["to"], "mutation_handoff to", 200)
             if handoff["authorized"] is not True:
                 raise ContractError("mutation handoff must be explicitly authorized")
+        if "review_epoch" in event and (type(event["review_epoch"]) is not int or event["review_epoch"] < 0):
+            raise ContractError("internal event requires an exact review epoch")
     return event
 
 
@@ -1778,12 +1780,27 @@ def process_internal_event(connection: sqlite3.Connection, config: dict[str, Any
             next_state = "clawsweeper_failed"
             update_exact_head(connection, identity, state=next_state, rail="clawsweeper", review_request_id=str(event["workflow_run_id"]), reviewer_actor=event["reviewer_actor"], blocker="ClawSweeper rail failed; human/operator recovery required")
     else:
-        if row["state"] != "awaiting_adjudication":
+        classifications = set(event["classifications"])
+        if row["state"] == "waiting_human":
+            if row["rail"] != "clawsweeper":
+                raise ContractError(f"adjudication is invalid from state {row['state']}")
+            if not classifications <= {"defer", "reject_false_positive"}:
+                raise ContractError(
+                    "waiting_human clawsweeper adjudication supports only defer and reject_false_positive"
+                )
+            if type(event.get("review_epoch")) is not int or event["review_epoch"] != row["review_epoch"]:
+                raise ContractError("internal event review epoch is stale")
+            if event.get("reviewer_actor") != row["reviewer_actor"]:
+                raise ContractError("adjudication reviewer must match the authoritative repository reviewer")
+        elif row["state"] != "awaiting_adjudication":
             raise ContractError(f"adjudication is invalid from state {row['state']}")
         if row["rail"] != event["rail"] or row["review_request_id"] != event["request_id"]:
             raise ContractError("adjudication does not match the exact rail request")
-        classifications = set(event["classifications"])
-        if "human_gate" in classifications:
+        if row["state"] == "waiting_human":
+            next_state, action_id, action_created = continue_after_adjudication(
+                connection, config, row, identity, event["rail"]
+            )
+        elif "human_gate" in classifications:
             next_state = "waiting_human"
             update_exact_head(connection, identity, state=next_state, blocker="adjudication classified a human gate")
         elif "required_fix" in classifications:

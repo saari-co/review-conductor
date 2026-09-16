@@ -790,6 +790,7 @@ def main() -> int:
         test_boolean_and_maintainer_evidence_fail_closed,
         test_report_links_bind_repository_and_allowed_paths,
         test_old_quality_and_exact_adjudication_projection,
+        test_clawsweeper_proof_gap_adjudication_projects_effective_success,
         test_clean_completed_review_is_success_while_merge_stays_human,
         test_keep_open_is_not_blindly_success,
         test_execution_failure_and_human_policy_stay_distinct,
@@ -886,6 +887,85 @@ def test_old_quality_and_exact_adjudication_projection() -> None:
             assert "status: 👀 ready for maintainer look" in client.labels
             assert "Merge authorized: no" in client.comments[0]["body"]
             assert projection.desired_owned_labels(effective["content_verdict"]) == {"status: 👀 ready for maintainer look"}
+
+
+def test_clawsweeper_proof_gap_adjudication_projects_effective_success() -> None:
+    import sqlite3
+
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.execute(
+        "CREATE TABLE clawsweeper_quality(repository, pr_number, base_sha, head_sha, review_epoch, report_sha256, workflow_run_id, content_verdict, process_gates_json)"
+    )
+    db.execute(
+        "INSERT INTO clawsweeper_quality VALUES(?,?,?,?,?,?,?,?,?)",
+        (REPO, 19, BASE, HEAD, 0, DIGEST, RUN_ID, "proof_deficient", "[]"),
+    )
+    row = dict(
+        repository=REPO,
+        pr_number=19,
+        base_sha=BASE,
+        head_sha=HEAD,
+        review_epoch=0,
+        state="ready_for_human_merge",
+        rail="clawsweeper",
+        review_request_id=RUN_ID,
+        blocker="human merge authority required",
+    )
+    quality = runtime.accepted_quality_row(db, row)
+    assert quality["content_verdict"] == "proof_deficient"
+    db.execute(
+        "CREATE TABLE events(sequence INTEGER PRIMARY KEY, event_id, kind, repository, pr_number, base_sha, head_sha, stale, payload_json)"
+    )
+    assert runtime.effective_quality(db, row, quality) == quality
+    db.execute(
+        "INSERT INTO events VALUES(1,'proof-gap-1','adjudication.completed',?,?,?,?,0,?)",
+        (
+            REPO,
+            19,
+            BASE,
+            HEAD,
+            json.dumps(
+                dict(
+                    review_epoch=0,
+                    rail="clawsweeper",
+                    request_id=RUN_ID,
+                    classifications=["defer", "reject_false_positive"],
+                )
+            ),
+        ),
+    )
+    effective = runtime.effective_quality(db, row, quality)
+    assert quality["content_verdict"] == "proof_deficient"
+    assert effective["content_verdict"] == "clean"
+    assert "Original review content: proof_deficient" in effective["adjudication_reason"]
+    report = runtime.projection_check_report(
+        row,
+        effective,
+        check_name="ClawSweeper Review Rail",
+        check_state="success",
+    )
+    assert report["content_verdict"] == "clean"
+    assert "proof-gap-1" in report["reason"]
+
+    class PublicationClient(RecordingGitHub):
+        def list_issue_labels(self, pr: int, **kwargs: Any) -> list[str]:
+            return self.labels
+
+    client = PublicationClient()
+    receipt = runtime.publish_accepted_github_projection(
+        client,
+        row,
+        effective,
+        dry_run=False,
+        authority_kwargs={"authority": "exact-test-tuple"},
+    )
+    assert receipt["result"] == "published"
+    assert "Original review content: proof_deficient" in client.comments[0]["body"]
+    assert "Merge authorized: no" in client.comments[0]["body"]
+    assert projection.desired_owned_labels(effective["content_verdict"]) == {
+        "status: 👀 ready for maintainer look"
+    }
 
 
 if __name__ == "__main__":
