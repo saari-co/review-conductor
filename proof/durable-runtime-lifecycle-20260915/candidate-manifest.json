@@ -5,17 +5,18 @@
   "files": {
     "Makefile": "78e061fdecb5c95eaf0058a0430558f4858cb3ab396c768d00b0950baf9f6b72",
     "README.md": "009216bf7fc92d6b67b69133212d50f4314121a62dfaefa886641043e0555128",
-    "SECURITY.md": "a7731f8e81b3444200c20c99947d393da7621125645d9ca642b7c888b141cd60",
-    "docs/integration-contract.md": "f24b89db7357d2e72d8928dce9ac7dabdf1188beacdbdb1a889234f8d07f30c5",
-    "docs/migration.md": "b007704e90757c6a99131ac1018712f67f34cd53ebb214e58cea3d56a833ca35",
-    "docs/provenance.json": "36551a5c73e561477bd99f36fd4ef340e9f9d9d045664db9a98a19ae91b5c438",
+    "SECURITY.md": "3d3dab7b4919eb17499d90bb205984f9430528bf6ca65547100d95c4193f0619",
+    "docs/integration-contract.md": "09e1cb0838b71d5bef2d4ade5adaae9ee81fcbcafa96030fafb37f0f976cd9a9",
+    "docs/migration.md": "35b4a01fc6e4a3686aac29aad8a8bea039215ad917fffd31225c49e55d2a83e8",
+    "docs/provenance.json": "ca8061b52c5bf530b6e4a735ddb8669fb03c52264e6b17277612ba6965ef61cb",
     "docs/smcbd-pilot-handoff.md": "bbd295ae254b959280f1bce8e6338a83c1fe50f09cfd9e6e7ef665f0fb798788",
-    "proof/durable-runtime-lifecycle-20260915/PROOF.md": "7b412f23b93e26912185ea5566be986d5e9b095975d5c7008d66a925d3dd4924",
-    "tests/test_runtime_lifecycle.py": "a5dca8ae6cb3e136ac300593801d5609518a4e543b5d74cd8197465588a33a59",
+    "proof/durable-runtime-lifecycle-20260915/PROOF.md": "e15c01aa227973a14aaef717eb8f579bfed804f2e3ba2211d548d854e1eb553a",
+    "tests/test_runtime_lifecycle.py": "ab4aa87b568be8a23ae4520911659bc21f5e5f6a1d95f16a8933e81b2582fddb",
     "tests/test_standalone_supervisor.py": "25167ef17348b3743c5a1ded46c7da1b719feeab2b5b8ebedfb2994d4ae828f3",
     "tests/test_suite_activation_launcher.py": "233da2540e80dac5b020401979cff21facaf59df5fe87d2d42ca07dfc35a036e",
+    "tools/review_conductor_runtime.py": "bac13d3d9905a0ebad8f800df0e34f6fced6930a3cc5b4874ebf064d3358f38f",
     "tools/review_conductor_userland_launcher.py": "d05f5e5b6e17fbe6ec2b5a477066c4d47dbf119cc4f0439a5a00b9f948ac2a30",
-    "tools/service_entrypoint.py": "4c71010307d5e27784977b416ea8d38068ea95f1ecdb65ba91957311e75bbe5d",
+    "tools/service_entrypoint.py": "cfa2bb24402b423a21867d3539c45969c53b04d624975e033afa29148b9fb7af",
     "tools/standalone_supervisor.py": "b4f4d084630fbaeb9326af08c999b380e9d1dcee8b1829c6dc0f7f5adc7727b0"
   }
 }

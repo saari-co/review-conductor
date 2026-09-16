@@ -4,7 +4,9 @@ from __future__ import annotations
 import contextlib
 import errno
 import fcntl
+import http.server
 import os
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 import shutil
 import signal
@@ -18,6 +20,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
+import review_conductor_runtime as runtime
 import review_conductor_userland_launcher as launcher
 import service_entrypoint as entrypoint
 import standalone_supervisor as supervisor
@@ -37,7 +40,7 @@ PARENT_LOSS_DRAIN_ANCHOR = (
     "            # Parent-loss drain is independent of the worker. An in-flight adapter\n"
     "            # or TERM-resistant descendant must not delay the session reap after\n"
     "            # the original supervisor is already gone.\n"
-    "            drain_owned_session()\n"
+    "            drain_once()\n"
     "        elif worker.is_alive():\n"
     "            # A tick may be inside a bounded external adapter operation far longer\n"
     "            # than the polling interval. Never return while that worker still owns\n"
@@ -50,6 +53,23 @@ PARENT_LOSS_JOIN_FIRST_DEFECT = (
     "        if parent_lost.is_set():\n"
     "            drain_owned_session()\n"
 )
+WATCH_PARENT_UNTIL_SHUTDOWN_ANCHOR = "        while not parent_lost.is_set():\n"
+WATCH_PARENT_EXITS_ON_STOP_DEFECT = (
+    "        while not stop.is_set() and not parent_lost.is_set():\n"
+)
+CONTEXTLIB_IMPORT_ANCHOR = "import contextlib\nfrom contextlib import contextmanager\n"
+CONTEXTLIB_IMPORT_DEFECT = "from contextlib import contextmanager\n"
+SERVER_BIND_ANCHOR = (
+    "        # Ingress readiness must not wait on reverse DNS (macOS mDNS).\n"
+    "        TCPServer.server_bind(self)\n"
+)
+SERVER_BIND_DEFECT = "        ThreadingHTTPServer.server_bind(self)\n"
+LOSE_PARENT_DRAIN_ANCHOR = (
+    "        # Drain here, not only in finally: a requested stop may already be\n"
+    "        # blocked in worker.join(), so finally cannot take the parent-loss path.\n"
+    "        drain_once()\n"
+)
+LOSE_PARENT_DRAIN_DEFECT = ""
 FAKE_SERVICE = r"""
 import fcntl
 import os
@@ -135,6 +155,12 @@ resistant = sys.argv[5] == "resistant"
 entry.OWNED_GENERATION_SHUTDOWN_SECONDS = 0.35
 state = Path(state_root)
 state.mkdir(parents=True, exist_ok=True)
+
+def mark(stage):
+    (state / "startup-stage").write_text(stage)
+    print(f"entrypoint-fixture stage={stage}", file=sys.stderr, flush=True)
+
+mark("imports")
 config = {
     "enrollment": {"enabled": True, "blockers": []},
     "credentials": {"webhook_secret_fd_env": "TEST_WEBHOOK_SECRET_FD"},
@@ -158,11 +184,18 @@ class Client:
 
 class ReportingServer(runtime.BoundedHTTPServer):
     def __init__(self, *args, **kwargs):
+        mark("server-init")
         super().__init__(*args, **kwargs)
+        mark("server-bound")
         _host, port = self.server_address
         lock_path = state.resolve() / ".service-operation.lock"
         os.write(status_fd, f"{os.getpid()} {os.getpgrp()} {port} {lock_path}\n".encode())
         os.close(status_fd)
+        mark("ready")
+
+    def server_close(self):
+        super().server_close()
+        (state / "server-closed").write_text("1")
 
 def idle_tick(*_args, **_kwargs):
     return None
@@ -191,6 +224,7 @@ with patch.object(entry, "load_supervised_profile", return_value=config), patch.
 ), patch.object(
     runtime, "BoundedHTTPServer", ReportingServer
 ):
+    mark("calling-serve")
     entry.serve(state / "profile.json", state / "registry.json")
 """
 
@@ -248,6 +282,7 @@ class RuntimeLifecycleTests(unittest.TestCase):
     def spawn_fake_service(self, *, watch: bool, resistant: bool = False):
         parent_read, parent_write = os.pipe()
         status_read, status_write = os.pipe()
+        self.addCleanup(lambda fd=status_read: supervisor._close_descriptor(fd))
         lock_path = self.root / "service.lock"
         lock_path.write_bytes(b"")
         try:
@@ -275,6 +310,7 @@ class RuntimeLifecycleTests(unittest.TestCase):
         finally:
             os.close(parent_read)
             os.close(status_write)
+        self._own_spawned_session(process, parent_write)
         try:
             readable, _, _ = select_ready(status_read, 3)
             self.assertEqual(readable, [status_read])
@@ -282,23 +318,30 @@ class RuntimeLifecycleTests(unittest.TestCase):
         finally:
             os.close(status_read)
         pid, pgid, port = map(int, identity)
-        self.addCleanup(lambda: self._reap_group(process, pgid, parent_write))
         return process, parent_write, pid, pgid, port, lock_path
 
-    def _mutated_tools(self, source_name, anchor, replacement):
+    def _mutated_tools(self, source_name, anchor, replacement, extra_edits=()):
         destination = Path(
             tempfile.mkdtemp(prefix="review-conductor-baseline-", dir=self.root)
         )
         shutil.copytree(ROOT / "tools", destination / "tools")
         source = destination / source_name
         text = source.read_text()
-        self.assertEqual(text.count(anchor), 1, f"baseline anchor drifted: {anchor!r}")
-        source.write_text(text.replace(anchor, replacement, 1))
+        edits = ((anchor, replacement), *extra_edits)
+        for current_anchor, current_replacement in edits:
+            self.assertEqual(
+                text.count(current_anchor),
+                1,
+                f"baseline anchor drifted: {current_anchor!r}",
+            )
+            text = text.replace(current_anchor, current_replacement, 1)
+        source.write_text(text)
         return destination / "tools"
 
     def spawn_entrypoint_service(self, *, blocked: bool, resistant: bool = False, tools=None):
         parent_read, parent_write = os.pipe()
         status_read, status_write = os.pipe()
+        self.addCleanup(lambda fd=status_read: supervisor._close_descriptor(fd))
         state_root = self.root / "entrypoint-state"
         state_root.mkdir()
         error_path = self.root / "entrypoint.err"
@@ -319,6 +362,7 @@ class RuntimeLifecycleTests(unittest.TestCase):
                 env={
                     "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                     "PYTHONDONTWRITEBYTECODE": "1",
+                    "PYTHONUNBUFFERED": "1",
                     entrypoint.PARENT_LIFETIME_FD_ENV: str(parent_read),
                 },
                 pass_fds=(parent_read, status_write),
@@ -330,20 +374,41 @@ class RuntimeLifecycleTests(unittest.TestCase):
         finally:
             os.close(parent_read)
             os.close(status_write)
+        self._own_spawned_session(process, parent_write)
         try:
             readable, _, _ = select_ready(status_read, 5)
             self.assertEqual(
                 readable,
                 [status_read],
-                msg=error_path.read_text() if error_path.exists() else "no child stderr",
+                msg=self._entrypoint_startup_evidence(
+                    process, error_file, error_path, state_root
+                ),
             )
             identity = os.read(status_read, 256).decode().split(maxsplit=3)
         finally:
             os.close(status_read)
         pid, pgid, port = map(int, identity[:3])
         lock_path = Path(identity[3].strip())
-        self.addCleanup(lambda: self._reap_group(process, pgid, parent_write))
         return process, parent_write, pid, pgid, port, lock_path, state_root
+
+    def _own_spawned_session(self, process, parent_write):
+        # start_new_session=True makes the child the session/group leader, so
+        # failed readiness assertions can still reap that group.
+        self.addCleanup(
+            lambda current=process, write_fd=parent_write: self._reap_group(
+                current, current.pid, write_fd
+            )
+        )
+
+    def _entrypoint_startup_evidence(self, process, error_file, error_path, state_root):
+        error_file.flush()
+        stage_path = Path(state_root) / "startup-stage"
+        stage = stage_path.read_text() if stage_path.exists() else "<missing>"
+        stderr = error_path.read_text() if error_path.exists() else ""
+        return (
+            f"child_pid={process.pid} child_poll={process.poll()} "
+            f"stage={stage!r} stderr={stderr!r}"
+        )
 
     def _assert_listener_accepts(self, port: int):
         probe = socket.create_connection(("127.0.0.1", port), timeout=1)
@@ -600,6 +665,7 @@ os._exit(1)
             "tools/service_entrypoint.py",
             PARENT_LOSS_DRAIN_ANCHOR,
             PARENT_LOSS_JOIN_FIRST_DEFECT,
+            extra_edits=((LOSE_PARENT_DRAIN_ANCHOR, LOSE_PARENT_DRAIN_DEFECT),),
         )
         process, parent_write, pid, pgid, port, lock_path, state_root = (
             self.spawn_entrypoint_service(blocked=True, resistant=True, tools=tools)
@@ -658,6 +724,81 @@ os._exit(1)
         self.assertFalse((state_root / "tick-finished").exists())
         with self.assertRaises(ProcessLookupError):
             os.kill(pid, 0)
+
+    def _blocked_serving_loop_after_graceful_stop(self, *, tools=None):
+        process, parent_write, pid, pgid, port, lock_path, state_root = (
+            self.spawn_entrypoint_service(blocked=True, resistant=True, tools=tools)
+        )
+        self._assert_listener_accepts(port)
+        self.assertFalse(_lock_released(lock_path))
+        _wait_until(
+            lambda: (state_root / "tick-started").exists(),
+            message="blocked worker entered a tick",
+        )
+        os.kill(pid, signal.SIGTERM)
+        _wait_until(
+            lambda: (state_root / "server-closed").exists(),
+            message="serving loop left after graceful stop",
+        )
+        self.assertIsNone(process.poll())
+        self.assertFalse(_lock_released(lock_path))
+        self.assertFalse(_group_absent(pgid))
+        return process, parent_write, pid, pgid, port, lock_path, state_root
+
+    def test_baseline_actual_serving_loop_stop_then_parent_loss_orphans_when_watcher_exits_on_stop(
+        self,
+    ):
+        tools = self._mutated_tools(
+            "tools/service_entrypoint.py",
+            WATCH_PARENT_UNTIL_SHUTDOWN_ANCHOR,
+            WATCH_PARENT_EXITS_ON_STOP_DEFECT,
+        )
+        process, parent_write, pid, pgid, _port, lock_path, state_root = (
+            self._blocked_serving_loop_after_graceful_stop(tools=tools)
+        )
+        os.close(parent_write)
+        time.sleep(1.0)
+        self.assertIsNone(process.poll())
+        self.assertFalse(_lock_released(lock_path))
+        self.assertFalse(_group_absent(pgid))
+        self.assertFalse((state_root / "tick-finished").exists())
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, 0)
+
+    def test_entrypoint_stop_then_parent_loss_drains_blocked_join(self):
+        process, parent_write, pid, pgid, port, lock_path, state_root = (
+            self._blocked_serving_loop_after_graceful_stop()
+        )
+        os.close(parent_write)
+        _wait_until(
+            lambda: process.poll() is not None,
+            timeout=4,
+            message="stop-then-parent-loss session drain",
+        )
+        _wait_until(lambda: _group_absent(pgid), timeout=4, message="blocked join generation drain")
+        self.assertTrue(_port_free(port))
+        self.assertTrue(_lock_released(lock_path))
+        self.assertFalse((state_root / "tick-finished").exists())
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+
+    def test_bounded_http_server_bind_does_not_wait_on_reverse_dns(self):
+        def forbidden_fqdn(*_args, **_kwargs):
+            raise AssertionError("ingress bind must not reverse-resolve")
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_args, **_kwargs):
+                return
+
+        with patch.object(http.server.socket, "getfqdn", side_effect=forbidden_fqdn):
+            server = runtime.BoundedHTTPServer(
+                ("127.0.0.1", 0), Handler, request_timeout_seconds=1
+            )
+        try:
+            self.assertEqual(server.server_name, "127.0.0.1")
+            self.assertGreater(server.server_port, 0)
+        finally:
+            server.server_close()
 
     def test_parent_lifetime_eof_is_not_data(self):
         read_fd, write_fd = os.pipe()
@@ -727,11 +868,32 @@ class MutationTests(unittest.TestCase):
             PARENT_LOSS_DRAIN_ANCHOR,
             PARENT_LOSS_JOIN_FIRST_DEFECT,
             "test_runtime_lifecycle.RuntimeLifecycleTests.test_entrypoint_parent_loss_drains_blocked_worker_listener_and_lock",
+            ((LOSE_PARENT_DRAIN_ANCHOR, LOSE_PARENT_DRAIN_DEFECT),),
+        ),
+        (
+            "tools/service_entrypoint.py",
+            WATCH_PARENT_UNTIL_SHUTDOWN_ANCHOR,
+            WATCH_PARENT_EXITS_ON_STOP_DEFECT,
+            "test_runtime_lifecycle.RuntimeLifecycleTests.test_entrypoint_stop_then_parent_loss_drains_blocked_join",
+        ),
+        (
+            "tools/service_entrypoint.py",
+            CONTEXTLIB_IMPORT_ANCHOR,
+            CONTEXTLIB_IMPORT_DEFECT,
+            "test_runtime_lifecycle.RuntimeLifecycleTests.test_entrypoint_stop_then_parent_loss_drains_blocked_join",
+        ),
+        (
+            "tools/review_conductor_runtime.py",
+            SERVER_BIND_ANCHOR,
+            SERVER_BIND_DEFECT,
+            "test_runtime_lifecycle.RuntimeLifecycleTests.test_bounded_http_server_bind_does_not_wait_on_reverse_dns",
         ),
     )
 
     def test_precise_runtime_lifecycle_mutants(self):
-        for source_name, anchor, replacement, test_id in self.MUTANTS:
+        for mutant in self.MUTANTS:
+            source_name, anchor, replacement, test_id, *rest = mutant
+            extra_edits = rest[0] if rest else ()
             with self.subTest(test_id=test_id, source_name=source_name):
                 with tempfile.TemporaryDirectory(prefix="review-conductor-mutant-") as temp:
                     destination = Path(temp)
@@ -739,8 +901,17 @@ class MutationTests(unittest.TestCase):
                         shutil.copytree(ROOT / name, destination / name)
                     source = destination / source_name
                     text = source.read_text()
-                    self.assertEqual(text.count(anchor), 1, f"mutant anchor drifted: {anchor!r}")
-                    source.write_text(text.replace(anchor, replacement, 1))
+                    for current_anchor, current_replacement in (
+                        (anchor, replacement),
+                        *extra_edits,
+                    ):
+                        self.assertEqual(
+                            text.count(current_anchor),
+                            1,
+                            f"mutant anchor drifted: {current_anchor!r}",
+                        )
+                        text = text.replace(current_anchor, current_replacement, 1)
+                    source.write_text(text)
                     result = subprocess.run(
                         [sys.executable, "-m", "unittest", "-q", test_id],
                         cwd=destination / "tests",

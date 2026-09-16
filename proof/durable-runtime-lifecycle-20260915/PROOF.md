@@ -11,7 +11,9 @@
   profiles, Suite6 source, or existing consumer credential/resolver/profile
   paths and values. No real launchd unit is stored in Git.
 - Capture time: `2026-09-16T02:20:00Z`; lifecycle-wiring repair `2026-09-16T02:30:00Z`;
-  serving-loop baseline-negative closeout `2026-09-16T02:40:00Z`.
+  serving-loop baseline-negative closeout `2026-09-16T02:40:00Z`; stop-then-parent-loss
+  serving-loop closeout `2026-09-16T03:15:00Z`; macOS CI startup-bind repair
+  `2026-09-16T03:00:00Z`.
 - Local interpreter exercised: Python 3.14.6.
 
 ## Confirmed defect and correction
@@ -37,8 +39,14 @@ Entrypoint SIGINT/SIGTERM/SIGHUP only set the stop event and schedule
 `serve_forever` shutdown on a helper thread. `socketserver.BaseServer.shutdown`
 cannot run in the serving/signal thread. Parent-loss closes the listener,
 refuses further worker ticks, and bounded-drains the owned session without
-joining an in-flight worker. Operator stop still waits unbounded for that
-non-daemon worker.
+joining an in-flight worker. Parent-liveness supervision continues after stop
+is requested until shutdown completes; if the supervisor write end closes while
+`worker.join` is still blocked, one owned-session drain still runs. Operator
+stop still waits unbounded for that non-daemon worker. Ingress bind records the
+listen host and port without calling `socket.getfqdn()`; hosted macOS CI
+35048390624 stalled every actual entrypoint fixture in `HTTPServer.server_bind`
+before `ReportingServer` could write ready, with empty stderr and leaked child
+groups because cleanup was registered only after readiness.
 
 No new orchestration framework, credential consumer, hosted dependency, service
 manager, or production unit is added. A durable launchd host remains a separate
@@ -74,16 +82,27 @@ and profile paths and values stay unchanged.
   client/registry, real loopback `BoundedHTTPServer`, and state-root lock, then
   restore each unfixed shutdown path in a disposable tools copy. SIGTERM with
   `shutdown()` on the serving thread leaves the process, listener, and lock
-  held. Parent-loss that `join()`s the worker before drain leaves the process,
-  lock, and session held while the blocked tick does not finish.
+  held. Parent-loss that `join()`s the worker before drain, and also omits the
+  watcher-owned drain, leaves the process, lock, and session held while the
+  blocked tick does not finish. A watcher that exits when `stop` is set leaves
+  the process, lock, and session held after blocked tick, graceful stop, then
+  parent write-end close.
 - Repair actual-process tests: graceful parent-write close and abrupt owner
   SIGKILL drain the listener, lock, and session, including a TERM-resistant
   fake child. Synthetic credentials and temporary files only.
 - Repair actual serving-loop tests: SIGTERM and SIGHUP stop that loop without
   deadlock. Parent-loss with a blocked worker plus TERM-resistant descendant
   still drains the listener, lock, and session; the blocked tick does not
-  finish. Mutants that call `shutdown()` on the serving thread or `join()` the
-  worker before parent-loss drain fail those repair tests.
+  finish. The same loop with a blocked tick, then SIGTERM, then parent
+  write-end close still drains listener, lock, and generation within bound and
+  exercises `contextlib.suppress` on the already-closed listener. Mutants that
+  call `shutdown()` on the serving thread, `join()` the worker before
+  parent-loss drain, exit `watch_parent` when stop is set, drop the
+  `contextlib` import, or restore `HTTPServer.server_bind`'s `getfqdn`
+  reverse-DNS path fail those repair tests.
+- Actual entrypoint fixtures write child startup-stage files and register
+  session/fd cleanup immediately after `Popen`, so a readiness timeout names
+  the last stage and cannot leak the child group.
 - Partial parent-pipe setup closes already-created descriptors and does not
   spawn. Missing or closed parent descriptors fail before registry access.
 - Drain refuses to signal when the process is not the owned session leader.
@@ -100,16 +119,18 @@ and profile paths and values stay unchanged.
 | File | SHA-256 |
 | --- | --- |
 | `tools/standalone_supervisor.py` | `b4f4d084630fbaeb9326af08c999b380e9d1dcee8b1829c6dc0f7f5adc7727b0` |
-| `tools/service_entrypoint.py` | `4c71010307d5e27784977b416ea8d38068ea95f1ecdb65ba91957311e75bbe5d` |
+| `tools/service_entrypoint.py` | `cfa2bb24402b423a21867d3539c45969c53b04d624975e033afa29148b9fb7af` |
+| `tools/review_conductor_runtime.py` | `bac13d3d9905a0ebad8f800df0e34f6fced6930a3cc5b4874ebf064d3358f38f` |
 | `tools/review_conductor_userland_launcher.py` | `d05f5e5b6e17fbe6ec2b5a477066c4d47dbf119cc4f0439a5a00b9f948ac2a30` |
-| `tests/test_runtime_lifecycle.py` | `a5dca8ae6cb3e136ac300593801d5609518a4e543b5d74cd8197465588a33a59` |
+| `tests/test_runtime_lifecycle.py` | `ab4aa87b568be8a23ae4520911659bc21f5e5f6a1d95f16a8933e81b2582fddb` |
 | `tests/test_standalone_supervisor.py` | `25167ef17348b3743c5a1ded46c7da1b719feeab2b5b8ebedfb2994d4ae828f3` |
 | `tests/test_suite_activation_launcher.py` | `233da2540e80dac5b020401979cff21facaf59df5fe87d2d42ca07dfc35a036e` |
 | `tests/test_launcher_transport.py` | `5933b688ea9260dfa44403ea024b540e13c365632f33f6a36705e385503d400f` |
 | `Makefile` | `78e061fdecb5c95eaf0058a0430558f4858cb3ab396c768d00b0950baf9f6b72` |
-| `docs/provenance.json` | `36551a5c73e561477bd99f36fd4ef340e9f9d9d045664db9a98a19ae91b5c438` |
-| `docs/integration-contract.md` | `f24b89db7357d2e72d8928dce9ac7dabdf1188beacdbdb1a889234f8d07f30c5` |
-| `SECURITY.md` | `a7731f8e81b3444200c20c99947d393da7621125645d9ca642b7c888b141cd60` |
+| `docs/provenance.json` | `ca8061b52c5bf530b6e4a735ddb8669fb03c52264e6b17277612ba6965ef61cb` |
+| `docs/integration-contract.md` | `09e1cb0838b71d5bef2d4ade5adaae9ee81fcbcafa96030fafb37f0f976cd9a9` |
+| `docs/migration.md` | `35b4a01fc6e4a3686aac29aad8a8bea039215ad917fffd31225c49e55d2a83e8` |
+| `SECURITY.md` | `3d3dab7b4919eb17499d90bb205984f9430528bf6ca65547100d95c4193f0619` |
 
 ## Limits
 

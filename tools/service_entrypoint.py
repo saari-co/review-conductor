@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 from contextlib import contextmanager
 import fcntl
 import hashlib
@@ -393,6 +394,8 @@ def _serve_with_restrictive_umask(config: dict, registry_path: Path) -> None:
     notifier = userland.OpenClawNotifier(config)
     stop = threading.Event()
     parent_lost = threading.Event()
+    session_drained = threading.Event()
+    drain_lock = threading.Lock()
     failure: list[BaseException] = []
     server = None
     parent_raw = os.environ.get(PARENT_LIFETIME_FD_ENV)
@@ -411,6 +414,13 @@ def _serve_with_restrictive_umask(config: dict, registry_path: Path) -> None:
                 daemon=True,
             ).start()
 
+    def drain_once() -> None:
+        with drain_lock:
+            if session_drained.is_set():
+                return
+            session_drained.set()
+        drain_owned_session()
+
     def lose_parent() -> None:
         parent_lost.set()
         request_stop()
@@ -418,11 +428,18 @@ def _serve_with_restrictive_umask(config: dict, registry_path: Path) -> None:
         if current is not None:
             with contextlib.suppress(OSError):
                 current.server_close()
+        # Drain here, not only in finally: a requested stop may already be
+        # blocked in worker.join(), so finally cannot take the parent-loss path.
+        drain_once()
 
     def watch_parent() -> None:
         if parent_fd is None:
             return
-        while not stop.is_set() and not parent_lost.is_set():
+        # Stop requested is not shutdown complete. SIGTERM/SIGHUP or worker
+        # failure can enter an unbounded worker.join while the supervisor later
+        # disappears; exiting on stop would leave parent_lost false and orphan
+        # the still-owned session.
+        while not parent_lost.is_set():
             try:
                 if parent_lifetime_lost(parent_fd):
                     lose_parent()
@@ -474,7 +491,7 @@ def _serve_with_restrictive_umask(config: dict, registry_path: Path) -> None:
             # Parent-loss drain is independent of the worker. An in-flight adapter
             # or TERM-resistant descendant must not delay the session reap after
             # the original supervisor is already gone.
-            drain_owned_session()
+            drain_once()
         elif worker.is_alive():
             # A tick may be inside a bounded external adapter operation far longer
             # than the polling interval. Never return while that worker still owns
