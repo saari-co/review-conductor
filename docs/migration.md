@@ -27,7 +27,8 @@
   exact SMCBD config/state identity and fail-closed
   health/start/stop/restart behavior. The service drains its owned generation
   when that parent-lifetime write end closes, including after stop is requested
-  while an in-flight worker.join is still blocked. Ingress bind does not wait
+  while an in-flight worker.join is still blocked, and does not return until that
+  drain completes if EOF arrives during join. Ingress bind does not wait
   on reverse DNS before the owned listener is ready. The 1Password-aware launcher now has a
   source-only `standalone` path: `preflight` validates registry/bootstrap only,
   `start` forwards inherited webhook/App descriptors into that supervisor, waits

@@ -144,7 +144,15 @@ def _exited_unreaped_child(pid: int) -> bool:
         result = waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
     except (ChildProcessError, ProcessLookupError, OSError):
         return False
+    # Python returns None when no child matches; do not treat a missing
+    # C zeroed siginfo as live-child evidence, and never waitpid(-1).
     return result is not None
+
+
+def remember_first_failure(failure: list[BaseException], exc: BaseException) -> None:
+    """Retain the first fail-closed error; retries must not accumulate tracebacks."""
+    if not failure:
+        failure.append(exc)
 
 
 def _owned_session_members(pgid: int) -> tuple[int, ...]:
@@ -499,6 +507,7 @@ def _serve_with_restrictive_umask(config: dict, registry_path: Path) -> None:
     parent_lost = threading.Event()
     session_drained = threading.Event()
     drain_lock = threading.Lock()
+    shutdown_helper = threading.Lock()
     failure: list[BaseException] = []
     server = None
     parent_raw = os.environ.get(PARENT_LIFETIME_FD_ENV)
@@ -508,9 +517,10 @@ def _serve_with_restrictive_umask(config: dict, registry_path: Path) -> None:
     def request_stop(_signum: int | None = None, _frame: Any = None) -> None:
         stop.set()
         current = server
-        if current is not None:
-            # BaseServer.shutdown waits for serve_forever and deadlocks if it
-            # runs on that same thread. Signal handlers share the serving thread.
+        # One-shot acquire: repeated lose_parent retries must not start another
+        # helper every 50 ms. Non-blocking so a signal during the first call
+        # cannot deadlock. Still off-thread so serve_forever cannot deadlock.
+        if current is not None and shutdown_helper.acquire(blocking=False):
             threading.Thread(
                 target=current.shutdown,
                 name="review-conductor-shutdown",
@@ -550,7 +560,7 @@ def _serve_with_restrictive_umask(config: dict, registry_path: Path) -> None:
                     continue
                 lose_parent()
             except service.ServiceError as exc:
-                failure.append(exc)
+                remember_first_failure(failure, exc)
                 parent_lost.set()
                 request_stop()
             if session_drained.is_set():
@@ -604,6 +614,15 @@ def _serve_with_restrictive_umask(config: dict, registry_path: Path) -> None:
             # than the polling interval. Never return while that worker still owns
             # a claim or subprocess; its adapter timeout remains the upper bound.
             worker.join()
+        if parent_lost.is_set():
+            # Exit fence: parent EOF during join, or the worker returning while
+            # the daemon watcher is still draining, must not restore handlers or
+            # return and orphan remaining descendants. Retry signaling errors.
+            while not session_drained.is_set():
+                try:
+                    drain_once()
+                except service.ServiceError:
+                    time.sleep(0.05)
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
         webhook_secret = ""

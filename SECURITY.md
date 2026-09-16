@@ -114,7 +114,10 @@ schedule `serve_forever` shutdown off the serving thread, and parent-loss drain
 does not wait for an in-flight worker tick. Parent-loss observes remaining
 owned-session descendants without reaping worker-owned children, and marks that
 drain complete only after it succeeds so a signaling error can retry while
-`worker.join` is blocked. Parent-liveness supervision stays
+`worker.join` is blocked. Main does not return until that drain completes,
+including when EOF arrives during join and the worker then returns; repeated
+parent-loss retries schedule the HTTP shutdown helper once and retain only the
+first signaling failure. Parent-liveness supervision stays
 active after stop is requested until shutdown completes, so a later supervisor
 disappearance still performs the owned-session drain. Ingress bind does not
 reverse-resolve the listen address, so startup cannot stall on DNS before the

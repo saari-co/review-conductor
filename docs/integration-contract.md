@@ -71,7 +71,10 @@ That drain observes remaining owned-session descendants without reaping
 worker-owned children, so adapter `subprocess.run` exit status stays intact, and
 it is marked complete only after the owned-session drain succeeds. A signaling
 error leaves the drain incomplete so the watcher can retry, including while
-`worker.join` is blocked.
+`worker.join` is blocked. Final service exit waits for that drain, including
+when EOF arrives during `worker.join` and the worker then returns, so a daemon
+watcher cannot be torn down mid-drain. Repeated parent-loss retries schedule
+the HTTP shutdown helper once and retain only the first signaling failure.
 Parent-liveness supervision continues after stop is requested until shutdown
 actually completes; if the supervisor write end closes while worker.join is
 still blocked, the service still drains its owned listener, lock, and

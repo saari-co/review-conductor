@@ -19,7 +19,9 @@
   completed `2026-09-16T02:56:45Z`, aggregate CI `2026-09-16T02:56:51Z`;
   Copilot review 5218102918 submitted `2026-09-16T03:06:37Z` on exact
   `cd2543f`; round-1 repair local lifecycle closeout `2026-09-16T10:42:23Z`;
-  local `make check` and `make build` `2026-09-16T10:44:36Z`.
+  local `make check` and `make build` `2026-09-16T10:44:36Z`; Copilot review
+  5221776785 submitted `2026-09-16T10:59:51Z` on exact `ef9f625`; final
+  post-review repair local `make check` and `make build` `2026-09-16T11:12:54Z`.
 - Local interpreter exercised: Python 3.14.6.
 
 ## Confirmed defect and correction
@@ -51,7 +53,11 @@ is requested until shutdown completes; if the supervisor write end closes while
 observes remaining members of the owned session without `waitpid(-1)`, so a
 concurrent review-worker `subprocess.run` keeps its real exit status; drain
 completion is recorded only after `drain_owned_session()` succeeds, and the
-parent watcher retries a signaling error while join remains blocked. Operator
+parent watcher retries a signaling error while join remains blocked. Final
+service exit waits for that drain after `worker.join` returns, so parent EOF
+during a blocked join cannot let main return while the daemon watcher is still
+draining. Repeated parent-loss retries schedule the HTTP shutdown helper once
+and retain only the first signaling failure. Operator
 stop still waits unbounded for that non-daemon worker. Ingress bind records the
 listen host and port without calling `socket.getfqdn()`; hosted macOS CI
 35048390624 stalled every actual entrypoint fixture in `HTTPServer.server_bind`
@@ -108,12 +114,22 @@ and profile paths and values stay unchanged.
   exercises `contextlib.suppress` on the already-closed listener. A first
   signaling error during that blocked-join drain is retried and then completes;
   restoring `session_drained` before a successful drain leaves the process,
-  lock, and session held after one failed attempt. Mutants that
+  lock, and session held after one failed attempt. Removing the final exit
+  fence lets a gated worker return during a slow in-flight drain so the
+  process exits while a TERM-resistant descendant remains. Repeated drain
+  failures without one-shot helper scheduling start six or more shutdown
+  threads; the repaired path keeps exactly one helper and still retries
+  fail-closed. Fixture helpers own `parent_write` before `Popen`, so a spawn
+  failure closes that writer without a later close of a reused descriptor.
+  Mutants that
   call `shutdown()` on the serving thread, `join()` the worker before
   parent-loss drain, exit `watch_parent` when stop is set, drop the
   `contextlib` import, restore `HTTPServer.server_bind`'s `getfqdn`
-  reverse-DNS path, restore `waitpid(-1)` observation, or mark drain complete
-  before success fail those repair tests.
+  reverse-DNS path, restore `waitpid(-1)` observation, mark drain complete
+  before success, omit the final exit fence, start a shutdown helper on every
+  retry, append every signaling failure, or register `parent_write` only after
+  `Popen` fail those repair tests. Python `os.waitid(..., WNOHANG)` returning
+  `None` when no child matches remains the production contract.
 - Baseline-negative child-reap test: concurrent `waitpid(-1, WNOHANG)` during
   owned-session drain steals a session-leader adapter child's status so
   `Popen.wait()` reports `0` instead of `17`. The repaired non-reaping observer
@@ -130,26 +146,27 @@ and profile paths and values stay unchanged.
   remain PASS, including their mutant batteries. A mutant that routes
   standalone stop back through bare `stop_child` fails.
 - New `tests/test_runtime_lifecycle.py` is registered in `Makefile` `test`.
-- Full `make check` and `make build` passed at `2026-09-16T10:44:36Z` on
-  Python 3.14.6 before this proof's commit.
+- Full `make check` and `make build` passed at `2026-09-16T11:12:54Z` on
+  Python 3.14.6 before this proof's commit. Historical round-1 closeout was
+  `2026-09-16T10:44:36Z` on `ef9f625`.
 
 ## Tested source hashes
 
 | File | SHA-256 |
 | --- | --- |
 | `tools/standalone_supervisor.py` | `b4f4d084630fbaeb9326af08c999b380e9d1dcee8b1829c6dc0f7f5adc7727b0` |
-| `tools/service_entrypoint.py` | `d6877e9d04e66890ae61ae793bb030a2f0f0fc2bcb8d0fde8fc974bf08d3f979` |
+| `tools/service_entrypoint.py` | `4524956928ae196ae7ee49313e25e2fafc8f704682d0064be72442205ddc6a85` |
 | `tools/review_conductor_runtime.py` | `bac13d3d9905a0ebad8f800df0e34f6fced6930a3cc5b4874ebf064d3358f38f` |
 | `tools/review_conductor_userland_launcher.py` | `d05f5e5b6e17fbe6ec2b5a477066c4d47dbf119cc4f0439a5a00b9f948ac2a30` |
-| `tests/test_runtime_lifecycle.py` | `e6f583142db83372a2f3e519e4ae1eee4fd2c93272f8ef4b1d6dab35cf3b21bd` |
+| `tests/test_runtime_lifecycle.py` | `11b494ef590dd8b27815dbbf00f4d41e8ab4958cedd00fc977f70f2055959f75` |
 | `tests/test_standalone_supervisor.py` | `25167ef17348b3743c5a1ded46c7da1b719feeab2b5b8ebedfb2994d4ae828f3` |
 | `tests/test_suite_activation_launcher.py` | `233da2540e80dac5b020401979cff21facaf59df5fe87d2d42ca07dfc35a036e` |
 | `tests/test_launcher_transport.py` | `5933b688ea9260dfa44403ea024b540e13c365632f33f6a36705e385503d400f` |
 | `Makefile` | `78e061fdecb5c95eaf0058a0430558f4858cb3ab396c768d00b0950baf9f6b72` |
 | `docs/provenance.json` | `ca8061b52c5bf530b6e4a735ddb8669fb03c52264e6b17277612ba6965ef61cb` |
-| `docs/integration-contract.md` | `4471ab65b169ccb41443f478094c087132115aae1ca4d39b4a51fba018bdbe53` |
-| `docs/migration.md` | `2b59e3a5b56422d46c6ce686b07d766d32f8297e60c7495f7bedbdb5280e3d6f` |
-| `SECURITY.md` | `4049eebfa0415038646ae16f9db53ebcab6f05c1087fc4de29886097902f444a` |
+| `docs/integration-contract.md` | `874276c7fea2fcbd6cbfb2330a701696e3f822f4f384db37bf462bda05f82d0a` |
+| `docs/migration.md` | `f90d089bdb41fa5ba29cd18909c2a2a3d9ab91f72e73845c9b5ce8bf629e3507` |
+| `SECURITY.md` | `3e17dda88af678ebb8d2cb1fd504026a5fa631bdcbb2cd1b5463c984cbc312ed` |
 
 ## Limits
 

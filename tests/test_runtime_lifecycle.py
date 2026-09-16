@@ -53,8 +53,12 @@ PARENT_LOSS_JOIN_FIRST_DEFECT = (
     "        if parent_lost.is_set():\n"
     "            drain_owned_session()\n"
 )
-WATCH_PARENT_UNTIL_SHUTDOWN_ANCHOR = "        while not session_drained.is_set():\n"
+WATCH_PARENT_UNTIL_SHUTDOWN_ANCHOR = (
+    "        # this watcher keeps retrying while join remains blocked.\n"
+    "        while not session_drained.is_set():\n"
+)
 WATCH_PARENT_EXITS_ON_STOP_DEFECT = (
+    "        # this watcher keeps retrying while join remains blocked.\n"
     "        while not stop.is_set() and not session_drained.is_set():\n"
 )
 OWNED_CHILDREN_OBSERVE_ANCHOR = (
@@ -109,6 +113,38 @@ LOSE_PARENT_DRAIN_ANCHOR = (
     "        drain_once()\n"
 )
 LOSE_PARENT_DRAIN_DEFECT = ""
+FINAL_EXIT_FENCE_ANCHOR = (
+    "        if parent_lost.is_set():\n"
+    "            # Exit fence: parent EOF during join, or the worker returning while\n"
+    "            # the daemon watcher is still draining, must not restore handlers or\n"
+    "            # return and orphan remaining descendants. Retry signaling errors.\n"
+    "            while not session_drained.is_set():\n"
+    "                try:\n"
+    "                    drain_once()\n"
+    "                except service.ServiceError:\n"
+    "                    time.sleep(0.05)\n"
+)
+FINAL_EXIT_FENCE_DEFECT = ""
+SHUTDOWN_HELPER_ONCE_ANCHOR = (
+    "        if current is not None and shutdown_helper.acquire(blocking=False):\n"
+)
+SHUTDOWN_HELPER_ONCE_DEFECT = "        if current is not None:\n"
+REMEMBER_FIRST_FAILURE_ANCHOR = (
+    "    if not failure:\n"
+    "        failure.append(exc)\n"
+)
+REMEMBER_FIRST_FAILURE_DEFECT = "    failure.append(exc)\n"
+OWN_PARENT_WRITE_ANCHOR = (
+    "    def _own_parent_write(self, parent_write):\n"
+    "        owner = {\"fd\": parent_write}\n"
+    "        self._parent_write_owner = owner\n"
+    "        self.addCleanup(lambda current=owner: self._close_owned_fd(current))\n"
+    "        return owner\n"
+)
+OWN_PARENT_WRITE_DEFECT = (
+    "    def _own_parent_write(self, parent_write):\n"
+    "        return {\"fd\": parent_write}\n"
+)
 FAKE_SERVICE = r"""
 import fcntl
 import os
@@ -177,6 +213,7 @@ ENTRYPOINT_SERVICE = r"""
 import os
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -189,7 +226,7 @@ import service_runtime as service
 
 state_root = sys.argv[2]
 status_fd = int(sys.argv[3])
-blocked = sys.argv[4] == "blocked"
+tick_mode = sys.argv[4]
 resistant = sys.argv[5] == "resistant"
 drain_mode = sys.argv[6] if len(sys.argv) > 6 else "normal"
 entry.OWNED_GENERATION_SHUTDOWN_SECONDS = 0.35
@@ -251,6 +288,26 @@ def hung_tick(*_args, **_kwargs):
     time.sleep(3600)
     (state / "tick-finished").write_text("1")
 
+def gated_tick(*_args, **_kwargs):
+    (state / "tick-started").write_text("1")
+    if resistant:
+        child = os.fork()
+        if child == 0:
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            while True:
+                time.sleep(1)
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline and not (state / "release-worker").exists():
+        time.sleep(0.02)
+    (state / "tick-finished").write_text("1")
+
+if tick_mode == "blocked":
+    selected_tick = hung_tick
+elif tick_mode == "gated":
+    selected_tick = gated_tick
+else:
+    selected_tick = idle_tick
+
 with patch.object(entry, "load_supervised_profile", return_value=config), patch.object(
     entry, "registry_provider", return_value=lambda: object()
 ), patch.object(
@@ -260,7 +317,7 @@ with patch.object(entry, "load_supervised_profile", return_value=config), patch.
 ), patch.object(
     userland, "OpenClawNotifier", return_value=object()
 ), patch.object(
-    service, "run_service_tick", side_effect=hung_tick if blocked else idle_tick
+    service, "run_service_tick", side_effect=selected_tick
 ), patch.object(
     runtime, "BoundedHTTPServer", ReportingServer
 ):
@@ -273,8 +330,24 @@ with patch.object(entry, "load_supervised_profile", return_value=config), patch.
             raise entry.service.ServiceError(
                 "owned service generation could not be signaled"
             )
+        if drain_mode == "fail-many" and attempt < 6:
+            raise entry.service.ServiceError(
+                "owned service generation could not be signaled"
+            )
+        if drain_mode == "slow":
+            (state / "drain-started").write_text("1")
+            time.sleep(1.0)
         return real_drain(*args, **kwargs)
     entry.drain_owned_session = wrapped_drain
+    real_thread = threading.Thread
+    class CountingThread(real_thread):
+        def __init__(self, *args, **kwargs):
+            if kwargs.get("name") == "review-conductor-shutdown":
+                helper_path = state / "shutdown-helpers"
+                count = int(helper_path.read_text()) if helper_path.exists() else 0
+                helper_path.write_text(str(count + 1))
+            super().__init__(*args, **kwargs)
+    threading.Thread = CountingThread
     mark("calling-serve")
     entry.serve(state / "profile.json", state / "registry.json")
 """
@@ -372,9 +445,29 @@ class RuntimeLifecycleTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
 
+    def _close_owned_fd(self, owner):
+        descriptor = owner.get("fd", -1)
+        owner["fd"] = -1
+        if descriptor >= 0:
+            supervisor._close_descriptor(descriptor)
+
+    def _own_parent_write(self, parent_write):
+        owner = {"fd": parent_write}
+        self._parent_write_owner = owner
+        self.addCleanup(lambda current=owner: self._close_owned_fd(current))
+        return owner
+
+    def _close_parent_write(self, parent_write):
+        owner = getattr(self, "_parent_write_owner", None)
+        if owner is not None and owner.get("fd") == parent_write:
+            self._close_owned_fd(owner)
+            return
+        supervisor._close_descriptor(parent_write)
+
     def spawn_fake_service(self, *, watch: bool, resistant: bool = False):
         parent_read, parent_write = os.pipe()
         status_read, status_write = os.pipe()
+        parent_owner = self._own_parent_write(parent_write)
         self.addCleanup(lambda fd=status_read: supervisor._close_descriptor(fd))
         lock_path = self.root / "service.lock"
         lock_path.write_bytes(b"")
@@ -403,7 +496,7 @@ class RuntimeLifecycleTests(unittest.TestCase):
         finally:
             os.close(parent_read)
             os.close(status_write)
-        self._own_spawned_session(process, parent_write)
+        self._own_spawned_session(process, parent_owner)
         try:
             readable, _, _ = select_ready(status_read, 3)
             self.assertEqual(readable, [status_read])
@@ -432,10 +525,14 @@ class RuntimeLifecycleTests(unittest.TestCase):
         return destination / "tools"
 
     def spawn_entrypoint_service(
-        self, *, blocked: bool, resistant: bool = False, tools=None, drain_mode="normal"
+        self, *, blocked: bool, resistant: bool = False, tools=None, drain_mode="normal",
+        tick=None,
     ):
+        if tick is None:
+            tick = "blocked" if blocked else "idle"
         parent_read, parent_write = os.pipe()
         status_read, status_write = os.pipe()
+        parent_owner = self._own_parent_write(parent_write)
         self.addCleanup(lambda fd=status_read: supervisor._close_descriptor(fd))
         state_root = self.root / "entrypoint-state"
         state_root.mkdir()
@@ -451,7 +548,7 @@ class RuntimeLifecycleTests(unittest.TestCase):
                     str(tools or TOOLS),
                     str(state_root),
                     str(status_write),
-                    "blocked" if blocked else "idle",
+                    tick,
                     "resistant" if resistant else "plain",
                     drain_mode,
                 ],
@@ -470,7 +567,7 @@ class RuntimeLifecycleTests(unittest.TestCase):
         finally:
             os.close(parent_read)
             os.close(status_write)
-        self._own_spawned_session(process, parent_write)
+        self._own_spawned_session(process, parent_owner)
         try:
             readable, _, _ = select_ready(status_read, 5)
             self.assertEqual(
@@ -487,12 +584,12 @@ class RuntimeLifecycleTests(unittest.TestCase):
         lock_path = Path(identity[3].strip())
         return process, parent_write, pid, pgid, port, lock_path, state_root
 
-    def _own_spawned_session(self, process, parent_write):
+    def _own_spawned_session(self, process, parent_owner):
         # start_new_session=True makes the child the session/group leader, so
         # failed readiness assertions can still reap that group.
         self.addCleanup(
-            lambda current=process, write_fd=parent_write: self._reap_group(
-                current, current.pid, write_fd
+            lambda current=process, owner=parent_owner: self._reap_group(
+                current, current.pid, owner
             )
         )
 
@@ -510,9 +607,8 @@ class RuntimeLifecycleTests(unittest.TestCase):
         probe = socket.create_connection(("127.0.0.1", port), timeout=1)
         probe.close()
 
-    def _reap_group(self, process, pgid, parent_write):
-        with contextlib.suppress(OSError):
-            os.close(parent_write)
+    def _reap_group(self, process, pgid, parent_owner):
+        self._close_owned_fd(parent_owner)
         if process.poll() is None:
             with contextlib.suppress(ProcessLookupError, OSError):
                 os.killpg(pgid, signal.SIGKILL)
@@ -522,7 +618,7 @@ class RuntimeLifecycleTests(unittest.TestCase):
         process, parent_write, _pid, pgid, port, lock_path = self.spawn_fake_service(
             watch=False
         )
-        os.close(parent_write)
+        self._close_parent_write(parent_write)
         time.sleep(0.25)
         self.assertIsNone(process.poll())
         self.assertFalse(_port_free(port))
@@ -533,7 +629,7 @@ class RuntimeLifecycleTests(unittest.TestCase):
         process, parent_write, _pid, pgid, port, lock_path = self.spawn_fake_service(
             watch=True
         )
-        os.close(parent_write)
+        self._close_parent_write(parent_write)
         _wait_until(lambda: process.poll() is not None, message="service exit")
         _wait_until(lambda: _group_absent(pgid), message="session drain")
         self.assertTrue(_port_free(port))
@@ -550,7 +646,7 @@ class RuntimeLifecycleTests(unittest.TestCase):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        os.close(parent_write)
+        self._close_parent_write(parent_write)
         self.addCleanup(holder.kill)
         holder.kill()
         holder.wait(timeout=2)
@@ -805,7 +901,7 @@ os._exit(1)
         self.assertFalse(_port_free(port))
         self.assertFalse(_lock_released(lock_path))
         with contextlib.suppress(OSError):
-            os.close(parent_write)
+            self._close_parent_write(parent_write)
 
     def test_baseline_actual_serving_loop_parent_loss_holds_lock_when_join_precedes_drain(
         self,
@@ -825,7 +921,7 @@ os._exit(1)
             lambda: (state_root / "tick-started").exists(),
             message="blocked worker entered a tick",
         )
-        os.close(parent_write)
+        self._close_parent_write(parent_write)
         time.sleep(1.0)
         self.assertIsNone(process.poll())
         self.assertFalse(_lock_released(lock_path))
@@ -852,7 +948,7 @@ os._exit(1)
         _wait_until(lambda: _lock_released(lock_path), message="lock released after signal")
         self.assertIsNotNone(process.poll())
         with contextlib.suppress(OSError):
-            os.close(parent_write)
+            self._close_parent_write(parent_write)
             parent_write = -1
 
     def test_entrypoint_parent_loss_drains_blocked_worker_listener_and_lock(self):
@@ -865,7 +961,7 @@ os._exit(1)
             lambda: (state_root / "tick-started").exists(),
             message="blocked worker entered a tick",
         )
-        os.close(parent_write)
+        self._close_parent_write(parent_write)
         _wait_until(lambda: process.poll() is not None, timeout=4, message="entrypoint parent-loss exit")
         _wait_until(lambda: _group_absent(pgid), timeout=4, message="blocked session drain")
         self.assertTrue(_port_free(port))
@@ -874,10 +970,16 @@ os._exit(1)
         with self.assertRaises(ProcessLookupError):
             os.kill(pid, 0)
 
-    def _blocked_serving_loop_after_graceful_stop(self, *, tools=None, drain_mode="normal"):
+    def _blocked_serving_loop_after_graceful_stop(
+        self, *, tools=None, drain_mode="normal", tick=None
+    ):
         process, parent_write, pid, pgid, port, lock_path, state_root = (
             self.spawn_entrypoint_service(
-                blocked=True, resistant=True, tools=tools, drain_mode=drain_mode
+                blocked=True,
+                resistant=True,
+                tools=tools,
+                drain_mode=drain_mode,
+                tick=tick,
             )
         )
         self._assert_listener_accepts(port)
@@ -907,7 +1009,7 @@ os._exit(1)
         process, parent_write, pid, pgid, _port, lock_path, state_root = (
             self._blocked_serving_loop_after_graceful_stop(tools=tools)
         )
-        os.close(parent_write)
+        self._close_parent_write(parent_write)
         time.sleep(1.0)
         self.assertIsNone(process.poll())
         self.assertFalse(_lock_released(lock_path))
@@ -920,7 +1022,7 @@ os._exit(1)
         process, parent_write, pid, pgid, port, lock_path, state_root = (
             self._blocked_serving_loop_after_graceful_stop()
         )
-        os.close(parent_write)
+        self._close_parent_write(parent_write)
         _wait_until(
             lambda: process.poll() is not None,
             timeout=4,
@@ -944,7 +1046,7 @@ os._exit(1)
                 tools=tools, drain_mode="fail-once"
             )
         )
-        os.close(parent_write)
+        self._close_parent_write(parent_write)
         time.sleep(1.0)
         self.assertIsNone(process.poll())
         self.assertFalse(_lock_released(lock_path))
@@ -958,7 +1060,7 @@ os._exit(1)
         process, parent_write, pid, pgid, port, lock_path, state_root = (
             self._blocked_serving_loop_after_graceful_stop(drain_mode="fail-once")
         )
-        os.close(parent_write)
+        self._close_parent_write(parent_write)
         _wait_until(
             lambda: process.poll() is not None,
             timeout=4,
@@ -971,6 +1073,132 @@ os._exit(1)
         self.assertFalse((state_root / "tick-finished").exists())
         with self.assertRaises(ProcessLookupError):
             os.kill(pid, 0)
+
+    def test_baseline_exit_during_in_flight_drain_orphans_after_worker_returns(self):
+        tools = self._mutated_tools(
+            "tools/service_entrypoint.py",
+            FINAL_EXIT_FENCE_ANCHOR,
+            FINAL_EXIT_FENCE_DEFECT,
+        )
+        process, parent_write, pid, pgid, port, lock_path, state_root = (
+            self._blocked_serving_loop_after_graceful_stop(
+                tools=tools, drain_mode="slow", tick="gated"
+            )
+        )
+        self._close_parent_write(parent_write)
+        _wait_until(
+            lambda: (state_root / "drain-started").exists(),
+            message="watcher entered slow drain",
+        )
+        (state_root / "release-worker").write_text("1")
+        _wait_until(lambda: process.poll() is not None, message="main returned during drain")
+        self.assertFalse(_group_absent(pgid))
+        self.assertTrue((state_root / "tick-finished").exists())
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, 0)
+
+    def test_entrypoint_exit_waits_for_in_flight_drain_after_worker_returns(self):
+        process, parent_write, pid, pgid, port, lock_path, state_root = (
+            self._blocked_serving_loop_after_graceful_stop(
+                drain_mode="slow", tick="gated"
+            )
+        )
+        self._close_parent_write(parent_write)
+        _wait_until(
+            lambda: (state_root / "drain-started").exists(),
+            message="watcher entered slow drain",
+        )
+        (state_root / "release-worker").write_text("1")
+        _wait_until(
+            lambda: process.poll() is not None,
+            timeout=4,
+            message="exit fence waited for drain",
+        )
+        _wait_until(lambda: _group_absent(pgid), timeout=4, message="fenced session drain")
+        self.assertTrue(_port_free(port))
+        self.assertTrue(_lock_released(lock_path))
+        self.assertTrue((state_root / "tick-finished").exists())
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+
+    def test_baseline_repeated_stop_during_drain_failures_starts_unbounded_helpers(self):
+        tools = self._mutated_tools(
+            "tools/service_entrypoint.py",
+            SHUTDOWN_HELPER_ONCE_ANCHOR,
+            SHUTDOWN_HELPER_ONCE_DEFECT,
+        )
+        process, parent_write, pid, pgid, port, lock_path, state_root = (
+            self._blocked_serving_loop_after_graceful_stop(
+                tools=tools, drain_mode="fail-many"
+            )
+        )
+        self._close_parent_write(parent_write)
+        _wait_until(
+            lambda: (state_root / "drain-attempts").exists()
+            and int((state_root / "drain-attempts").read_text()) >= 6,
+            message="repeated drain failures",
+        )
+        self.assertGreaterEqual(int((state_root / "shutdown-helpers").read_text()), 6)
+        self.assertIsNone(process.poll())
+        self.assertFalse(_lock_released(lock_path))
+        self.assertFalse(_group_absent(pgid))
+
+    def test_request_stop_schedules_shutdown_helper_once_during_drain_retries(self):
+        process, parent_write, pid, pgid, port, lock_path, state_root = (
+            self._blocked_serving_loop_after_graceful_stop(drain_mode="fail-many")
+        )
+        self._close_parent_write(parent_write)
+        _wait_until(
+            lambda: process.poll() is not None,
+            timeout=4,
+            message="fail-many drain eventually succeeded",
+        )
+        _wait_until(lambda: _group_absent(pgid), timeout=4, message="retried fail-many drain")
+        self.assertEqual(int((state_root / "shutdown-helpers").read_text()), 1)
+        self.assertGreaterEqual(int((state_root / "drain-attempts").read_text()), 7)
+        self.assertTrue(_port_free(port))
+        self.assertTrue(_lock_released(lock_path))
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+
+    def test_remember_first_failure_keeps_only_the_first_error(self):
+        failure: list[BaseException] = []
+        first = RuntimeError("first signaling error")
+        second = RuntimeError("later signaling error")
+        entrypoint.remember_first_failure(failure, first)
+        entrypoint.remember_first_failure(failure, second)
+        self.assertEqual(failure, [first])
+        self.assertIs(failure[0], first)
+
+    def test_spawn_helpers_own_parent_write_before_popen_without_reused_fd_close(self):
+        for helper in (self.spawn_fake_service, self.spawn_entrypoint_service):
+            with self.subTest(helper=helper.__name__):
+                owned_at_popen = {}
+
+                def fail_popen(*_args, **_kwargs):
+                    owned_at_popen["owner"] = getattr(self, "_parent_write_owner", None)
+                    raise OSError("synthetic spawn failure")
+
+                with patch.object(subprocess, "Popen", side_effect=fail_popen):
+                    with self.assertRaises(OSError):
+                        if helper.__name__ == "spawn_fake_service":
+                            helper(watch=True)
+                        else:
+                            helper(blocked=False)
+                owner = owned_at_popen["owner"]
+                self.assertIsNotNone(owner)
+                leaked = owner["fd"]
+                self.assertGreaterEqual(leaked, 0)
+                self._close_owned_fd(owner)
+                with self.assertRaises(OSError) as error:
+                    os.fstat(leaked)
+                self.assertEqual(error.exception.errno, errno.EBADF)
+                reuse_read, reuse_write = os.pipe()
+                self.addCleanup(lambda fd=reuse_read: supervisor._close_descriptor(fd))
+                self.addCleanup(lambda fd=reuse_write: supervisor._close_descriptor(fd))
+                self._close_owned_fd(owner)
+                os.fstat(reuse_write)
+                self.assertEqual(owner["fd"], -1)
 
     def test_bounded_http_server_bind_does_not_wait_on_reverse_dns(self):
         def forbidden_fqdn(*_args, **_kwargs):
@@ -1089,6 +1317,30 @@ class MutationTests(unittest.TestCase):
             DRAIN_ONCE_AFTER_SUCCESS_ANCHOR,
             DRAIN_ONCE_MARK_BEFORE_DEFECT,
             "test_runtime_lifecycle.RuntimeLifecycleTests.test_drain_once_retries_signaling_error_on_blocked_join",
+        ),
+        (
+            "tools/service_entrypoint.py",
+            FINAL_EXIT_FENCE_ANCHOR,
+            FINAL_EXIT_FENCE_DEFECT,
+            "test_runtime_lifecycle.RuntimeLifecycleTests.test_entrypoint_exit_waits_for_in_flight_drain_after_worker_returns",
+        ),
+        (
+            "tools/service_entrypoint.py",
+            SHUTDOWN_HELPER_ONCE_ANCHOR,
+            SHUTDOWN_HELPER_ONCE_DEFECT,
+            "test_runtime_lifecycle.RuntimeLifecycleTests.test_request_stop_schedules_shutdown_helper_once_during_drain_retries",
+        ),
+        (
+            "tools/service_entrypoint.py",
+            REMEMBER_FIRST_FAILURE_ANCHOR,
+            REMEMBER_FIRST_FAILURE_DEFECT,
+            "test_runtime_lifecycle.RuntimeLifecycleTests.test_remember_first_failure_keeps_only_the_first_error",
+        ),
+        (
+            "tests/test_runtime_lifecycle.py",
+            OWN_PARENT_WRITE_ANCHOR,
+            OWN_PARENT_WRITE_DEFECT,
+            "test_runtime_lifecycle.RuntimeLifecycleTests.test_spawn_helpers_own_parent_write_before_popen_without_reused_fd_close",
         ),
     )
 
