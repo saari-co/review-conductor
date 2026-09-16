@@ -35,6 +35,8 @@ LEADER_FD_ENV = "REVIEW_CONDUCTOR_LEADER_FD"
 PARENT_LIFETIME_FD_ENV = "REVIEW_CONDUCTOR_PARENT_LIFETIME_FD"
 OWNED_GENERATION_SHUTDOWN_SECONDS = 10
 STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+_PROC_PGRP_ONLY = 2
+_darwin_libc = None
 
 
 def profile_config_digest(config: dict) -> str:
@@ -106,13 +108,114 @@ def drain_owned_session(
 
 
 def _owned_children_remain() -> bool:
-    while True:
+    """Observe live owned-session descendants without reaping any child."""
+    pid = os.getpid()
+    pgid = os.getpgrp()
+    try:
+        members = _owned_session_members(pgid)
+    except service.ServiceError:
+        return True
+    return any(
+        member != pid and not _exited_unreaped_child(member) for member in members
+    )
+
+
+def parse_proc_stat_session(raw: str) -> tuple[int, bool] | None:
+    """Return (pgid, live) from a Linux /proc/<pid>/stat line, or None."""
+    comm_end = raw.rfind(")")
+    if comm_end < 0:
+        return None
+    rest = raw[comm_end + 2 :].split()
+    if len(rest) < 3:
+        return None
+    try:
+        pgid = int(rest[2])
+    except ValueError:
+        return None
+    return pgid, rest[0] != "Z"
+
+
+def _exited_unreaped_child(pid: int) -> bool:
+    """True when this process still owns an exited, unreaped child at pid."""
+    waitid = getattr(os, "waitid", None)
+    if waitid is None:
+        return False
+    try:
+        result = waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    except (ChildProcessError, ProcessLookupError, OSError):
+        return False
+    return result is not None
+
+
+def _owned_session_members(pgid: int) -> tuple[int, ...]:
+    if sys.platform == "darwin":
+        return _darwin_session_members(pgid)
+    if os.path.isdir("/proc"):
+        return _procfs_session_members(pgid)
+    raise service.ServiceError("owned session members cannot be observed")
+
+
+def _darwin_libc_handle():
+    global _darwin_libc
+    if _darwin_libc is None:
+        import ctypes
+        import ctypes.util
+
+        name = ctypes.util.find_library("c")
+        if name is None:
+            raise service.ServiceError("owned session members cannot be observed")
+        libc = ctypes.CDLL(name, use_errno=True)
+        libc.proc_listpids.argtypes = [
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_int,
+        ]
+        libc.proc_listpids.restype = ctypes.c_int
+        _darwin_libc = libc
+    return _darwin_libc
+
+
+def _darwin_session_members(pgid: int) -> tuple[int, ...]:
+    import ctypes
+
+    libc = _darwin_libc_handle()
+    needed = libc.proc_listpids(_PROC_PGRP_ONLY, pgid, None, 0)
+    if needed < 0:
+        raise service.ServiceError("owned session members cannot be observed")
+    if needed == 0:
+        return ()
+    count = max(1, needed // ctypes.sizeof(ctypes.c_int))
+    buf = (ctypes.c_int * count)()
+    written = libc.proc_listpids(
+        _PROC_PGRP_ONLY, pgid, ctypes.cast(buf, ctypes.c_void_p), ctypes.sizeof(buf)
+    )
+    if written < 0:
+        raise service.ServiceError("owned session members cannot be observed")
+    n = written // ctypes.sizeof(ctypes.c_int)
+    return tuple(member for member in buf[:n] if member > 0)
+
+
+def _procfs_session_members(pgid: int) -> tuple[int, ...]:
+    try:
+        names = os.listdir("/proc")
+    except OSError as exc:
+        raise service.ServiceError("owned session members cannot be observed") from exc
+    members = []
+    for name in names:
+        if not name.isdigit():
+            continue
         try:
-            finished, _status = os.waitpid(-1, os.WNOHANG)
-        except ChildProcessError:
-            return False
-        if finished == 0:
-            return True
+            raw = Path("/proc") / name / "stat"
+            parsed = parse_proc_stat_session(raw.read_text())
+        except OSError:
+            continue
+        if parsed is None:
+            continue
+        member_pgid, live = parsed
+        if member_pgid == pgid and live:
+            members.append(int(name))
+    return tuple(members)
 
 
 def load_supervised_profile(profile_path: Path) -> dict:
@@ -418,8 +521,8 @@ def _serve_with_restrictive_umask(config: dict, registry_path: Path) -> None:
         with drain_lock:
             if session_drained.is_set():
                 return
+            drain_owned_session()
             session_drained.set()
-        drain_owned_session()
 
     def lose_parent() -> None:
         parent_lost.set()
@@ -438,15 +541,19 @@ def _serve_with_restrictive_umask(config: dict, registry_path: Path) -> None:
         # Stop requested is not shutdown complete. SIGTERM/SIGHUP or worker
         # failure can enter an unbounded worker.join while the supervisor later
         # disappears; exiting on stop would leave parent_lost false and orphan
-        # the still-owned session.
-        while not parent_lost.is_set():
+        # the still-owned session. A failed drain must not mark completion, and
+        # this watcher keeps retrying while join remains blocked.
+        while not session_drained.is_set():
             try:
-                if parent_lifetime_lost(parent_fd):
-                    lose_parent()
-                    return
+                if not parent_lost.is_set() and not parent_lifetime_lost(parent_fd):
+                    time.sleep(0.05)
+                    continue
+                lose_parent()
             except service.ServiceError as exc:
                 failure.append(exc)
-                lose_parent()
+                parent_lost.set()
+                request_stop()
+            if session_drained.is_set():
                 return
             time.sleep(0.05)
 

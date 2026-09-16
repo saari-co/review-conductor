@@ -111,9 +111,12 @@ inherited descriptors track the leader and the complete service generation, and 
 reciprocal parent-lifetime descriptor lets the service fail closed and drain that
 still-owned session when the supervisor disappears. Entrypoint stop signals
 schedule `serve_forever` shutdown off the serving thread, and parent-loss drain
-does not wait for an in-flight worker tick. Parent-liveness supervision stays
+does not wait for an in-flight worker tick. Parent-loss observes remaining
+owned-session descendants without reaping worker-owned children, and marks that
+drain complete only after it succeeds so a signaling error can retry while
+`worker.join` is blocked. Parent-liveness supervision stays
 active after stop is requested until shutdown completes, so a later supervisor
-disappearance still performs one owned-session drain. Ingress bind does not
+disappearance still performs the owned-session drain. Ingress bind does not
 reverse-resolve the listen address, so startup cannot stall on DNS before the
 owned listener is ready. The standalone launcher also
 handles SIGHUP and waits through the supervisor's full TERM-then-KILL drain

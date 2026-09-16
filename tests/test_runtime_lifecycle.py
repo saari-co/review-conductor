@@ -53,9 +53,48 @@ PARENT_LOSS_JOIN_FIRST_DEFECT = (
     "        if parent_lost.is_set():\n"
     "            drain_owned_session()\n"
 )
-WATCH_PARENT_UNTIL_SHUTDOWN_ANCHOR = "        while not parent_lost.is_set():\n"
+WATCH_PARENT_UNTIL_SHUTDOWN_ANCHOR = "        while not session_drained.is_set():\n"
 WATCH_PARENT_EXITS_ON_STOP_DEFECT = (
-    "        while not stop.is_set() and not parent_lost.is_set():\n"
+    "        while not stop.is_set() and not session_drained.is_set():\n"
+)
+OWNED_CHILDREN_OBSERVE_ANCHOR = (
+    "def _owned_children_remain() -> bool:\n"
+    "    \"\"\"Observe live owned-session descendants without reaping any child.\"\"\"\n"
+    "    pid = os.getpid()\n"
+    "    pgid = os.getpgrp()\n"
+    "    try:\n"
+    "        members = _owned_session_members(pgid)\n"
+    "    except service.ServiceError:\n"
+    "        return True\n"
+    "    return any(\n"
+    "        member != pid and not _exited_unreaped_child(member) for member in members\n"
+    "    )\n"
+)
+OWNED_CHILDREN_WAITPID_DEFECT = (
+    "def _owned_children_remain() -> bool:\n"
+    "    while True:\n"
+    "        try:\n"
+    "            finished, _status = os.waitpid(-1, os.WNOHANG)\n"
+    "        except ChildProcessError:\n"
+    "            return False\n"
+    "        if finished == 0:\n"
+    "            return True\n"
+)
+DRAIN_ONCE_AFTER_SUCCESS_ANCHOR = (
+    "    def drain_once() -> None:\n"
+    "        with drain_lock:\n"
+    "            if session_drained.is_set():\n"
+    "                return\n"
+    "            drain_owned_session()\n"
+    "            session_drained.set()\n"
+)
+DRAIN_ONCE_MARK_BEFORE_DEFECT = (
+    "    def drain_once() -> None:\n"
+    "        with drain_lock:\n"
+    "            if session_drained.is_set():\n"
+    "                return\n"
+    "            session_drained.set()\n"
+    "        drain_owned_session()\n"
 )
 CONTEXTLIB_IMPORT_ANCHOR = "import contextlib\nfrom contextlib import contextmanager\n"
 CONTEXTLIB_IMPORT_DEFECT = "from contextlib import contextmanager\n"
@@ -152,6 +191,7 @@ state_root = sys.argv[2]
 status_fd = int(sys.argv[3])
 blocked = sys.argv[4] == "blocked"
 resistant = sys.argv[5] == "resistant"
+drain_mode = sys.argv[6] if len(sys.argv) > 6 else "normal"
 entry.OWNED_GENERATION_SHUTDOWN_SECONDS = 0.35
 state = Path(state_root)
 state.mkdir(parents=True, exist_ok=True)
@@ -224,8 +264,61 @@ with patch.object(entry, "load_supervised_profile", return_value=config), patch.
 ), patch.object(
     runtime, "BoundedHTTPServer", ReportingServer
 ):
+    real_drain = entry.drain_owned_session
+    def wrapped_drain(*args, **kwargs):
+        path = state / "drain-attempts"
+        attempt = int(path.read_text()) if path.exists() else 0
+        path.write_text(str(attempt + 1))
+        if drain_mode == "fail-once" and attempt == 0:
+            raise entry.service.ServiceError(
+                "owned service generation could not be signaled"
+            )
+        return real_drain(*args, **kwargs)
+    entry.drain_owned_session = wrapped_drain
     mark("calling-serve")
     entry.serve(state / "profile.json", state / "registry.json")
+"""
+ADAPTER_CHILD_STATUS = r"""
+import os
+import subprocess
+import sys
+import threading
+import time
+
+sys.path.insert(0, sys.argv[1])
+import service_entrypoint as entry
+
+status_fd = int(sys.argv[2])
+waitpid_calls = []
+real_waitpid = os.waitpid
+
+def tracked_waitpid(*args, **kwargs):
+    waitpid_calls.append(args)
+    return real_waitpid(*args, **kwargs)
+
+os.waitpid = tracked_waitpid
+started = threading.Event()
+result = {"rc": None}
+
+def worker():
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time, sys; time.sleep(0.2); sys.exit(17)"]
+    )
+    started.set()
+    # Delay the owning wait until after a concurrent waitpid(-1) reaper would
+    # have stolen the status. The repaired observer must leave 17 intact.
+    time.sleep(0.45)
+    result["rc"] = child.wait()
+
+thread = threading.Thread(target=worker)
+thread.start()
+started.wait(timeout=2)
+entry.drain_owned_session(timeout=1.0, kill_group=lambda _pgid, _signum: None)
+thread.join(timeout=2)
+os.write(
+    status_fd,
+    f"{result['rc']} {int(any(args and args[0] == -1 for args in waitpid_calls))}\n".encode(),
+)
 """
 
 
@@ -338,7 +431,9 @@ class RuntimeLifecycleTests(unittest.TestCase):
         source.write_text(text)
         return destination / "tools"
 
-    def spawn_entrypoint_service(self, *, blocked: bool, resistant: bool = False, tools=None):
+    def spawn_entrypoint_service(
+        self, *, blocked: bool, resistant: bool = False, tools=None, drain_mode="normal"
+    ):
         parent_read, parent_write = os.pipe()
         status_read, status_write = os.pipe()
         self.addCleanup(lambda fd=status_read: supervisor._close_descriptor(fd))
@@ -358,6 +453,7 @@ class RuntimeLifecycleTests(unittest.TestCase):
                     str(status_write),
                     "blocked" if blocked else "idle",
                     "resistant" if resistant else "plain",
+                    drain_mode,
                 ],
                 env={
                     "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -591,6 +687,59 @@ os._exit(1)
         )
         self.assertEqual(result.returncode, 0)
 
+    def _adapter_child_status_under_observe(self, tools):
+        status_read, status_write = os.pipe()
+        self.addCleanup(lambda fd=status_read: supervisor._close_descriptor(fd))
+        error_path = self.root / "adapter-child.err"
+        error_file = error_path.open("wb")
+        self.addCleanup(error_file.close)
+        try:
+            process = subprocess.Popen(
+                [sys.executable, "-c", ADAPTER_CHILD_STATUS, str(tools), str(status_write)],
+                pass_fds=(status_write,),
+                start_new_session=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=error_file,
+            )
+        finally:
+            os.close(status_write)
+        finished = process.wait(timeout=3)
+        error_file.flush()
+        self.assertEqual(finished, 0, error_path.read_text() if error_path.exists() else "")
+        try:
+            readable, _, _ = select_ready(status_read, 2)
+            self.assertEqual(readable, [status_read])
+            raw = os.read(status_read, 32).decode().split()
+        finally:
+            os.close(status_read)
+        return int(raw[0]), int(raw[1])
+
+    def test_baseline_waitpid_reaper_falsifies_adapter_exit_status(self):
+        tools = self._mutated_tools(
+            "tools/service_entrypoint.py",
+            OWNED_CHILDREN_OBSERVE_ANCHOR,
+            OWNED_CHILDREN_WAITPID_DEFECT,
+        )
+        returncode, used_waitpid = self._adapter_child_status_under_observe(tools)
+        self.assertEqual(used_waitpid, 1)
+        self.assertEqual(returncode, 0)
+        self.assertNotEqual(returncode, 17)
+
+    def test_owned_session_observation_preserves_adapter_exit_status(self):
+        returncode, used_waitpid = self._adapter_child_status_under_observe(TOOLS)
+        self.assertEqual(used_waitpid, 0)
+        self.assertEqual(returncode, 17)
+
+    def test_proc_stat_parser_reads_pgid_and_rejects_zombies(self):
+        live = entrypoint.parse_proc_stat_session(
+            "10 (python 3.14) S 1 99 99 0 10 0"
+        )
+        zombie = entrypoint.parse_proc_stat_session("11 (python) Z 1 99 99 0 11 0")
+        self.assertEqual(live, (99, True))
+        self.assertEqual(zombie, (99, False))
+        self.assertIsNone(entrypoint.parse_proc_stat_session("broken"))
+
     def test_standalone_outer_budget_exceeds_supervisor_drain_blocks_stays_legacy(self):
         self.assertEqual(launcher.LEGACY_CHILD_STOP_SECONDS, 10)
         self.assertEqual(
@@ -725,9 +874,11 @@ os._exit(1)
         with self.assertRaises(ProcessLookupError):
             os.kill(pid, 0)
 
-    def _blocked_serving_loop_after_graceful_stop(self, *, tools=None):
+    def _blocked_serving_loop_after_graceful_stop(self, *, tools=None, drain_mode="normal"):
         process, parent_write, pid, pgid, port, lock_path, state_root = (
-            self.spawn_entrypoint_service(blocked=True, resistant=True, tools=tools)
+            self.spawn_entrypoint_service(
+                blocked=True, resistant=True, tools=tools, drain_mode=drain_mode
+            )
         )
         self._assert_listener_accepts(port)
         self.assertFalse(_lock_released(lock_path))
@@ -776,6 +927,45 @@ os._exit(1)
             message="stop-then-parent-loss session drain",
         )
         _wait_until(lambda: _group_absent(pgid), timeout=4, message="blocked join generation drain")
+        self.assertTrue(_port_free(port))
+        self.assertTrue(_lock_released(lock_path))
+        self.assertFalse((state_root / "tick-finished").exists())
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+
+    def test_baseline_drain_once_marks_complete_before_success_skips_retry(self):
+        tools = self._mutated_tools(
+            "tools/service_entrypoint.py",
+            DRAIN_ONCE_AFTER_SUCCESS_ANCHOR,
+            DRAIN_ONCE_MARK_BEFORE_DEFECT,
+        )
+        process, parent_write, pid, pgid, _port, lock_path, state_root = (
+            self._blocked_serving_loop_after_graceful_stop(
+                tools=tools, drain_mode="fail-once"
+            )
+        )
+        os.close(parent_write)
+        time.sleep(1.0)
+        self.assertIsNone(process.poll())
+        self.assertFalse(_lock_released(lock_path))
+        self.assertFalse(_group_absent(pgid))
+        self.assertEqual((state_root / "drain-attempts").read_text(), "1")
+        self.assertFalse((state_root / "tick-finished").exists())
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, 0)
+
+    def test_drain_once_retries_signaling_error_on_blocked_join(self):
+        process, parent_write, pid, pgid, port, lock_path, state_root = (
+            self._blocked_serving_loop_after_graceful_stop(drain_mode="fail-once")
+        )
+        os.close(parent_write)
+        _wait_until(
+            lambda: process.poll() is not None,
+            timeout=4,
+            message="retried drain after signaling error",
+        )
+        _wait_until(lambda: _group_absent(pgid), timeout=4, message="retried session drain")
+        self.assertGreaterEqual(int((state_root / "drain-attempts").read_text()), 2)
         self.assertTrue(_port_free(port))
         self.assertTrue(_lock_released(lock_path))
         self.assertFalse((state_root / "tick-finished").exists())
@@ -887,6 +1077,18 @@ class MutationTests(unittest.TestCase):
             SERVER_BIND_ANCHOR,
             SERVER_BIND_DEFECT,
             "test_runtime_lifecycle.RuntimeLifecycleTests.test_bounded_http_server_bind_does_not_wait_on_reverse_dns",
+        ),
+        (
+            "tools/service_entrypoint.py",
+            OWNED_CHILDREN_OBSERVE_ANCHOR,
+            OWNED_CHILDREN_WAITPID_DEFECT,
+            "test_runtime_lifecycle.RuntimeLifecycleTests.test_owned_session_observation_preserves_adapter_exit_status",
+        ),
+        (
+            "tools/service_entrypoint.py",
+            DRAIN_ONCE_AFTER_SUCCESS_ANCHOR,
+            DRAIN_ONCE_MARK_BEFORE_DEFECT,
+            "test_runtime_lifecycle.RuntimeLifecycleTests.test_drain_once_retries_signaling_error_on_blocked_join",
         ),
     )
 

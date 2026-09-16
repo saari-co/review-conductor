@@ -67,10 +67,15 @@ and drains its still-owned session instead of remaining a listening orphan.
 Entrypoint SIGINT/SIGTERM/SIGHUP request shutdown on a helper thread so the
 serving loop cannot deadlock, and parent-loss uses a bounded full-session drain
 that does not wait for an in-flight worker tick or admit further work.
+That drain observes remaining owned-session descendants without reaping
+worker-owned children, so adapter `subprocess.run` exit status stays intact, and
+it is marked complete only after the owned-session drain succeeds. A signaling
+error leaves the drain incomplete so the watcher can retry, including while
+`worker.join` is blocked.
 Parent-liveness supervision continues after stop is requested until shutdown
 actually completes; if the supervisor write end closes while worker.join is
 still blocked, the service still drains its owned listener, lock, and
-generation once. Ingress bind records the listen host and port without
+generation. Ingress bind records the listen host and port without
 reverse-resolving through `getfqdn`, so macOS mDNS cannot stall readiness
 before the owned listener exists.
 Standalone launcher stop waits through the supervisor drain budget and treats

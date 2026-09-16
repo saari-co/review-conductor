@@ -31,7 +31,7 @@
   on reverse DNS before the owned listener is ready. The 1Password-aware launcher now has a
   source-only `standalone` path: `preflight` validates registry/bootstrap only,
   `start` forwards inherited webhook/App descriptors into that supervisor, waits
-  through the supervisor drain budget via `stop_standalone_child`, and treats SIGHUP as orderly stop, and
+  through the supervisor drain budget via `stop_standalone_child`, treats SIGHUP as orderly stop, and
   `health` only queries it. Neither path is installed, and neither starts a
   tunnel. This source repair is not a deployed host change. A launchd unit
   remains root-owned and external; this repository does not add a service
