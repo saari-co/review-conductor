@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 from contextlib import contextmanager
 import fcntl
 import hashlib
@@ -10,11 +11,14 @@ import hmac
 import json
 import os
 from pathlib import Path
+import select
+import signal
 import sqlite3
 import stat
 import sys
 import threading
-from typing import Iterable
+import time
+from typing import Any, Callable, Iterable
 
 import review_conductor as core
 import review_conductor_profiles as profiles
@@ -28,6 +32,11 @@ REGISTRY_MODE = 0o600
 PROFILE_DIGEST_ENV = "REVIEW_CONDUCTOR_EXPECTED_PROFILE_SHA256"
 GENERATION_FD_ENV = "REVIEW_CONDUCTOR_GENERATION_FD"
 LEADER_FD_ENV = "REVIEW_CONDUCTOR_LEADER_FD"
+PARENT_LIFETIME_FD_ENV = "REVIEW_CONDUCTOR_PARENT_LIFETIME_FD"
+OWNED_GENERATION_SHUTDOWN_SECONDS = 10
+STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+_PROC_PGRP_ONLY = 2
+_darwin_libc = None
 
 
 def profile_config_digest(config: dict) -> str:
@@ -36,15 +45,202 @@ def profile_config_digest(config: dict) -> str:
     ).hexdigest()
 
 
+def _require_inherited_descriptor(raw: str | None, label: str) -> int:
+    if raw is None or not raw.isascii() or not raw.isdigit() or int(raw) < 3:
+        raise service.ServiceError(f"{label} is unavailable")
+    descriptor = int(raw)
+    try:
+        os.fstat(descriptor)
+    except OSError as exc:
+        raise service.ServiceError(f"{label} is unavailable") from exc
+    return descriptor
+
+
+def parent_lifetime_lost(parent_fd: int) -> bool:
+    """Return true only after the supervisor's parent-lifetime write end closes."""
+    try:
+        readable, _, _ = select.select([parent_fd], [], [], 0)
+        if not readable:
+            return False
+        value = os.read(parent_fd, 1)
+    except OSError as exc:
+        raise service.ServiceError("service parent-lifetime descriptor is unavailable") from exc
+    if value:
+        raise service.ServiceError("service parent-lifetime descriptor was corrupted")
+    return True
+
+
+def drain_owned_session(
+    timeout: float | None = None,
+    *,
+    kill_group: Callable[[int, int], None] | None = None,
+) -> None:
+    """Bound-drain this process session only while it still owns the group."""
+    if timeout is None:
+        timeout = OWNED_GENERATION_SHUTDOWN_SECONDS
+    if kill_group is None:
+        kill_group = os.killpg
+    pid = os.getpid()
+    pgid = os.getpgrp()
+    if pgid != pid:
+        raise service.ServiceError("service is not the owned session leader")
+    try:
+        kill_group(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except OSError as exc:
+        raise service.ServiceError("owned service generation could not be signaled") from exc
+    deadline = time.monotonic() + timeout
+    while _owned_children_remain() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    # Parent-loss cannot observe the supervisor's generation-read EOF, so always
+    # escalate while this process still owns the session. A reparented or
+    # TERM-resistant descendant stays in that group until SIGKILL.
+    try:
+        kill_group(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    except OSError as exc:
+        raise service.ServiceError("owned service generation could not be signaled") from exc
+    kill_deadline = time.monotonic() + timeout
+    while _owned_children_remain() and time.monotonic() < kill_deadline:
+        time.sleep(0.05)
+
+
+def _owned_children_remain() -> bool:
+    """Observe live owned-session descendants without reaping any child."""
+    pid = os.getpid()
+    pgid = os.getpgrp()
+    try:
+        members = _owned_session_members(pgid)
+    except service.ServiceError:
+        return True
+    return any(
+        member != pid and not _exited_unreaped_child(member) for member in members
+    )
+
+
+def parse_proc_stat_session(raw: str) -> tuple[int, bool] | None:
+    """Return (pgid, live) from a Linux /proc/<pid>/stat line, or None."""
+    comm_end = raw.rfind(")")
+    if comm_end < 0:
+        return None
+    rest = raw[comm_end + 2 :].split()
+    if len(rest) < 3:
+        return None
+    try:
+        pgid = int(rest[2])
+    except ValueError:
+        return None
+    return pgid, rest[0] != "Z"
+
+
+def _exited_unreaped_child(pid: int) -> bool:
+    """True when this process still owns an exited, unreaped child at pid."""
+    waitid = getattr(os, "waitid", None)
+    if waitid is None:
+        return False
+    try:
+        result = waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    except (ChildProcessError, ProcessLookupError, OSError):
+        return False
+    # Python returns None when no child matches; do not treat a missing
+    # C zeroed siginfo as live-child evidence, and never waitpid(-1).
+    return result is not None
+
+
+def remember_first_failure(failure: list[BaseException], exc: BaseException) -> None:
+    """Retain the first fail-closed error; retries must not accumulate tracebacks."""
+    if not failure:
+        failure.append(exc)
+
+
+def _owned_session_members(pgid: int) -> tuple[int, ...]:
+    if sys.platform == "darwin":
+        return _darwin_session_members(pgid)
+    if os.path.isdir("/proc"):
+        return _procfs_session_members(pgid)
+    raise service.ServiceError("owned session members cannot be observed")
+
+
+def _darwin_libc_handle():
+    global _darwin_libc
+    if _darwin_libc is None:
+        import ctypes
+        import ctypes.util
+
+        name = ctypes.util.find_library("c")
+        if name is None:
+            raise service.ServiceError("owned session members cannot be observed")
+        libc = ctypes.CDLL(name, use_errno=True)
+        libc.proc_listpids.argtypes = [
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_int,
+        ]
+        libc.proc_listpids.restype = ctypes.c_int
+        _darwin_libc = libc
+    return _darwin_libc
+
+
+def _darwin_session_members(pgid: int) -> tuple[int, ...]:
+    import ctypes
+
+    libc = _darwin_libc_handle()
+    needed = libc.proc_listpids(_PROC_PGRP_ONLY, pgid, None, 0)
+    if needed < 0:
+        raise service.ServiceError("owned session members cannot be observed")
+    if needed == 0:
+        return ()
+    count = max(1, needed // ctypes.sizeof(ctypes.c_int))
+    buf = (ctypes.c_int * count)()
+    written = libc.proc_listpids(
+        _PROC_PGRP_ONLY, pgid, ctypes.cast(buf, ctypes.c_void_p), ctypes.sizeof(buf)
+    )
+    if written < 0:
+        raise service.ServiceError("owned session members cannot be observed")
+    n = written // ctypes.sizeof(ctypes.c_int)
+    return tuple(member for member in buf[:n] if member > 0)
+
+
+def _procfs_session_members(pgid: int) -> tuple[int, ...]:
+    try:
+        names = os.listdir("/proc")
+    except OSError as exc:
+        raise service.ServiceError("owned session members cannot be observed") from exc
+    members = []
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            raw = Path("/proc") / name / "stat"
+            parsed = parse_proc_stat_session(raw.read_text())
+        except OSError:
+            continue
+        if parsed is None:
+            continue
+        member_pgid, live = parsed
+        if member_pgid == pgid and live:
+            members.append(int(name))
+    return tuple(members)
+
+
 def load_supervised_profile(profile_path: Path) -> dict:
     """Load exactly the profile configuration approved by the supervisor."""
     expected = os.environ.get(PROFILE_DIGEST_ENV)
     generation_raw = os.environ.get(GENERATION_FD_ENV)
     leader_raw = os.environ.get(LEADER_FD_ENV)
+    parent_raw = os.environ.get(PARENT_LIFETIME_FD_ENV)
     config = userland.load_config(profile_path)
-    if expected is None and generation_raw is None and leader_raw is None:
+    if (
+        expected is None
+        and generation_raw is None
+        and leader_raw is None
+        and parent_raw is None
+    ):
         # Direct source qualification and maintenance callers have no supervisor
-        # identity to compare. The standalone supervisor always supplies both.
+        # identity to compare. The standalone supervisor always supplies all four.
         return config
     if (
         expected is None
@@ -53,30 +249,22 @@ def load_supervised_profile(profile_path: Path) -> dict:
         or any(character not in "0123456789abcdef" for character in expected)
     ):
         raise service.ServiceError("expected supervised profile digest is unavailable")
-    if (
-        generation_raw is None
-        or not generation_raw.isascii()
-        or not generation_raw.isdigit()
-        or int(generation_raw) < 3
-    ):
-        raise service.ServiceError("service generation descriptor is unavailable")
+    _require_inherited_descriptor(generation_raw, "service generation descriptor")
     try:
-        os.fstat(int(generation_raw))
-    except OSError as exc:
-        raise service.ServiceError("service generation descriptor is unavailable") from exc
-    if (
-        leader_raw is None
-        or not leader_raw.isascii()
-        or not leader_raw.isdigit()
-        or int(leader_raw) < 3
-    ):
-        raise service.ServiceError("service leader descriptor is unavailable")
-    try:
-        leader_fd = int(leader_raw)
-        os.fstat(leader_fd)
+        leader_fd = _require_inherited_descriptor(
+            leader_raw, "service leader descriptor"
+        )
         os.set_inheritable(leader_fd, False)
     except OSError as exc:
         raise service.ServiceError("service leader descriptor is unavailable") from exc
+    try:
+        parent_fd = _require_inherited_descriptor(
+            parent_raw, "service parent-lifetime descriptor"
+        )
+        os.set_inheritable(parent_fd, False)
+        os.set_blocking(parent_fd, False)
+    except OSError as exc:
+        raise service.ServiceError("service parent-lifetime descriptor is unavailable") from exc
     actual = profile_config_digest(config)
     if not hmac.compare_digest(actual, expected):
         raise service.ServiceError("service profile changed after supervisor validation")
@@ -316,16 +504,82 @@ def _serve_with_restrictive_umask(config: dict, registry_path: Path) -> None:
     client = userland.build_client(config)
     notifier = userland.OpenClawNotifier(config)
     stop = threading.Event()
+    parent_lost = threading.Event()
+    session_drained = threading.Event()
+    drain_lock = threading.Lock()
+    shutdown_helper = threading.Lock()
     failure: list[BaseException] = []
     server = None
+    parent_raw = os.environ.get(PARENT_LIFETIME_FD_ENV)
+    parent_fd = None if parent_raw is None else int(parent_raw)
+    previous_handlers: dict[int, Any] = {}
+
+    def request_stop(_signum: int | None = None, _frame: Any = None) -> None:
+        stop.set()
+        current = server
+        # One-shot acquire: repeated lose_parent retries must not start another
+        # helper every 50 ms. Non-blocking so a signal during the first call
+        # cannot deadlock. Still off-thread so serve_forever cannot deadlock.
+        if current is not None and shutdown_helper.acquire(blocking=False):
+            threading.Thread(
+                target=current.shutdown,
+                name="review-conductor-shutdown",
+                daemon=True,
+            ).start()
+
+    def drain_once() -> None:
+        with drain_lock:
+            if session_drained.is_set():
+                return
+            drain_owned_session()
+            session_drained.set()
+
+    def lose_parent() -> None:
+        parent_lost.set()
+        request_stop()
+        current = server
+        if current is not None:
+            with contextlib.suppress(OSError):
+                current.server_close()
+        # Drain here, not only in finally: a requested stop may already be
+        # blocked in worker.join(), so finally cannot take the parent-loss path.
+        drain_once()
+
+    def watch_parent() -> None:
+        if parent_fd is None:
+            return
+        # Stop requested is not shutdown complete. SIGTERM/SIGHUP or worker
+        # failure can enter an unbounded worker.join while the supervisor later
+        # disappears; exiting on stop would leave parent_lost false and orphan
+        # the still-owned session. A failed drain must not mark completion, and
+        # this watcher keeps retrying while join remains blocked.
+        while not session_drained.is_set():
+            try:
+                if not parent_lost.is_set() and not parent_lifetime_lost(parent_fd):
+                    time.sleep(0.05)
+                    continue
+                lose_parent()
+            except service.ServiceError as exc:
+                remember_first_failure(failure, exc)
+                parent_lost.set()
+                request_stop()
+            if session_drained.is_set():
+                return
+            time.sleep(0.05)
+
     worker = threading.Thread(
-        target=lambda: _worker_loop(config, provide_registry, client, notifier, stop, failure, lambda: server),
+        target=lambda: _worker_loop(
+            config, provide_registry, client, notifier, stop, failure, lambda: server, parent_lost
+        ),
         name="review-conductor-service",
         daemon=False,
     )
     try:
         # Bind ingress before any worker exists so a failed startup cannot leave a
         # detached worker draining actions, publishing checks or notifying.
+        if parent_fd is not None:
+            for signum in STOP_SIGNALS:
+                previous_handlers[signum] = signal.signal(signum, request_stop)
         handler = service.build_service_http_handler(
             config,
             secret=webhook_secret,
@@ -337,17 +591,40 @@ def _serve_with_restrictive_umask(config: dict, registry_path: Path) -> None:
             handler,
             request_timeout_seconds=config["ingress"]["request_timeout_seconds"],
         )
+        if parent_fd is not None:
+            threading.Thread(
+                target=watch_parent,
+                name="review-conductor-parent-lifetime",
+                daemon=True,
+            ).start()
         worker.start()
-        server.serve_forever(poll_interval=0.5)
+        if not stop.is_set() and not parent_lost.is_set():
+            server.serve_forever(poll_interval=0.5)
     finally:
         stop.set()
         if server is not None:
             server.server_close()
-        if worker.is_alive():
+        if parent_lost.is_set():
+            # Parent-loss drain is independent of the worker. An in-flight adapter
+            # or TERM-resistant descendant must not delay the session reap after
+            # the original supervisor is already gone.
+            drain_once()
+        elif worker.is_alive():
             # A tick may be inside a bounded external adapter operation far longer
             # than the polling interval. Never return while that worker still owns
             # a claim or subprocess; its adapter timeout remains the upper bound.
             worker.join()
+        if parent_lost.is_set():
+            # Exit fence: parent EOF during join, or the worker returning while
+            # the daemon watcher is still draining, must not restore handlers or
+            # return and orphan remaining descendants. Retry signaling errors.
+            while not session_drained.is_set():
+                try:
+                    drain_once()
+                except service.ServiceError:
+                    time.sleep(0.05)
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
         webhook_secret = ""
     if failure:
         # The worker stopped the service; surface its operational failure instead of
@@ -355,8 +632,8 @@ def _serve_with_restrictive_umask(config: dict, registry_path: Path) -> None:
         raise ServiceStopped("worker failed; service stopped") from failure[0]
 
 
-def _worker_loop(config, provide_registry, client, notifier, stop, failure, get_server) -> None:
-    while not stop.is_set():
+def _worker_loop(config, provide_registry, client, notifier, stop, failure, get_server, parent_lost=None) -> None:
+    while not stop.is_set() and (parent_lost is None or not parent_lost.is_set()):
         try:
             service.run_service_tick(
                 config, provide_registry, client, notifier, dry_run=False
@@ -370,6 +647,8 @@ def _worker_loop(config, provide_registry, client, notifier, stop, failure, get_
             server = get_server()
             if server is not None:
                 server.shutdown()
+            return
+        if parent_lost is not None and parent_lost.is_set():
             return
         if stop.wait(config["worker"]["tick_seconds"]):
             return

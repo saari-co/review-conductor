@@ -32,6 +32,7 @@ import urllib.request
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from socketserver import TCPServer
 from typing import Any, Callable
 
 
@@ -3022,6 +3023,13 @@ class BoundedHTTPServer(ThreadingHTTPServer):
         self._capacity = threading.BoundedSemaphore(max_clients)
         self._request_timeout_seconds = request_timeout_seconds
         super().__init__(*args, **kwargs)
+
+    def server_bind(self) -> None:
+        # Ingress readiness must not wait on reverse DNS (macOS mDNS).
+        TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host or "127.0.0.1"
+        self.server_port = port
 
     def get_request(self) -> tuple[Any, Any]:
         request, client_address = super().get_request()

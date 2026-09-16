@@ -107,7 +107,26 @@ descriptors after creating verified anonymous copies, rewinds those copies befor
 each explicit child start, and closes them plus the socket on every exit path.
 The service starts in its own process session; stop and restart signal that owned
 process group independently of whether the leader has already exited. Distinct
-inherited descriptors track the leader and the complete service generation. The
+inherited descriptors track the leader and the complete service generation, and a
+reciprocal parent-lifetime descriptor lets the service fail closed and drain that
+still-owned session when the supervisor disappears. Entrypoint stop signals
+schedule `serve_forever` shutdown off the serving thread, and parent-loss drain
+does not wait for an in-flight worker tick. Parent-loss observes remaining
+owned-session descendants without reaping worker-owned children, and marks that
+drain complete only after it succeeds so a signaling error can retry while
+`worker.join` is blocked. Main does not return until that drain completes,
+including when EOF arrives during join and the worker then returns; repeated
+parent-loss retries schedule the HTTP shutdown helper once and retain only the
+first signaling failure. Parent-liveness supervision stays
+active after stop is requested until shutdown completes, so a later supervisor
+disappearance still performs the owned-session drain. Ingress bind does not
+reverse-resolve the listen address, so startup cannot stall on DNS before the
+owned listener is ready. The standalone launcher also
+handles SIGHUP and waits through the supervisor's full TERM-then-KILL drain
+budget via `stop_standalone_child`; legacy Blocks `start` keeps
+`stop_child`'s original ten-second default. The helper is the one installed
+conductor-stop adaptation; it is not a service-manager API, and no launchd
+unit is stored in Git. The
 leader descriptor is made close-on-exec by the entrypoint, so every supported
 host can report leader exit without reaping and releasing its process-group
 identity. Every direct adapter subprocess is launched through the generation

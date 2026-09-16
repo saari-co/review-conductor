@@ -23,6 +23,7 @@ test:
 	$(PYTHON) -m unittest discover -s tests -p 'test_launcher_transport.py' -v
 	$(PYTHON) -m unittest discover -s tests -p 'test_suite_activation_launcher.py' -v
 	$(PYTHON) -m unittest discover -s tests -p 'test_standalone_supervisor.py' -v
+	$(PYTHON) -m unittest discover -s tests -p 'test_runtime_lifecycle.py' -v
 	$(PYTHON) -m unittest discover -s tests -p 'test_workflow_contract.py' -v
 
 build:
