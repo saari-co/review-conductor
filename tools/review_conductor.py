@@ -47,7 +47,7 @@ INTERNAL_EVENT_FIELDS = {
     "clawsweeper.started": ({"workflow_run_id"}, set()),
     "clawsweeper.terminal": (
         {"workflow_run_id", "result", "finding_count", "reviewer_actor", "proof_ref"},
-        set(),
+        {"proof_sha256"},
     ),
 }
 
@@ -1537,6 +1537,9 @@ def validate_internal_event(config: dict[str, Any], event: dict[str, Any]) -> di
         if not isinstance(run_id, (str, int)) or isinstance(run_id, bool) or not str(run_id):
             raise ContractError("ClawSweeper workflow_run_id is required")
     if event_type.endswith(".terminal"):
+        if "proof_sha256" in event and (not isinstance(event["proof_sha256"], str) or
+                                       re.fullmatch(r"[0-9a-f]{64}", event["proof_sha256"]) is None):
+            raise ContractError("proof_sha256 must be lowercase SHA-256")
         if event.get("result") not in TERMINAL_RESULTS:
             raise ContractError("terminal result must be clean, findings, failed, or human_gate")
         require_text(event.get("proof_ref"), "terminal proof_ref", 500)

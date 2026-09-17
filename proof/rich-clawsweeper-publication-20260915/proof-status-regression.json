@@ -1,0 +1,32 @@
+{
+  "baseline_commit": "75e5753634ab3e6d0e71ad8dd18ff397d1a9c3fe",
+  "method": "git archive in disposable directory; only updated tests/test_clawsweeper_presentation.py copied; no checkout reset/switch",
+  "test_sha256": "fa6e431d140dd119b9ccd1b540c283e2995ecd725a7a8a0313c6e5e88c8b4204",
+  "command": [
+    "python3",
+    "tests/test_clawsweeper_presentation.py",
+    "PresentationTests.test_exact_native_proof_status_contract",
+    "PresentationTests.test_noncontract_proof_status_rejected_before_verdict_precedence",
+    "ArtifactPublicationTests.test_mock_only_bundle_materialization_rich_publication_and_idempotency",
+    "ArtifactPublicationTests.test_override_bundle_materialization_rich_publication_and_idempotency",
+    "ArtifactPublicationTests.test_noncontract_status_with_findings_rejected_before_materialization"
+  ],
+  "baseline": {
+    "returncode": 1,
+    "tests": 5,
+    "failures": 21,
+    "errors": 2,
+    "observations": [
+      "mock_only and override fail accepted-bundle collection before materialization",
+      "obsolete not_needed/failed/required statuses accepted",
+      "unknown statuses bypassed by terminal failure/findings/maintainer/contributor precedence",
+      "required status with findings incorrectly materialized"
+    ]
+  },
+  "fixed": {
+    "returncode": 0,
+    "tests": 5,
+    "result": "PASS"
+  },
+  "scope": "mocked synthetic evidence only; no live service/GitHub publication or external rereview"
+}

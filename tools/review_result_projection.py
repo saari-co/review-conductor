@@ -16,6 +16,7 @@ import urllib.parse
 from typing import Any
 
 import review_conductor as core
+import clawsweeper_presentation as native
 
 
 CONTENT_CLEAN = "clean"
@@ -40,8 +41,9 @@ KNOWN_PROCESS_GATES = frozenset({PROCESS_OWN_CHECK, PROCESS_OWNER_MERGE})
 RAIL_RESULTS = frozenset({"clean", "findings", "failed", "human_gate"})
 KNOWN_DECISIONS = frozenset({"keep_open", "close", "none"})
 READY_OVERALL_TIERS = frozenset({"S", "A", "B"})
-NONBLOCKING_PROOF_STATUSES = frozenset({"sufficient", "not_applicable", "not_needed"})
-DEFICIENT_PROOF_STATUSES = frozenset({"insufficient", "missing", "failed", "required"})
+# Native override is existing producer proof evidence, never merge authorization.
+NONBLOCKING_PROOF_STATUSES = frozenset({"sufficient", "not_applicable", "override"})
+DEFICIENT_PROOF_STATUSES = native.PROOF_STATUSES - NONBLOCKING_PROOF_STATUSES
 
 CONDUCTOR_ISSUER_APP_ID = 4916376
 CHECK_NAMES = ("OpenClaw Review Rail", "ClawSweeper Review Rail")
@@ -53,6 +55,8 @@ OWNED_LABELS = {
     "status: 📣 needs proof": CONTENT_PROOF_DEFICIENT,
     "status: needs maintainer proof decision": CONTENT_HUMAN_POLICY,
 }
+# Status semantics stay separate from native evaluation metadata.
+PUBLICATION_LABELS = frozenset(OWNED_LABELS) | native.NATIVE_LABELS
 LABEL_FOR_CONTENT = {kind: name for name, kind in OWNED_LABELS.items()}
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -173,6 +177,9 @@ def classify_native_review(
         raise ProjectionError("finding_count must be a non-negative integer")
     decision = parse_optional_decision(decision)
     typed_gates = parse_process_gates(process_gates)
+    # Validate the native contract even when a higher-precedence defect exists.
+    if not isinstance(proof_status, str) or proof_status not in native.PROOF_STATUSES:
+        raise ProjectionError("proof_status is not a validated native value")
 
     if terminal_failure:
         return _classification(CONTENT_FAILED, (), "failed", decision)
@@ -182,9 +189,6 @@ def classify_native_review(
         return _classification(CONTENT_HUMAN_POLICY, (), "human_gate", decision)
     if needs_contributor_action or proof_status in DEFICIENT_PROOF_STATUSES:
         return _classification(CONTENT_PROOF_DEFICIENT, (), "human_gate", decision)
-    if proof_status not in NONBLOCKING_PROOF_STATUSES:
-        raise ProjectionError("proof_status is not a validated non-blocking or deficient value")
-
     content_ready = overall_tier in READY_OVERALL_TIERS
     if not content_ready:
         if typed_gates and PROCESS_OWN_CHECK in typed_gates:
@@ -428,6 +432,7 @@ def render_projection_comment(
     stage: str,
     reason: str,
     workflow_run_id: Any = None,
+    native_report: dict[str, Any] | None = None,
 ) -> str:
     run_url = workflow_run_url(identity["repository"], workflow_run_id)
     digest = identity["artifact_digest"]
@@ -454,7 +459,24 @@ def render_projection_comment(
             "",
         ]
     )
-    return body
+    if native_report is None:
+        return body + "\n_Native presentation unavailable: no accepted digest-bound publication receipt; legacy summary only._\n"
+    if any(native_report["identity"].get(key) != identity[key] for key in (
+        "repository", "pr_number", "base_sha", "head_sha", "review_epoch", "artifact_digest",
+    )):
+        raise ProjectionError("native presentation is not bound to this accepted artifact")
+    if not run_url:
+        raise ProjectionError("native presentation requires its accepted workflow run")
+    body = (f"Original accepted report: [workflow artifacts]({run_url}), "
+            f"`review/{identity['pr_number']}.md`.\n\n" + body)
+    rich = native.render(native_report)
+    combined = rich + "\n" + body
+    if len(combined.encode("utf-8")) > native.COMMENT_MAX_BYTES:
+        # Do not split Markdown/fences or imply clipped sections are complete.
+        return (native.RICH_MARKER + "\n# ClawSweeper review\n\n"
+                "Native presentation exceeds the local comment budget; no partial report is published. "
+                "Read the original accepted report in the workflow artifact below.\n\n" + body)
+    return combined
 
 
 def desired_owned_labels(content_verdict: str) -> set[str]:
@@ -473,11 +495,13 @@ def plan_github_publication(
     stage: str,
     reason: str,
     workflow_run_id: Any = None,
+    native_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if classification["merge_authorized"] is not False:
         raise ProjectionError("publication cannot authorize merge")
     body = render_projection_comment(
-        identity, classification, stage=stage, reason=reason, workflow_run_id=workflow_run_id
+        identity, classification, stage=stage, reason=reason, workflow_run_id=workflow_run_id,
+        native_report=native_report,
     )
     marker = comment_marker(identity)
     owned = owned_projection_comments(existing_comments, identity)
@@ -494,12 +518,17 @@ def plan_github_publication(
         else:
             comment_action = "update"
     desired = desired_owned_labels(classification["content_verdict"])
-    present_owned = {name for name in existing_labels if name in OWNED_LABELS}
-    foreign = [name for name in existing_labels if name not in OWNED_LABELS]
+    owned_labels = set(OWNED_LABELS)
+    if native_report is not None:
+        owned_labels.update(native.managed_labels(native_report))
+        desired.update(native_report["labels"])
+    present_owned = {name for name in existing_labels if name in owned_labels}
+    foreign = [name for name in existing_labels if name not in owned_labels]
     return {
         "schema": "smoky.review-conductor.github-publication.v1",
         "identity": identity,
         "classification": classification,
+        "native_label_families": native_report["families"] if native_report else [],
         "comment": {
             "action": comment_action,
             "id": comment_id,
@@ -612,8 +641,13 @@ def apply_github_publication(
     identity = plan["identity"]
     comment = plan["comment"]
     labels = plan["labels"]
+    allowed = set(OWNED_LABELS)
+    for family in plan.get("native_label_families", []):
+        if family not in native.FAMILIES:
+            raise ProjectionError("publication native label family is unsupported")
+        allowed.update(native.FAMILIES[family])
     for name in [*labels["add"], *labels["remove"]]:
-        if name not in OWNED_LABELS:
+        if name not in allowed:
             raise ProjectionError("publication attempted to alter an unowned label")
     if comment["action"] == "create":
         try:

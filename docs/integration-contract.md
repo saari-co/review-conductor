@@ -128,10 +128,17 @@ installed only on `openclaw-smcbd-suite`. The pilot does not require public or
 isolation decision; future repository enrollment does not inherently require a
 new App per repository.
 
-Reviewer services own their native detailed findings and comments. Only the
-Conductor publishes the authoritative rail check names after validating the
-corresponding exact-revision evidence. Accepted native results may also project
-one idempotent PR summary and ClawSweeper status labels the Conductor owns.
+Reviewer services own the original native reports and detailed findings as
+evidence. Only Conductor publishes the authoritative rail check names after
+validating the corresponding exact-revision evidence. For the native publication
+route, Conductor also solely owns one idempotent projection comment containing
+selected native public sections, its existing status labels and the explicitly
+allowlisted native rating, priority, proof/media and merge-risk label families.
+The accepted tuple/epoch/digest and current admission bind publication; native
+prose and labels do not regrade, adjudicate or alter status authority. This
+source-qualified boundary supersedes the earlier status-only/comment split;
+the [rich publication contract](#rich-native-clawsweeper-publication-source-qualified-activation-held)
+below defines its bounds and held activation gates, not deployment permission.
 Check output must name the current stage, decision reason, exact head, workflow
 run, and accepted artifact digest. Review-success is not merge authorization.
 Fence the previous writer before a cutover; never operate competing
@@ -220,6 +227,80 @@ retries creation because a link update failed. ClawSweeper retains its validated
 run/artifact links; the external report-URL allowlist is unchanged. See GitHub's
 [Checks API](https://docs.github.com/en/rest/checks/runs) for the existing
 `output.text` and `html_url` surface.
+
+## Rich native ClawSweeper publication (source-qualified; activation held)
+
+The existing Conductor-owned projection comment can now present selected public
+sections from the accepted native report: What This Changes, native overall /
+proof / patch tiers and their original themed score scale, verification/evidence,
+system context, a supplied safe Mermaid flowchart, findings, and next steps.
+The presentation does not recompute grades, classify findings, adjudicate, or
+change the four existing Conductor status-label meanings. Human-only merge is
+unchanged. Producer provenance and synthetic previews are recorded in
+[the restoration proof](../proof/rich-clawsweeper-publication-20260915/PROOF.md).
+
+Prospective ClawSweeper terminal events retain the bridge-validated optional
+`proof_sha256`. Rich publication requires this immutable accepted receipt, the
+quality digest, and the ingested workflow's exact repository/PR/base/head/epoch,
+run, proof path, scope and actor to agree. It reads the original report at the
+existing external `clawsweeper/<run>/<PR>.md` path using no-follow directory
+handles and one nonblocking regular-file descriptor, bounded to the native
+512 KiB export limit. Digest/identity verification precedes current projection
+writes. No parallel artifact store or target execution is added. Missing, changed,
+malformed or oversized accepted files block publication; old receipts without
+a retained digest and legacy Blocks profiles remain explicit compact summaries,
+not inferred historical rich reports.
+
+Only named public sections are projected. Raw frontmatter, work prompts, Close
+Comment, GitHub Snapshot and telemetry are not dumped. Native prose is quoted,
+HTML/control markers/fences/mentions are neutralized, and sections have explicit
+excerpt limits. Mermaid is only supplied native flowchart text within a bounded,
+noninteractive subset: no fabricated diagram, URLs, HTML, configuration or styling
+commands. The comment has a conservative 48 KiB local byte budget; if exceeded,
+a bounded unavailable notice replaces the rich portion rather than publishing
+broken/partial Markdown as complete. The accepted digest and workflow artifact
+link remain accessible, and full original evidence stays in the existing proof
+store and original workflow artifact.
+
+Native label ownership is separate from status authority. Explicit native fields
+select the original rating family, triage P0–P3, `proof: sufficient`, screenshot /
+video evidence labels and the eight native merge-risk labels. No free-form label
+instructions, fallback score, invented priority or `proof: override` authority
+is accepted. Missing optional metadata leaves that family unowned. Manual and
+foreign labels outside the exact activated families are preserved. Scoped POST
+add / DELETE one-label operations use the existing repository App permission and
+admission guard; there is no destructive set-label operation or label bootstrap.
+Native add/remove responses must confirm the requested result; an unavailable
+label or rejected API operation is an explicit publication failure, not success.
+Already-absent DELETE remains idempotent. See the existing GitHub
+[issue label API](https://docs.github.com/en/rest/issues/labels).
+
+Native report admission and presentation accept exactly the producer's six proof
+statuses: `sufficient`, `missing`, `mock_only`, `insufficient`, `not_applicable`,
+and `override`. Unknown and obsolete `not_needed` / `failed` / `required` proof
+values are rejected before execution-failure, findings or maintainer precedence
+can bypass validation. `mock_only` remains proof-deficient. Native `override`
+records the producer's existing maintainer-proof evidence; it is not rewritten
+as `sufficient`, cannot mint `proof: override` or `proof: sufficient`, and cannot
+remove a human-owned override label. It does not bypass actual findings,
+maintainer decisions, contributor action, rating/process gates, or human-only
+merge. Clean content retains `owner_merge_authority`. The separate enrolled
+ready-notification policy remains `sufficient`-only; neither new status qualifies
+that notification. Stored historical summaries and legacy Blocks fallback remain
+unchanged; this validation is for newly parsed native evidence, not a backfill.
+
+Before native publication writes, the existing event log durably records the
+exact tuple/digest and explicitly owned families. Repeated ticks update one
+App-owned marker-bound comment and reconcile only label deltas. Interrupted
+publication retains cleanup ownership. Closed or superseded tuples retract only
+their journaled native families and mark their owned comment historical; they
+cannot remove a foreign App's comment or non-owned labels. Existing status
+cleanup and current-tuple publication admission remain separate and unchanged.
+
+This is prospective source qualification, not deployed GitHub rendering. The
+restoration draft must remain held until Suite **#4 → #6 → #5 → #7** land, then
+be refreshed and requalified. No ready transition, reviewer dispatch, merge,
+producer change, deployment, credential or protection change is authorized here.
 
 ## Cold exact-object hydration (source-qualified)
 
