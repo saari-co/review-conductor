@@ -48,10 +48,17 @@ Conductor does not import, encode, or dispatch the x-api conveyor
 Conductor and forbids duplicate legacy dispatch. Neither enrollment ends the
 process with no review and no notification. Ambiguous or broken enrollment
 fails closed and is never treated as unenrolled. `run_tick` resolves that
-pair from service-owned enrollment and passes it into the existing
-notification queue; caller payloads cannot grant Conductor authority.
-`closed` and `closed_merged` are terminal non-dispatchable states on every
-direct and service-loop routing path.
+pair from service-owned enrollment at tick start. Hydration, action
+draining, result collection, and review stages run only when the trusted
+route is `review_conductor`. Dual enrollment selects Review Conductor;
+legacy-only, unenrolled, and broken routes stay real runtime behavior and
+never dispatch x-api. The existing notification queue still consumes the
+current-head decision; pending rows are revalidated against the current
+head and trusted enrollment before claim or send, and ineligible rows are
+retired. Caller payloads cannot grant Conductor authority. `closed` and
+`closed_merged` are terminal silent non-dispatchable states on every
+direct and service-loop path, including when trusted enrollment is
+broken; closed-state handling precedes enrollment short-circuits.
 
 The existing notification queue consumes that outcome. It does not invent a
 second sender. `repair_required` and `awaiting_adjudication` without a genuine

@@ -1333,10 +1333,9 @@ class AdmissionIngressTests(unittest.TestCase):
         with patch.object(userland, "run_tick", fake_tick), patch.object(
             userland, "queue_notifications", lambda _config: 0
         ):
-            with self.assertRaises(core.AuthorityDenied):
-                service.run_service_tick(
-                    self.fx.app_config(), registry, client, Notifier(), dry_run=False
-                )
+            service.run_service_tick(
+                self.fx.app_config(), registry, client, Notifier(), dry_run=False
+            )
         self.assertEqual(sent, [])
         connection = core.open_database(self.fx.state, REPOSITORY)
         try:
@@ -1344,7 +1343,7 @@ class AdmissionIngressTests(unittest.TestCase):
                 connection.execute(
                     "SELECT status FROM notification_deliveries WHERE event_key='stale-review'"
                 ).fetchone()[0],
-                "pending",
+                "retired",
             )
         finally:
             connection.close()
@@ -3074,10 +3073,10 @@ MUTANTS = [
         "AdmissionIngressTests.test_each_notification_send_has_a_fresh_authority_fence",
     ),
     (
-        "authorize a superseded notification under the repository-level gate",
+        "skip pending notification revalidation before send",
         "tools/review_conductor_userland.py",
-        '                runtime.assert_authority(\n                    authority_client,\n                    f"notification:{row[\'event_key\']}:{row[\'channel\']}",\n                    authority,\n                )\n',
-        '                runtime.assert_authority(\n                    authority_client,\n                    f"notification:{row[\'event_key\']}:{row[\'channel\']}",\n                )\n',
+        "            if not pending_review_notification_still_eligible(\n                connection, row, trusted_enrollment\n            ):\n",
+        "            if False and not pending_review_notification_still_eligible(\n                connection, row, trusted_enrollment\n            ):\n",
         "AdmissionIngressTests.test_superseded_review_notification_cannot_use_the_new_heads_binding",
     ),
     (

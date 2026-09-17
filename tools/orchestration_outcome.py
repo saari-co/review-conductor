@@ -23,7 +23,7 @@ MAX_REPAIR_CYCLES = 2
 ENROLLMENT_STATUSES = frozenset({"present", "absent", "broken"})
 ROUTES = frozenset({"review_conductor", "legacy_xapi", "none", "fail_closed"})
 NOTIFICATION_ELIGIBILITIES = frozenset(
-    {"silent", "merge_ready", "blocked", "none", "fail_closed"}
+    {"silent", "merge_ready", "blocked", "none"}
 )
 RAIL_RESULTS = frozenset(
     {"absent", "clean", "effectively_clean", "findings", "human_gate", "failed", "unknown"}
@@ -146,7 +146,8 @@ def _dispositions(value: Any) -> tuple[str, ...] | None:
     return tuple(seen)
 
 
-def _enrollment_route(enrollment: Mapping[str, str]) -> tuple[str, str]:
+def enrollment_route(enrollment: Mapping[str, str]) -> tuple[str, str]:
+    """Return ``(route, reason)`` from an already-resolved trusted pair."""
     review_conductor = enrollment["review_conductor"]
     legacy_xapi = enrollment["legacy_xapi"]
     if review_conductor == "broken" or legacy_xapi == "broken":
@@ -158,6 +159,10 @@ def _enrollment_route(enrollment: Mapping[str, str]) -> tuple[str, str]:
     if legacy_xapi == "present":
         return "legacy_xapi", "legacy_xapi_handoff_required"
     return "none", "unenrolled_no_review_no_notification"
+
+
+def _enrollment_route(enrollment: Mapping[str, str]) -> tuple[str, str]:
+    return enrollment_route(enrollment)
 
 
 def resolve_trusted_enrollment(config: Mapping[str, Any] | None) -> dict[str, str]:
@@ -322,9 +327,20 @@ def decide_orchestration_outcome(raw: Any) -> dict[str, Any]:
         "ledger_preserved": True,
     }
 
-    route, route_reason = _enrollment_route(
+    route, route_reason = enrollment_route(
         {"review_conductor": review_conductor, "legacy_xapi": legacy_xapi}
     )
+    if state in TERMINAL_CLOSED_STATES:
+        return _outcome(
+            route=route,
+            review_dispatch=False,
+            legacy_dispatch=False,
+            clawsweeper_eligible=False,
+            merge_ready_eligible=False,
+            notification=_notification("silent", None),
+            repair=repair,
+            reason="terminal_closed_non_dispatchable",
+        )
     if route == "fail_closed":
         return _fail_closed_blocked(repair, route_reason)
     if route == "none":
@@ -354,17 +370,6 @@ def decide_orchestration_outcome(raw: Any) -> dict[str, Any]:
         return _fail_closed_blocked(repair, "unknown_state_fail_closed")
     if openclaw_result == "unknown" or clawsweeper_result == "unknown":
         return _fail_closed_blocked(repair, "unknown_rail_result_fail_closed")
-    if state in TERMINAL_CLOSED_STATES:
-        return _outcome(
-            route=route,
-            review_dispatch=False,
-            legacy_dispatch=False,
-            clawsweeper_eligible=False,
-            merge_ready_eligible=False,
-            notification=_notification("silent", None),
-            repair=repair,
-            reason="terminal_closed_non_dispatchable",
-        )
 
     clawsweeper_eligible = openclaw_result not in {"absent"}
     if openclaw_result in BLOCKING_OPENCLAW:

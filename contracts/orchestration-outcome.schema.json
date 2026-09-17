@@ -56,8 +56,7 @@
             "silent",
             "merge_ready",
             "blocked",
-            "none",
-            "fail_closed"
+            "none"
           ]
         },
         "kind": {

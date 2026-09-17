@@ -197,6 +197,24 @@ def queued_notification_outcomes(config: dict[str, Any]) -> list[dict[str, Any]]
         connection.close()
 
 
+def notification_statuses(config: dict[str, Any]) -> list[tuple[str, str]]:
+    connection = core.open_database(Path(config["paths"]["state_root"]))
+    try:
+        return [
+            (row["channel"], row["status"])
+            for row in connection.execute(
+                "SELECT channel, status FROM notification_deliveries ORDER BY channel, event_key"
+            )
+        ]
+    finally:
+        connection.close()
+
+
+class UnavailableNotifier:
+    def send(self, channel: str, _message: str) -> None:
+        raise userland.NotificationUnavailable(f"{channel} fixture unavailable")
+
+
 def current(config: dict[str, Any], pr: int) -> sqlite3.Row:
     connection = core.open_database(Path(config["paths"]["state_root"]))
     try:
@@ -1071,6 +1089,276 @@ def test_closed_heads_reject_direct_and_service_loop_dispatch() -> None:
             assert current(config, pr)["state"] == state
 
 
+def test_closed_heads_stay_silent_when_trusted_enrollment_is_broken() -> None:
+    for state in ("closed", "closed_merged"):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = config_fixture(Path(temporary))
+            pr = 83 if state == "closed" else 84
+            ingress(config, "pull_request", f"{state}-broken-pr", pr_payload(pr))
+            ingress(config, "workflow_run", f"{state}-broken-ci", ci_payload(pr, 1180 + pr))
+            assert action(config, pr, "openclaw.enqueue")["status"] == "pending"
+            set_trusted_enrollment(config, "broken", "absent")
+            set_head(config, pr, state=state, blocker="stale closed blocker text")
+            decision = userland.orchestration.decide_orchestration_outcome(
+                userland.orchestration.outcome_from_review_row(
+                    current(config, pr),
+                    enrollment=userland.orchestration.resolve_trusted_enrollment(config),
+                )
+            )
+            assert decision["route"] == "fail_closed"
+            assert decision["review_dispatch"] is False
+            assert decision["legacy_dispatch"] is False
+            assert decision["notification"]["eligibility"] == "silent"
+            assert decision["reason"] == "terminal_closed_non_dispatchable"
+            notifier = FakeNotifier()
+            tick = userland.run_tick(config, None, notifier, dry_run=True)
+            assert tick["worker"]["result"] == "skipped"
+            assert tick["hydration"] == []
+            assert tick["openclaw"] == []
+            assert tick["clawsweeper"] == []
+            assert tick["bridges_before"]["result"] == "skipped"
+            assert tick["projection"]["result"] == "skipped"
+            assert notifier.sent == []
+            assert queued_notification_outcomes(config) == []
+            delivered = userland.deliver_notifications(config, notifier, dry_run=False)
+            assert delivered["deliveries"] == []
+            assert notifier.sent == []
+            assert action(config, pr, "openclaw.enqueue")["status"] == "pending"
+
+
+def test_run_tick_suppresses_review_stages_unless_conductor_enrolled() -> None:
+    cases = (
+        ("present", "absent", "review_conductor", True, False),
+        ("present", "present", "review_conductor", True, False),
+        ("absent", "present", "legacy_xapi", False, False),
+        ("absent", "absent", "none", False, False),
+        ("broken", "absent", "fail_closed", False, True),
+    )
+    for index, (
+        review_status,
+        legacy_status,
+        route,
+        runs_stages,
+        notifies,
+    ) in enumerate(cases):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = config_fixture(Path(temporary))
+            pr = 100 + index
+            ingress(config, "pull_request", f"stage-{pr}", pr_payload(pr))
+            ingress(config, "workflow_run", f"stage-ci-{pr}", ci_payload(pr, 2100 + pr))
+            queued = action(config, pr, "openclaw.enqueue")
+            assert queued["status"] == "pending"
+            assert current(config, pr)["state"] == "openclaw_queued"
+            set_trusted_enrollment(config, review_status, legacy_status)
+            trusted = userland.orchestration.resolve_trusted_enrollment(config)
+            assert trusted == {
+                "review_conductor": review_status,
+                "legacy_xapi": legacy_status,
+            }
+            assert userland.orchestration.enrollment_route(trusted)[0] == route
+            notifier = FakeNotifier()
+            tick = userland.run_tick(config, None, notifier, dry_run=True)
+            assert action(config, pr, "openclaw.enqueue")["status"] == "pending"
+            if runs_stages:
+                assert tick["hydration"]
+                assert tick["worker"]["result"] == "planned"
+                assert tick["worker"]["actions"]
+                assert tick["bridges_before"]["result"] == "planned"
+            else:
+                assert tick["hydration"] == []
+                assert tick["worker"]["result"] == "skipped"
+                assert tick["worker"]["actions"] == []
+                assert tick["openclaw"] == []
+                assert tick["clawsweeper"] == []
+                assert tick["bridges_before"]["result"] == "skipped"
+                assert tick["projection"]["result"] == "skipped"
+            outcomes = queued_notification_outcomes(config)
+            if notifies:
+                assert outcomes
+                for outcome in outcomes:
+                    assert outcome["route"] == "fail_closed"
+                    assert outcome["notification"]["eligibility"] == "blocked"
+                    assert outcome["reason"] == "ambiguous_or_broken_enrollment"
+            else:
+                assert outcomes == []
+                assert all(
+                    item["result"] != "planned" or route == "review_conductor"
+                    for item in tick["notifications"]["deliveries"]
+                )
+
+
+def test_pending_notifications_are_revalidated_before_send() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        config = config_fixture(Path(temporary))
+        pr = 110
+        ingress(config, "pull_request", "stale-notify-pr", pr_payload(pr))
+        ingress(
+            config,
+            "workflow_run",
+            "stale-notify-ci",
+            ci_payload(pr, 2110, conclusion="failure"),
+        )
+        assert current(config, pr)["state"] == "ci_failed"
+        first = userland.deliver_notifications(config, UnavailableNotifier(), dry_run=False)
+        assert [item["result"] for item in first["deliveries"]] == [
+            "not_ready",
+            "not_ready",
+            "not_ready",
+        ]
+        assert notification_statuses(config) == [
+            ("discord", "pending"),
+            ("openclaw_context", "pending"),
+            ("signal", "pending"),
+        ]
+
+        set_head(config, pr, state="closed", blocker="closed after queued notify")
+        closed = userland.deliver_notifications(config, FakeNotifier(), dry_run=False)
+        assert [item["result"] for item in closed["deliveries"]] == [
+            "retired",
+            "retired",
+            "retired",
+        ]
+        assert notification_statuses(config) == [
+            ("discord", "retired"),
+            ("openclaw_context", "retired"),
+            ("signal", "retired"),
+        ]
+
+    with tempfile.TemporaryDirectory() as temporary:
+        config = config_fixture(Path(temporary))
+        pr = 111
+        ingress(config, "pull_request", "enroll-change-pr", pr_payload(pr))
+        ingress(
+            config,
+            "workflow_run",
+            "enroll-change-ci",
+            ci_payload(pr, 2111, conclusion="failure"),
+        )
+        userland.deliver_notifications(config, UnavailableNotifier(), dry_run=False)
+        set_trusted_enrollment(config, "absent", "present")
+        changed = userland.deliver_notifications(config, FakeNotifier(), dry_run=False)
+        assert [item["result"] for item in changed["deliveries"]] == [
+            "retired",
+            "retired",
+            "retired",
+        ]
+        assert all(status == "retired" for _channel, status in notification_statuses(config))
+
+    with tempfile.TemporaryDirectory() as temporary:
+        config = config_fixture(Path(temporary))
+        pr = 112
+        ingress(config, "pull_request", "supersede-pr", pr_payload(pr))
+        ingress(
+            config,
+            "workflow_run",
+            "supersede-ci",
+            ci_payload(pr, 2112, conclusion="failure"),
+        )
+        userland.deliver_notifications(config, UnavailableNotifier(), dry_run=False)
+        connection = core.open_database(Path(config["paths"]["state_root"]))
+        try:
+            connection.execute(
+                "UPDATE heads SET head_sha = ? WHERE pr_number = ? AND is_current = 1",
+                ("3" * 40, pr),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        notifier = FakeNotifier()
+        superseded = userland.deliver_notifications(config, notifier, dry_run=False)
+        results = {item["result"] for item in superseded["deliveries"]}
+        assert "retired" in results
+        assert "sent" in results
+        assert notification_statuses(config).count(("discord", "retired")) == 1
+        assert notification_statuses(config).count(("discord", "sent")) == 1
+        assert_exact_terminal_messages(notifier, concise_blocked(pr, current(config, pr)["blocker"]))
+
+    with tempfile.TemporaryDirectory() as temporary:
+        config = config_fixture(Path(temporary))
+        pr = 113
+        ingress(config, "pull_request", "fail-closed-keep-pr", pr_payload(pr))
+        set_head(config, pr, state="mystery_state", blocker="stale persisted CI text")
+        userland.deliver_notifications(config, UnavailableNotifier(), dry_run=False)
+        assert all(status == "pending" for _channel, status in notification_statuses(config))
+        notifier = FakeNotifier()
+        kept = userland.deliver_notifications(config, notifier, dry_run=False)
+        assert [item["result"] for item in kept["deliveries"]] == ["sent", "sent", "sent"]
+        assert all(status == "sent" for _channel, status in notification_statuses(config))
+        assert_exact_terminal_messages(notifier, concise_blocked(pr, "unknown state"))
+
+    with tempfile.TemporaryDirectory() as temporary:
+        config = config_fixture(Path(temporary))
+        pr = 114
+        ingress(config, "pull_request", "stale-ready-pr", pr_payload(pr))
+        ingress(
+            config,
+            "workflow_run",
+            "stale-ready-ci",
+            ci_payload(pr, 2114, conclusion="failure"),
+        )
+        row = current(config, pr)
+        event_key = "a" * 64
+        payload = {
+            "schema": userland.NOTIFICATION_SCHEMA,
+            "event_key": event_key,
+            "repository": row["repository"],
+            "pr_number": pr,
+            "base_sha": row["base_sha"],
+            "head_sha": row["head_sha"],
+            "review_epoch": row["review_epoch"],
+            "state": "ready_for_human_merge",
+            "repair_cycle": row["repair_cycle"],
+            "message": concise_ready(pr),
+            "merge_authorized": False,
+            "orchestration_outcome": {
+                "schema": userland.orchestration.OUTCOME_SCHEMA,
+                "route": "review_conductor",
+                "notification": {
+                    "eligibility": "merge_ready",
+                    "kind": "merge_ready",
+                    "channels": list(userland.orchestration.NOTIFY_CHANNELS),
+                },
+                "reason": "both_rails_effectively_clean",
+            },
+        }
+        connection = core.open_database(Path(config["paths"]["state_root"]))
+        try:
+            userland.ensure_userland_tables(connection)
+            for channel in userland.orchestration.NOTIFY_CHANNELS:
+                connection.execute(
+                    """
+                    INSERT INTO notification_deliveries(
+                      event_key, channel, repository, pr_number, base_sha, head_sha,
+                      review_epoch, state, payload_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event_key,
+                        channel,
+                        row["repository"],
+                        pr,
+                        row["base_sha"],
+                        row["head_sha"],
+                        row["review_epoch"],
+                        "ready_for_human_merge",
+                        core.canonical_json(payload),
+                        core.utc_now(),
+                        core.utc_now(),
+                    ),
+                )
+            connection.commit()
+        finally:
+            connection.close()
+        notifier = FakeNotifier()
+        stale_ready = userland.deliver_notifications(config, notifier, dry_run=False)
+        assert {item["result"] for item in stale_ready["deliveries"]} == {"retired", "sent"}
+        assert notification_statuses(config).count(("discord", "retired")) == 1
+        assert notification_statuses(config).count(("discord", "sent")) == 1
+        assert_exact_terminal_messages(notifier, concise_blocked(pr, current(config, pr)["blocker"]))
+        for _channel, message in notifier.sent:
+            assert "ready to merge" not in message
+
+
 def test_run_tick_uses_trusted_enrollment_not_caller_payloads() -> None:
     stale_blocker = "stale persisted CI text must not win"
     cases = (
@@ -1809,6 +2097,9 @@ def main() -> None:
         test_unknown_head_outcome_fail_closed_routes_blocked_notification,
         test_broken_enrollment_fail_closed_routes_blocked_notification,
         test_closed_heads_reject_direct_and_service_loop_dispatch,
+        test_closed_heads_stay_silent_when_trusted_enrollment_is_broken,
+        test_run_tick_suppresses_review_stages_unless_conductor_enrolled,
+        test_pending_notifications_are_revalidated_before_send,
         test_run_tick_uses_trusted_enrollment_not_caller_payloads,
         test_fail_closed_canonical_reason_beats_stale_blocker_text,
         test_sub_platinum_or_insufficient_proof_stops_at_human_gate,

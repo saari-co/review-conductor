@@ -2112,6 +2112,127 @@ def queue_notifications(
         connection.close()
 
 
+NOTIFICATION_RETIRE_REASON = (
+    "no longer eligible after close, supersession, or enrollment route change"
+)
+
+
+def pending_review_notification_still_eligible(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row,
+    trusted_enrollment: Mapping[str, str],
+) -> bool:
+    """Return whether a pending review-result row may still be claimed.
+
+    Operator alerts stay unbound. Review-result rows must still match the
+    current head tuple and a currently eligible trusted decision.
+    """
+    if int(row["pr_number"]) == 0:
+        return True
+    head = connection.execute(
+        """
+        SELECT * FROM heads
+        WHERE repository = ? AND pr_number = ? AND is_current = 1
+        """,
+        (row["repository"], row["pr_number"]),
+    ).fetchone()
+    if head is None:
+        return False
+    if (
+        head["base_sha"] != row["base_sha"]
+        or head["head_sha"] != row["head_sha"]
+        or int(head["review_epoch"]) != int(row["review_epoch"])
+        or head["state"] != row["state"]
+    ):
+        return False
+    quality = connection.execute(
+        """
+        SELECT * FROM clawsweeper_quality
+        WHERE repository = ? AND pr_number = ? AND base_sha = ?
+          AND head_sha = ? AND review_epoch = ?
+        """,
+        (
+            head["repository"],
+            head["pr_number"],
+            head["base_sha"],
+            head["head_sha"],
+            head["review_epoch"],
+        ),
+    ).fetchone()
+    decision = orchestration.decide_orchestration_outcome(
+        orchestration.outcome_from_review_row(
+            head, quality, enrollment=trusted_enrollment
+        )
+    )
+    eligibility = decision["notification"]["eligibility"]
+    if eligibility not in {"merge_ready", "blocked"}:
+        return False
+    payload = json.loads(row["payload_json"])
+    prior = payload.get("orchestration_outcome")
+    if isinstance(prior, dict):
+        if prior.get("route") not in {None, decision["route"]}:
+            return False
+        if prior.get("reason") not in {None, decision["reason"]}:
+            return False
+        prior_notification = prior.get("notification")
+        if isinstance(prior_notification, dict):
+            if prior_notification.get("eligibility") not in {None, eligibility}:
+                return False
+    return True
+
+
+def retire_pending_notification(
+    connection: sqlite3.Connection, row: sqlite3.Row
+) -> bool:
+    updated = connection.execute(
+        """
+        UPDATE notification_deliveries
+        SET status = 'retired', last_error = ?, updated_at = ?
+        WHERE event_key = ? AND channel = ? AND status = 'pending'
+        """,
+        (
+            NOTIFICATION_RETIRE_REASON,
+            core.utc_now(),
+            row["event_key"],
+            row["channel"],
+        ),
+    )
+    return updated.rowcount == 1
+
+
+def suppressed_review_stages() -> dict[str, Any]:
+    """Empty tick stages used when trusted enrollment is not Review Conductor."""
+    skipped_bridge = {
+        "schema": "smoky.review-conductor.bridge-drain.v1",
+        "result": "skipped",
+        "artifacts": [],
+        "agent_polling": False,
+        "merge_dispatched": False,
+    }
+    return {
+        "bridges_before": skipped_bridge,
+        "hydration": [],
+        "worker": {
+            "schema": "smoky.review-conductor.worker-wake.v1",
+            "result": "skipped",
+            "recovered": [],
+            "actions": [],
+            "failed_actions": [],
+            "github_ci_polled": False,
+            "merge_dispatched": False,
+        },
+        "openclaw": [],
+        "clawsweeper": [],
+        "bridges_after": skipped_bridge,
+        "projection": {
+            "schema": "smoky.review-conductor.projection.v1",
+            "result": "skipped",
+            "projected": [],
+            "merge_authorized": False,
+        },
+    }
+
+
 class OpenClawNotifier:
     def __init__(
         self,
@@ -2220,6 +2341,30 @@ def deliver_notifications(
         ).fetchall()
         for row in rows:
             payload = json.loads(row["payload_json"])
+            if not pending_review_notification_still_eligible(
+                connection, row, trusted_enrollment
+            ):
+                if dry_run:
+                    outcomes.append(
+                        {
+                            "event_key": row["event_key"],
+                            "channel": row["channel"],
+                            "result": "retired",
+                        }
+                    )
+                    continue
+                if retire_pending_notification(connection, row):
+                    connection.commit()
+                    outcomes.append(
+                        {
+                            "event_key": row["event_key"],
+                            "channel": row["channel"],
+                            "result": "retired",
+                        }
+                    )
+                else:
+                    connection.rollback()
+                continue
             if dry_run:
                 outcomes.append({"event_key": row["event_key"], "channel": row["channel"], "result": "planned"})
                 continue
@@ -2322,28 +2467,40 @@ def run_tick(
     dry_run: bool,
 ) -> dict[str, Any]:
     profiles.require_enabled(config)
-    first_bridge = (
-        {"schema": "smoky.review-conductor.bridge-drain.v1", "result": "planned", "artifacts": []}
-        if dry_run
-        else runtime.drain_bridge_inboxes(config)
-    )
-    hydration = hydrate_pending_openclaw_heads(
-        config, dry_run=dry_run, authority_client=client
-    )
-    worker = runtime.drain_actions(config, client, dry_run=dry_run)
-    openclaw = collect_openclaw_terminals(config, dry_run=dry_run)
-    clawsweeper = collect_clawsweeper_terminals(config, client, dry_run=dry_run)
-    second_bridge = (
-        {"schema": "smoky.review-conductor.bridge-drain.v1", "result": "planned", "artifacts": []}
-        if dry_run
-        else runtime.drain_bridge_inboxes(config)
-    )
-    projection = runtime.reconcile_projection(config, client, dry_run=dry_run)
+    trusted_enrollment = orchestration.resolve_trusted_enrollment(config)
+    route, _reason = orchestration.enrollment_route(trusted_enrollment)
+    if route == "review_conductor":
+        first_bridge = (
+            {"schema": "smoky.review-conductor.bridge-drain.v1", "result": "planned", "artifacts": []}
+            if dry_run
+            else runtime.drain_bridge_inboxes(config)
+        )
+        hydration = hydrate_pending_openclaw_heads(
+            config, dry_run=dry_run, authority_client=client
+        )
+        worker = runtime.drain_actions(config, client, dry_run=dry_run)
+        openclaw = collect_openclaw_terminals(config, dry_run=dry_run)
+        clawsweeper = collect_clawsweeper_terminals(config, client, dry_run=dry_run)
+        second_bridge = (
+            {"schema": "smoky.review-conductor.bridge-drain.v1", "result": "planned", "artifacts": []}
+            if dry_run
+            else runtime.drain_bridge_inboxes(config)
+        )
+        projection = runtime.reconcile_projection(config, client, dry_run=dry_run)
+    else:
+        skipped = suppressed_review_stages()
+        first_bridge = skipped["bridges_before"]
+        hydration = skipped["hydration"]
+        worker = skipped["worker"]
+        openclaw = skipped["openclaw"]
+        clawsweeper = skipped["clawsweeper"]
+        second_bridge = skipped["bridges_after"]
+        projection = skipped["projection"]
     notifications = deliver_notifications(
         config,
         notifier,
         dry_run=dry_run,
-        enrollment=orchestration.resolve_trusted_enrollment(config),
+        enrollment=trusted_enrollment,
         authority_client=client,
     )
     return {

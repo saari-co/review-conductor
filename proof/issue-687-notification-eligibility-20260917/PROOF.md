@@ -1,4 +1,4 @@
-# Issue #687 slice 1 repair 2 — closed, enrollment, fail-closed reason — 2026-09-17
+# Issue #687 slice 1 repair 3 — closed-first, tick gate, pending revalidation — 2026-09-17
 
 ## Ownership
 
@@ -8,9 +8,9 @@
 - Branch: `openclaw/review-conductor-issue-687-routing-v1`
 - Required start/base: `8cc4094e88c8cd04c5b7da28e0c6a9ef054ea69c` (`origin/main`).
 - Parent candidate / authorized repair HEAD:
-  `0d77f96d09c723790385b892eb3dd0a795e2642e`.
+  `a5ecd640cf957f298a789440c9d3756b4c084c61`.
 - Prior parent in this lineage:
-  `46246e28286269699f75545789d95e2faab57489`.
+  `0d77f96d09c723790385b892eb3dd0a795e2642e`.
 - Sole source-changing owner: this worktree. No x-api, Suite, or other
   repository was edited.
 - Mode: source mutation only. No merge, deploy, activation, credential,
@@ -22,29 +22,35 @@ branch head after this commit is the exact candidate SHA for later CI.
 
 ## Defect and required behavior
 
-Owner adjudication of Copilot review `5240583476` on PR #18 kept the two
-round-2 comments as `reject_false_positive` and required this bounded
-follow-up. This packet repairs only those three remaining blockers.
+Owner adjudication of Copilot review `5241356417` on PR #18 kept the two
+already-adjudicated false positives and authorized this bounded post-cap
+repair plus one subsequent Copilot review. This packet repairs the three
+inline findings and the two suppressed schema/manifest items.
 
-1. `closed` and `closed_merged` are terminal non-dispatchable states. Direct
-   `decide_orchestration_outcome` and the service-loop queue/tick/drain paths
-   keep `review_dispatch=false` and `legacy_dispatch=false` and do not notify.
-2. `run_tick` resolves trusted/service-owned enrollment and passes it into
-   the existing notification queue. Review Conductor, legacy-only, dual,
-   unenrolled, and broken semantics are runtime behavior. Caller payloads
-   cannot grant enrollment. Missing row enrollment fails closed as broken,
-   not Conductor-present. Conductor does not import or dispatch x-api
-   (`legacy_dispatch` stays false).
-3. Fail-closed blocked copy uses the canonical decision reason. Stale
-   persisted blocker text cannot mask `unknown state` or
-   `ambiguous or broken enrollment`. Ordinary blocked states may still use
-   the current row blocker. Terminal text stays concise.
+1. `closed` and `closed_merged` stay silent and non-dispatchable even when
+   trusted enrollment is broken. Closed-state handling precedes enrollment
+   short-circuits; both dispatch flags remain false.
+2. `run_tick` resolves trusted/service-owned enrollment at tick start and
+   suppresses hydration, action draining, result collection, and review
+   stages unless the trusted route is `review_conductor`. Dual enrollment
+   selects Review Conductor. Legacy-only, unenrolled, and broken routes are
+   real runtime behavior. Conductor never dispatches x-api.
+3. Pending notification rows are revalidated against the current head and
+   trusted enrollment before claim or send. Close, supersession, or an
+   enrollment-route change retires ineligible rows. Still-eligible
+   fail-closed blocked notifications send; stale ready/blocked rows do not.
+4. `notification.eligibility` no longer includes unsupported `fail_closed`.
+   Canonical representable failures keep `route=fail_closed` and use
+   `blocked`.
+5. The changed `Makefile` and its SHA-256 are recorded in
+   `candidate-manifest.json`.
 
 Preserved from the parent head: versioned
 `review-conductor.orchestration-outcome.v1`, silent first/second automatic
 rounds, saturating `repair_cycle=2` with scoped `required_fix`, no Conductor
-legacy dispatch, human-only merge, rail suppression, and concise
-ready/blocked copy. No second notification system and no live adapters.
+legacy dispatch, human-only merge, rail suppression, concise ready/blocked
+copy, and x-api runtime independence. No second notification system and no
+live adapters.
 
 ## Bounded refusals
 
@@ -53,7 +59,8 @@ ready/blocked copy. No second notification system and no live adapters.
   target repository.
 - No automatic merge and no notification during silent repair rounds.
 - No second notification system.
-- No third review request.
+- No review request from this packet. Parent orchestrator owns the next
+  Copilot dispatch.
 
 ## Local commands and results
 
@@ -62,14 +69,15 @@ is not a deployed review PASS.
 
 | Command | Result |
 | --- | --- |
-| `python3 tests/test_orchestration_outcome.py` | `Ran 23 tests` / `OK`, including closed, trusted-enrollment, and precise mutants |
-| `python3 tests/test_review_conductor_userland.py` | passed (28), including closed dispatch, run_tick enrollment routes, and stale-blocker canonical copy |
+| `python3 tests/test_orchestration_outcome.py` | `Ran 25 tests` / `OK`, including closed-before-enrollment, fail_closed eligibility removal, and precise mutants |
+| `python3 tests/test_review_conductor_userland.py` | passed (31), including closed+broken silence, run_tick stage suppression, and pending-notification revalidation |
 | `python3 tests/test_review_conductor.py` | `review conductor integration tests passed` |
 | `python3 tests/test_review_conductor_activation.py` | `review conductor shared adapter tests passed` |
 | `python3 tests/test_review_conductor_profiles.py` | `Ran 31 tests` / `OK` |
+| `python3 tests/test_service_runtime.py` | superseded pending rows retire before authority; precise mutant skips revalidation |
 | `python3 -m compileall -q tools tests scripts` | passed |
-| `make check` | passed, including provenance verification and `git diff --check` |
-| `make build` | passed; wrote `dist/review-conductor.pyz` |
+| `make check` | recorded after the candidate source hashes |
+| `make build` | recorded after the candidate source hashes |
 | `python3 scripts/check_whitespace.py 8cc4094e88c8cd04c5b7da28e0c6a9ef054ea69c <new-head>` | recorded after the candidate commit |
 
 Exact-head whitespace is `scripts/check_whitespace.py` against
@@ -88,6 +96,6 @@ commit.
 
 ## Remaining issue
 
-Exact-head hosted CI for the new SHA. CI green is not external review
-clearance. No merge, deploy, live notification, or review request is made
-from this packet.
+Exact-head hosted CI for the new SHA, then the parent-owned Copilot review
+of that exact head. CI green is not external review clearance. No merge,
+deploy, live notification, or review request is made from this packet.

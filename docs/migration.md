@@ -76,11 +76,15 @@ fail-closed enrollment, unknown state/result, and equivalent invalid
 orchestration states keep dispatch suppressed (`legacy_dispatch` remains
 false) and use the blocked notification path; the queue delivers that
 concise blocked message instead of raising or passing. `run_tick` resolves
-trusted/service-owned enrollment into that queue so Review Conductor,
+trusted/service-owned enrollment at tick start so Review Conductor,
 legacy-only, dual, unenrolled, and broken semantics are runtime behavior.
-Caller payloads cannot grant enrollment, and fail-closed copy prefers the
-canonical reason over stale persisted blocker text. `closed` and
-`closed_merged` stay terminal and non-dispatchable. `repair_cycle` is the
+Hydration, action draining, result collection, and review stages run only
+on the Review Conductor route. Caller payloads cannot grant enrollment,
+and fail-closed copy prefers the canonical reason over stale persisted
+blocker text. Pending notification rows are revalidated against the
+current head and trusted enrollment before send; close, supersession, or
+an enrollment-route change retires them. `closed` and `closed_merged`
+stay silent and non-dispatchable even when trusted enrollment is broken. `repair_cycle` is the
 saturating ledger for the first two broad automatic rounds: cycle 2 still
 allows a scoped `required_fix` route, head change, and exact-head rerun
 without a third automatic round or ledger reset. Terminal messages are

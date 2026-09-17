@@ -372,6 +372,40 @@ class FailClosedTests(unittest.TestCase):
                 self.assertFalse(mapped["review_dispatch"])
                 self.assertEqual(mapped["reason"], "terminal_closed_non_dispatchable")
 
+    def test_closed_states_remain_silent_when_enrollment_is_broken(self):
+        enrollments = (
+            {"review_conductor": "broken", "legacy_xapi": "absent"},
+            {"review_conductor": "broken", "legacy_xapi": "broken"},
+            {"review_conductor": "present", "legacy_xapi": "broken"},
+            {"review_conductor": "absent", "legacy_xapi": "absent"},
+            {"review_conductor": "absent", "legacy_xapi": "present"},
+        )
+        for state in ("closed", "closed_merged"):
+            for enrollment in enrollments:
+                with self.subTest(state=state, enrollment=enrollment):
+                    decision = notify(
+                        enrolled(
+                            state=state,
+                            enrollment=enrollment,
+                            openclaw_result="unknown",
+                            clawsweeper_result="unknown",
+                        )
+                    )
+                    self.assertFalse(decision["review_dispatch"])
+                    self.assertFalse(decision["legacy_dispatch"])
+                    self.assertFalse(decision["clawsweeper_eligible"])
+                    self.assertFalse(decision["merge_ready_eligible"])
+                    self.assertEqual(decision["notification"]["eligibility"], "silent")
+                    self.assertEqual(decision["notification"]["channels"], [])
+                    self.assertEqual(decision["reason"], "terminal_closed_non_dispatchable")
+                    self.assertNotEqual(decision["notification"]["eligibility"], "blocked")
+
+    def test_fail_closed_is_not_a_notification_eligibility(self):
+        self.assertNotIn("fail_closed", outcome.NOTIFICATION_ELIGIBILITIES)
+        self.assertIn("fail_closed", outcome.ROUTES)
+        with self.assertRaises(outcome.OrchestrationError):
+            outcome._notification("fail_closed", None)
+
     def test_missing_row_enrollment_fails_closed_instead_of_granting_conductor(self):
         decision = outcome.decide_orchestration_outcome(
             outcome.outcome_from_review_row(
@@ -461,6 +495,14 @@ class FailClosedTests(unittest.TestCase):
         self.assertEqual(schema["properties"]["schema"]["const"], outcome.OUTCOME_SCHEMA)
         self.assertEqual(set(schema["required"]), set(outcome.OUTCOME_KEYS))
         self.assertEqual(set(schema["properties"]["route"]["enum"]), set(outcome.ROUTES))
+        self.assertEqual(
+            set(schema["properties"]["notification"]["properties"]["eligibility"]["enum"]),
+            set(outcome.NOTIFICATION_ELIGIBILITIES),
+        )
+        self.assertNotIn(
+            "fail_closed",
+            schema["properties"]["notification"]["properties"]["eligibility"]["enum"],
+        )
         self.assertEqual(schema["properties"]["legacy_dispatch"].get("const"), False)
         self.assertFalse(schema["additionalProperties"])
 
@@ -558,6 +600,18 @@ class PreciseMutantTests(unittest.TestCase):
             "test_closed_states_are_terminal_and_non_dispatchable",
         ),
         (
+            "handle closed after broken enrollment short-circuit",
+            '    if state in TERMINAL_CLOSED_STATES:\n        return _outcome(\n            route=route,\n            review_dispatch=False,\n            legacy_dispatch=False,\n            clawsweeper_eligible=False,\n            merge_ready_eligible=False,\n            notification=_notification("silent", None),\n            repair=repair,\n            reason="terminal_closed_non_dispatchable",\n        )\n    if route == "fail_closed":\n        return _fail_closed_blocked(repair, route_reason)\n',
+            '    if route == "fail_closed":\n        return _fail_closed_blocked(repair, route_reason)\n    if state in TERMINAL_CLOSED_STATES:\n        return _outcome(\n            route=route,\n            review_dispatch=False,\n            legacy_dispatch=False,\n            clawsweeper_eligible=False,\n            merge_ready_eligible=False,\n            notification=_notification("silent", None),\n            repair=repair,\n            reason="terminal_closed_non_dispatchable",\n        )\n',
+            "test_closed_states_remain_silent_when_enrollment_is_broken",
+        ),
+        (
+            "advertise fail_closed notification eligibility",
+            'NOTIFICATION_ELIGIBILITIES = frozenset(\n    {"silent", "merge_ready", "blocked", "none"}\n)\n',
+            'NOTIFICATION_ELIGIBILITIES = frozenset(\n    {"silent", "merge_ready", "blocked", "none", "fail_closed"}\n)\n',
+            "test_fail_closed_is_not_a_notification_eligibility",
+        ),
+        (
             "default missing enrollment to Review Conductor present",
             '        enrollment = {"review_conductor": "broken", "legacy_xapi": "broken"}\n',
             '        enrollment = {"review_conductor": "present", "legacy_xapi": "absent"}\n',
@@ -602,7 +656,9 @@ class PreciseMutantTests(unittest.TestCase):
                     completed.returncode, 0, f"mutant survived: {label}\n{completed.stderr}"
                 )
                 self.assertTrue(
-                    "AssertionError" in completed.stderr or "assert " in completed.stderr,
+                    "AssertionError" in completed.stderr
+                    or "assert " in completed.stderr
+                    or "OrchestrationError" in completed.stderr,
                     f"mutant did not fail its intended assertion: {label}\n{completed.stderr}",
                 )
 
