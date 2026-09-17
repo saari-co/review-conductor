@@ -1613,6 +1613,96 @@ class AdmissionIngressTests(unittest.TestCase):
                 self.fx.app_config(), broken_provider, object(), object(), dry_run=True
             )
 
+    def test_registry_subclass_overrides_cannot_synthesize_routes(self):
+        loaded = self._load_route_registry()
+        empty = self._load_route_registry(enroll=False)
+        dual = self._load_route_registry(
+            legacy={"repository": REPOSITORY, "status": "present"}
+        )
+        fake = loaded.enrollments[0]
+
+        class OverrideEmpty(admission.Registry):
+            def legacy_status_for(self, repository):
+                return "present"
+
+            def lookup(self, *args):
+                return fake
+
+            def __getattribute__(self, name):
+                if name == "enrollments":
+                    return (fake,)
+                return object.__getattribute__(self, name)
+
+        forged_empty = OverrideEmpty(())
+        self.assertEqual(forged_empty.legacy_status_for(REPOSITORY), "present")
+        self.assertEqual(forged_empty.enrollments, (fake,))
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(self.fx.app_config(), forged_empty),
+            {"review_conductor": "absent", "legacy_xapi": "absent"},
+        )
+
+        class DenyLoaded(admission.Registry):
+            def legacy_status_for(self, repository):
+                raise admission.AdmissionError("forged legacy")
+
+            def lookup(self, *args):
+                raise admission.AdmissionError("forged lookup")
+
+        denied = DenyLoaded(loaded.enrollments, loaded.legacy_xapi)
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(self.fx.app_config(), denied),
+            {"review_conductor": "present", "legacy_xapi": "absent"},
+        )
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(
+                self.fx.app_config(),
+                DenyLoaded(dual.enrollments, dual.legacy_xapi),
+            ),
+            {"review_conductor": "present", "legacy_xapi": "present"},
+        )
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(
+                self.fx.app_config(),
+                OverrideEmpty(empty.enrollments, empty.legacy_xapi),
+            ),
+            {"review_conductor": "absent", "legacy_xapi": "absent"},
+        )
+
+    def test_malformed_service_profile_repository_is_broken_not_unenrolled(self):
+        empty = self._load_route_registry(enroll=False)
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(self.fx.app_config(), empty),
+            {"review_conductor": "absent", "legacy_xapi": "absent"},
+        )
+        cases = (
+            None,
+            1,
+            True,
+            "",
+            "saari-co/x-api",
+            "Saari-Co/openclaw-smcbd-suite",
+        )
+        for repository in cases:
+            with self.subTest(repository=repository):
+                config = copy.deepcopy(self.fx.app_config())
+                config["github_app"]["repository"] = repository
+                self.assertEqual(
+                    service.trusted_enrollment_from_registry(config, empty),
+                    {"review_conductor": "broken", "legacy_xapi": "broken"},
+                )
+        missing = copy.deepcopy(self.fx.app_config())
+        del missing["github_app"]["repository"]
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(missing, empty),
+            {"review_conductor": "broken", "legacy_xapi": "broken"},
+        )
+        not_a_map = copy.deepcopy(self.fx.app_config())
+        not_a_map["github_app"] = REPOSITORY
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(not_a_map, empty),
+            {"review_conductor": "broken", "legacy_xapi": "broken"},
+        )
+
     def test_notification_event_identity_distinguishes_route_changes(self):
         with tempfile.TemporaryDirectory() as temporary:
             config = legacy.config_fixture(Path(temporary))
@@ -3687,6 +3777,20 @@ MUTANTS = [
         '        f"{decision[\'route\']}|{decision[\'reason\']}|{eligibility}"\n',
         '        f"{row[\'state\']}|{eligibility}"\n',
         "AdmissionIngressTests.test_notification_event_identity_distinguishes_route_changes",
+    ),
+    (
+        "let a Registry subclass synthesize legacy routing",
+        "tools/service_runtime.py",
+        "    snapshot = _registry_from_stored_fields(registry)\n    if snapshot is None:\n        return dict(broken)\n",
+        "    snapshot = registry\n    if snapshot is None:\n        return dict(broken)\n",
+        "AdmissionIngressTests.test_registry_subclass_overrides_cannot_synthesize_routes",
+    ),
+    (
+        "treat an out-of-scope service profile as unenrolled",
+        "tools/service_runtime.py",
+        "    if type(repository) is not str or repository not in admission.INITIAL_ENROLLMENT_SCOPE:\n        return dict(broken)\n",
+        '    if type(repository) is not str or repository not in admission.INITIAL_ENROLLMENT_SCOPE:\n        return {"review_conductor": "absent", "legacy_xapi": "absent"}\n',
+        "AdmissionIngressTests.test_malformed_service_profile_repository_is_broken_not_unenrolled",
     ),
 ]
 

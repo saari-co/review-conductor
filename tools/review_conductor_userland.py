@@ -1419,6 +1419,7 @@ def collect_clawsweeper_terminals(
 CONCISE_BLOCKED_REASONS = {
     "unknown_state_fail_closed": "unknown state",
     "unknown_rail_result_fail_closed": "unknown rail result",
+    "inconsistent_state_rail_result_fail_closed": "inconsistent state rail result",
     "unknown_outcome_fail_closed": "unknown orchestration state",
     "ambiguous_or_broken_enrollment": "ambiguous or broken enrollment",
     "human_action_required": "human gate",

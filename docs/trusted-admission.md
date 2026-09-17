@@ -76,9 +76,13 @@ Rules enforced by `load_registry`:
 - Optional `legacy_xapi` may appear only as a top-level object with exact keys
   `repository` and `status`. `Registry.legacy_status_for(repository)` returns
   that loaded status for the exact service profile and `absent` when the field
-  is omitted or names another profile. `trusted_enrollment_from_registry`
-  consumes only this validated field. Userland `enabled` / `blockers` and
-  synthetic subclass attributes cannot grant a legacy status.
+  is omitted or names another profile. The profile repository must be an
+  exact admitted-scope string before that omitted-marker absence is
+  treated as legitimate. `trusted_enrollment_from_registry` snapshots
+  and revalidates the exact base Registry dataclass fields and consumes
+  only those loaded values. Userland `enabled` / `blockers` and
+  synthetic subclass methods or attributes cannot grant a legacy status
+  or synthesize Conductor, dual, or broken routing.
 
 `Registry.lookup(repository, repository_id, app_id, installation_id)` succeeds
 only when all four agree with one enrollment; strings, booleans or a neighbouring

@@ -992,6 +992,29 @@ def test_first_round_openclaw_findings_and_repair_required_are_silent() -> None:
         assert second["deliveries"] == []
 
 
+def test_waiting_human_missing_rail_queues_blocked_notification_once() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        config = config_fixture(Path(temporary))
+        pr = 85
+        ingress(config, "pull_request", "missing-rail-pr", pr_payload(pr))
+        set_head(config, pr, state="waiting_human", rail=None, blocker="stale missing rail")
+        created = userland.queue_notifications(config)
+        assert created == 3
+        outcomes = queued_notification_outcomes(config)
+        assert outcomes
+        for item in outcomes:
+            assert item["route"] == "fail_closed"
+            assert item["reason"] == "unknown_rail_result_fail_closed"
+            assert item["notification"]["eligibility"] == "blocked"
+        notifier = FakeNotifier()
+        delivered = userland.deliver_notifications(config, notifier, dry_run=False)
+        assert len(delivered["deliveries"]) == 3
+        assert_exact_terminal_messages(notifier, concise_blocked(pr, "unknown rail result"))
+        again = userland.deliver_notifications(config, FakeNotifier(), dry_run=False)
+        assert again["deliveries"] == []
+        assert len(_notification_rows(config)) == 3
+
+
 def test_unknown_head_outcome_fail_closed_routes_blocked_notification() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         config = config_fixture(Path(temporary))
@@ -2165,6 +2188,7 @@ def main() -> None:
         test_keep_open_without_defects_is_review_success_not_merge,
         test_clawsweeper_finding_waits_for_adjudication_without_notification,
         test_first_round_openclaw_findings_and_repair_required_are_silent,
+        test_waiting_human_missing_rail_queues_blocked_notification_once,
         test_unknown_head_outcome_fail_closed_routes_blocked_notification,
         test_broken_enrollment_fail_closed_routes_blocked_notification,
         test_closed_heads_reject_direct_and_service_loop_dispatch,

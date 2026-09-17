@@ -22,13 +22,19 @@ Queue consumer: [`queue_notifications`](../tools/review_conductor_userland.py).
 registry/admission result and pass that pair into `run_tick` before
 review stages and the queue. The v2 registry may carry an optional
 exact-profile `legacy_xapi` marker; omitted means legacy absent.
-`trusted_enrollment_from_registry` reads only the loaded field.
-Userland `enabled` / `blockers` flags do
-not select the route. Pending rows are revalidated before send; event
-identity includes route, reason, and eligibility. `human_gate=true`
-precedes merge-ready and silent nonterminal dispatch. `closed` /
-`closed_merged` are terminal, silent, and non-dispatchable even when
-enrollment is broken; closed-state handling precedes enrollment
-short-circuits. `notification.eligibility` has no `fail_closed` value;
-representable failures use `blocked`. The public schema accepts only
-producer-emittable eligibility/kind/channel combinations.
+`trusted_enrollment_from_registry` snapshots and revalidates exact
+base Registry dataclass fields and reads only those loaded values.
+The service-profile repository must be an exact admitted-scope string
+before omitted-marker absence is treated as legitimate none. Userland
+`enabled` / `blockers` flags do not select the route. Pending rows are
+revalidated before send; event identity includes route, reason, and
+eligibility. `human_gate=true` precedes merge-ready and silent
+nonterminal dispatch. Impossible state/rail/result tuples fail closed
+before any review_dispatch or notification eligibility is calculated.
+The persisted-row adapter maps inconsistent stored state/rail data to
+typed unknown results. `closed` / `closed_merged` are terminal, silent,
+and non-dispatchable even when enrollment is broken; closed-state
+handling precedes enrollment short-circuits. `notification.eligibility`
+has no `fail_closed` value; representable failures use `blocked`. The
+public schema accepts only producer-emittable eligibility/kind/channel
+combinations.

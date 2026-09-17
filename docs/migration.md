@@ -90,8 +90,14 @@ does not infer legacy/none/dual/broken from userland activation flags.
 The v2 registry document may name one exact-profile `legacy_xapi`
 marker; existing documents that omit it stay Conductor-only (legacy
 absent). `load_registry` rejects malformed or ambiguous marker forms.
-`trusted_enrollment_from_registry` consumes only that loaded field.
-`human_gate=true` precedes merge-ready and silent nonterminal dispatch.
+`trusted_enrollment_from_registry` consumes only that loaded field
+after snapshotting and revalidating exact base Registry dataclass
+fields. The service-profile repository must be an exact admitted-scope
+string before omitted-marker absence is treated as legitimate none.
+Impossible state/rail/result tuples fail closed before dispatch or
+notification eligibility. The persisted-row adapter maps inconsistent
+stored rows to typed unknown results so the queue can notify blocked
+once. `human_gate=true` precedes merge-ready and silent nonterminal dispatch.
 Notification event identity includes canonical route/reason/eligibility
 so a superseded pending row retires while the current blocked decision
 delivers exactly once. `repair_cycle` is the

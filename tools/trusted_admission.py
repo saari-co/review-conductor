@@ -137,16 +137,18 @@ class Registry:
 
         The marker is absent when the v2 field is omitted or names another
         profile. Reads the dataclass field only; subclass attributes and
-        properties cannot grant a status. Malformed stored markers fail closed.
+        properties cannot grant a status. The profile repository must be an
+        exact admitted-scope string before omitted-marker absence is treated
+        as legitimate. Malformed stored markers fail closed.
         """
+        if type(repository) is not str or repository not in INITIAL_ENROLLMENT_SCOPE:
+            _fail("legacy_xapi profile repository is required")
         stored = object.__getattribute__(self, "__dict__")
         marker = stored.get("legacy_xapi") if isinstance(stored, dict) else None
         if marker is None:
             return "absent"
         if not isinstance(marker, LegacyXapiMarker):
             _fail("registry legacy_xapi is malformed")
-        if type(repository) is not str:
-            _fail("legacy_xapi profile repository is required")
         if marker.repository != repository:
             return "absent"
         if type(marker.status) is not str or marker.status not in LEGACY_XAPI_STATUSES:

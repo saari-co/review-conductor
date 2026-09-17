@@ -391,6 +391,75 @@ class FailClosedTests(unittest.TestCase):
         self.assertEqual(unknown_rail["notification"]["eligibility"], "blocked")
         self.assertEqual(unknown_rail["reason"], "unknown_rail_result_fail_closed")
 
+    def test_inconsistent_state_rail_results_fail_closed_before_dispatch(self):
+        running_findings = notify(
+            enrolled(
+                state="ci_running",
+                rail=None,
+                openclaw_result="findings",
+                clawsweeper_result="absent",
+            )
+        )
+        self.assertEqual(running_findings["route"], "fail_closed")
+        self.assertFalse(running_findings["review_dispatch"])
+        self.assertFalse(running_findings["legacy_dispatch"])
+        self.assertFalse(running_findings["merge_ready_eligible"])
+        self.assertEqual(running_findings["notification"]["eligibility"], "blocked")
+        self.assertEqual(running_findings["notification"]["kind"], "human_action_required")
+        self.assertEqual(
+            running_findings["reason"], "inconsistent_state_rail_result_fail_closed"
+        )
+        for rail in (None, "openclaw"):
+            with self.subTest(rail=rail):
+                ready = notify(
+                    enrolled(
+                        state="ready_for_human_merge",
+                        rail=rail,
+                        openclaw_result="clean",
+                        clawsweeper_result="effectively_clean",
+                        ready_qualified=True,
+                    )
+                )
+                self.assertEqual(ready["route"], "fail_closed")
+                self.assertFalse(ready["review_dispatch"])
+                self.assertFalse(ready["merge_ready_eligible"])
+                self.assertEqual(ready["notification"]["eligibility"], "blocked")
+                self.assertNotEqual(ready["notification"]["eligibility"], "merge_ready")
+                self.assertEqual(
+                    ready["reason"], "inconsistent_state_rail_result_fail_closed"
+                )
+        gated_missing_rail = notify(
+            enrolled(
+                state="waiting_human",
+                rail=None,
+                openclaw_result="human_gate",
+                clawsweeper_result="absent",
+                human_gate=True,
+            )
+        )
+        self.assertEqual(gated_missing_rail["route"], "fail_closed")
+        self.assertFalse(gated_missing_rail["review_dispatch"])
+        self.assertEqual(
+            gated_missing_rail["reason"], "inconsistent_state_rail_result_fail_closed"
+        )
+
+    def test_persisted_row_adapter_maps_inconsistent_rows_to_unknown(self):
+        enrolled_pair = {"review_conductor": "present", "legacy_xapi": "absent"}
+        mapped = outcome.outcome_from_review_row(
+            {"state": "waiting_human", "rail": None, "repair_cycle": 0},
+            enrollment=enrolled_pair,
+        )
+        self.assertEqual(mapped["openclaw_result"], "unknown")
+        self.assertEqual(mapped["clawsweeper_result"], "unknown")
+        decision = outcome.decide_orchestration_outcome(mapped)
+        self.assertEqual(decision["route"], "fail_closed")
+        self.assertFalse(decision["review_dispatch"])
+        self.assertFalse(decision["legacy_dispatch"])
+        self.assertEqual(decision["notification"]["eligibility"], "blocked")
+        self.assertEqual(decision["reason"], "unknown_rail_result_fail_closed")
+        with self.assertRaises(outcome.OrchestrationError):
+            outcome.derive_rail_results("waiting_human", None)
+
     def test_row_mapper_preserves_silent_repair_and_blocked_ci(self):
         enrolled_pair = {"review_conductor": "present", "legacy_xapi": "absent"}
         silent = outcome.decide_orchestration_outcome(
@@ -703,8 +772,8 @@ class PreciseMutantTests(unittest.TestCase):
         ),
         (
             "skip the closed-state dispatch fence",
-            "    if state in TERMINAL_CLOSED_STATES:\n",
-            "    if False and state in TERMINAL_CLOSED_STATES:\n",
+            "    if state in TERMINAL_CLOSED_STATES:\n        return _outcome(\n",
+            "    if False and state in TERMINAL_CLOSED_STATES:\n        return _outcome(\n",
             "test_closed_states_are_terminal_and_non_dispatchable",
         ),
         (
@@ -742,6 +811,18 @@ class PreciseMutantTests(unittest.TestCase):
             '        if kind not in {"merge_ready", "human_action_required"}:\n            _fail("notification kind is required for a terminal send")\n        channels = list(NOTIFY_CHANNELS)',
             '        kind = None\n        channels = list(NOTIFY_CHANNELS)',
             "test_notification_schema_accepts_producer_samples_and_rejects_impossibles",
+        ),
+        (
+            "skip state/rail/result tuple consistency",
+            '    if not _consistent_state_rail_results(state, rail, openclaw_result, clawsweeper_result):\n        return _fail_closed_blocked(repair, "inconsistent_state_rail_result_fail_closed")\n',
+            "    if False and not _consistent_state_rail_results(state, rail, openclaw_result, clawsweeper_result):\n        return _fail_closed_blocked(repair, \"inconsistent_state_rail_result_fail_closed\")\n",
+            "test_inconsistent_state_rail_results_fail_closed_before_dispatch",
+        ),
+        (
+            "let the row mapper raise instead of mapping unknown results",
+            '    try:\n        openclaw_result, clawsweeper_result = derive_rail_results(state, rail)\n    except OrchestrationError:\n        openclaw_result, clawsweeper_result = "unknown", "unknown"\n',
+            "    openclaw_result, clawsweeper_result = derive_rail_results(state, rail)\n",
+            "test_persisted_row_adapter_maps_inconsistent_rows_to_unknown",
         ),
     )
 

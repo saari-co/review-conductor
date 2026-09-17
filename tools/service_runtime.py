@@ -727,6 +727,30 @@ def require_exact_current_binding(
         connection.close()
 
 
+def _registry_from_stored_fields(registry: Any) -> admission.Registry | None:
+    """Rebuild a base Registry from stored dataclass fields only.
+
+    Subclass methods, properties, and synthetic attributes cannot grant a
+    route. Only the exact base fields, revalidated by Registry construction,
+    are authoritative. ``load_registry`` remains the producer of those fields.
+    """
+    if not isinstance(registry, admission.Registry):
+        return None
+    try:
+        stored = object.__getattribute__(registry, "__dict__")
+    except AttributeError:
+        return None
+    if type(stored) is not dict or "enrollments" not in stored:
+        return None
+    try:
+        concrete = admission.Registry(stored["enrollments"], stored.get("legacy_xapi"))
+    except admission.AdmissionError:
+        return None
+    if type(concrete) is not admission.Registry:
+        return None
+    return concrete
+
+
 def trusted_enrollment_from_registry(
     config: dict[str, Any],
     registry: admission.Registry,
@@ -739,29 +763,34 @@ def trusted_enrollment_from_registry(
     A matching registry enrollment is Review Conductor present. Absence of that
     enrollment is unenrolled unless the loaded registry document names this
     exact service profile in its optional ``legacy_xapi`` marker. The marker
-    is consumed only from the validated Registry field; subclass attributes
-    cannot grant a status. Identity, reviewer, or core contradictions fail
-    closed. Dual is Conductor present plus that same registry-owned legacy
-    marker for this profile.
+    is consumed only from the validated Registry field; subclass methods and
+    attributes cannot grant a status. The service-profile repository must be
+    an exact admitted-scope string before omitted-marker absence is treated
+    as legitimate none/legacy-absent. Identity, reviewer, or core
+    contradictions fail closed. Dual is Conductor present plus that same
+    registry-owned legacy marker for this profile.
     """
     broken = {"review_conductor": "broken", "legacy_xapi": "broken"}
-    if not isinstance(registry, admission.Registry):
+    snapshot = _registry_from_stored_fields(registry)
+    if snapshot is None:
         return dict(broken)
     app = config.get("github_app")
     if not isinstance(app, dict):
         return dict(broken)
     repository = app.get("repository")
+    if type(repository) is not str or repository not in admission.INITIAL_ENROLLMENT_SCOPE:
+        return dict(broken)
     try:
-        legacy = registry.legacy_status_for(repository)
+        legacy = snapshot.legacy_status_for(repository)
     except admission.AdmissionError:
         return dict(broken)
     if legacy not in admission.LEGACY_XAPI_STATUSES:
         return dict(broken)
-    matches = [item for item in registry.enrollments if item.repository == repository]
+    matches = [item for item in snapshot.enrollments if item.repository == repository]
     if len(matches) != 1:
         return {"review_conductor": "absent", "legacy_xapi": legacy} if not matches else dict(broken)
     try:
-        enrolled = registry.lookup(
+        enrolled = snapshot.lookup(
             app.get("repository"),
             app.get("repository_id"),
             app.get("app_id"),

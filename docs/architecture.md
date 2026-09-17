@@ -51,8 +51,12 @@ fails closed and is never treated as unenrolled. `run_service_tick`
 resolves that pair from the authoritative registry/admission result and
 passes it into `run_tick`. The v2 service-owned registry may carry an
 optional exact-profile `legacy_xapi` marker; omitted documents remain
-legacy absent. `trusted_enrollment_from_registry` reads only that loaded
-field. Userland activation flags (`enabled` /
+legacy absent. `trusted_enrollment_from_registry` snapshots and
+revalidates the exact base Registry dataclass fields from the loaded
+document; subclass methods cannot synthesize Conductor, legacy, dual,
+or broken routing. The service-profile `github_app.repository` must be
+an exact admitted-scope string before omitted-marker absence is treated
+as legitimate none. Userland activation flags (`enabled` /
 `blockers`) do not select legacy, none, dual, or broken routes.
 Hydration, action draining, result collection, and review stages run
 only when the trusted route is `review_conductor`. Dual enrollment
@@ -86,11 +90,16 @@ genuinely blocked/human-action-required outcomes notify. Terminal copy is
 `<repo>#<pr> ready to merge` or `<repo>#<pr> blocked — <specific reason>`,
 optionally with the PR URL, and carries no transcript, progress, cycle, tier,
 or proof prose. A changed head preserves the 2/2 repair ledger. Representable
-fail-closed enrollment, unknown state/result, and equivalent invalid
-orchestration states keep routing and dispatch suppressed and stay eligible
-for the blocked notification path; the queue must not raise or silently pass
-them. Fail-closed copy uses the canonical decision reason, not stale
-persisted blocker text. Malformed inputs still raise. See the
+fail-closed enrollment, unknown state/result, inconsistent
+state/rail/result tuples, and equivalent invalid orchestration states
+keep routing and dispatch suppressed and stay eligible for the blocked
+notification path; the queue must not raise or silently pass them. The
+persisted-row adapter maps inconsistent stored state/rail data to typed
+unknown results so a malformed current row still notifies once.
+Impossible contradictions are rejected before any review_dispatch or
+notification eligibility is calculated. Fail-closed copy uses the
+canonical decision reason, not stale persisted blocker text. Direct
+public contract inputs still raise. See the
 [decision map](orchestration-decision-map.md) for later #687 workstreams.
 
 The Conductor is the sole writer of the authoritative `OpenClaw Review Rail`

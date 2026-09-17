@@ -8,7 +8,10 @@ existing notification queue consumes this outcome; this is not a second
 notification system and it does not import, invoke, or dispatch x-api.
 Representable fail-closed states suppress routing and keep
 legacy_dispatch false, but they remain eligible for the blocked
-notification path.
+notification path. Impossible state/rail/result tuples fail closed
+before any dispatch or notification eligibility is calculated. The
+persisted-row adapter maps inconsistent stored state/rail data to
+typed unknown results; direct public contract inputs remain strict.
 """
 
 from __future__ import annotations
@@ -394,6 +397,8 @@ def decide_orchestration_outcome(raw: Any) -> dict[str, Any]:
         return _fail_closed_blocked(repair, "unknown_state_fail_closed")
     if openclaw_result == "unknown" or clawsweeper_result == "unknown":
         return _fail_closed_blocked(repair, "unknown_rail_result_fail_closed")
+    if not _consistent_state_rail_results(state, rail, openclaw_result, clawsweeper_result):
+        return _fail_closed_blocked(repair, "inconsistent_state_rail_result_fail_closed")
     if value["human_gate"]:
         return _outcome(
             route=route,
@@ -488,6 +493,49 @@ def decide_orchestration_outcome(raw: Any) -> dict[str, Any]:
     return _fail_closed_blocked(repair, "unknown_outcome_fail_closed")
 
 
+def _consistent_state_rail_results(
+    state: str,
+    rail: str | None,
+    openclaw_result: str,
+    clawsweeper_result: str,
+) -> bool:
+    """Return whether the complete state/rail/result tuple is representable."""
+    if state in {"ci_running", "ci_failed", "openclaw_queued", "openclaw_running"}:
+        return openclaw_result == "absent" and clawsweeper_result == "absent"
+    if state in TERMINAL_CLOSED_STATES:
+        return openclaw_result == "absent" and clawsweeper_result == "absent"
+    if state == "openclaw_failed":
+        return openclaw_result == "failed" and clawsweeper_result == "absent"
+    if state == "openclaw_clean_draft":
+        return openclaw_result == "clean" and clawsweeper_result == "absent"
+    if state in {"clawsweeper_queued", "clawsweeper_running"}:
+        return openclaw_result == "clean" and clawsweeper_result == "absent"
+    if state == "clawsweeper_failed":
+        return openclaw_result == "clean" and clawsweeper_result == "failed"
+    if state == "clawsweeper_clean_draft":
+        return openclaw_result == "clean" and clawsweeper_result == "clean"
+    if state == "ready_for_human_merge":
+        if rail != "clawsweeper":
+            return False
+        if openclaw_result not in {"clean", "effectively_clean"}:
+            return False
+        return clawsweeper_result in {
+            "clean",
+            "effectively_clean",
+            "findings",
+            "human_gate",
+            "failed",
+        }
+    if state in SILENT_INTERNAL_STATES | {"waiting_human"}:
+        if rail not in RAILS:
+            return False
+        expected = "human_gate" if state == "waiting_human" else "findings"
+        if rail == "clawsweeper":
+            return openclaw_result == "clean" and clawsweeper_result == expected
+        return openclaw_result == expected and clawsweeper_result == "absent"
+    return False
+
+
 def derive_rail_results(state: str, rail: str | None) -> tuple[str, str]:
     """Map a current engine head onto typed rail results without prose parsing."""
     if state not in KNOWN_STATES:
@@ -523,10 +571,19 @@ def outcome_from_review_row(
     enrollment: Mapping[str, str] | None = None,
     head_changed: bool = False,
 ) -> dict[str, Any]:
-    """Build the exact decision input from a current Review Conductor head."""
+    """Build the exact decision input from a current Review Conductor head.
+
+    Persisted-row adapter only: inconsistent stored state/rail data maps to
+    typed unknown results so the canonical decision can fail closed and
+    notify. Direct ``decide_orchestration_outcome`` / ``derive_rail_results``
+    inputs remain strict.
+    """
     state = row["state"]
     rail = row["rail"]
-    openclaw_result, clawsweeper_result = derive_rail_results(state, rail)
+    try:
+        openclaw_result, clawsweeper_result = derive_rail_results(state, rail)
+    except OrchestrationError:
+        openclaw_result, clawsweeper_result = "unknown", "unknown"
     ready_qualified = None
     if quality is not None:
         ready_qualified = bool(quality["ready_qualified"])

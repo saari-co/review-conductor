@@ -127,6 +127,9 @@ class RegistryTests(unittest.TestCase):
         empty = self.fx.registry({"schema": ta.REGISTRY_SCHEMA, "enrollments": []})
         self.assertIsNone(empty.legacy_xapi)
         self.assertEqual(empty.legacy_status_for(BLOCKS), "absent")
+        for repository in (None, 1, True, "", "saari-co/x-api"):
+            with self.subTest(repository=repository), self.assertRaises(ta.AdmissionError):
+                empty.legacy_status_for(repository)
 
     def test_legacy_xapi_marker_is_exact_profile_status(self):
         doc = self.fx.registry_doc()
