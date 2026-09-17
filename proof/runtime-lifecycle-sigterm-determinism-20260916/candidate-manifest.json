@@ -1,0 +1,13 @@
+{
+  "schema": "review-conductor.candidate-manifest.v1",
+  "base_sha": "e5824afe876b28ce8cb74e97080b1d1b1f23482b",
+  "starting_head_sha": "d2b6b14456261aa7f7eaa5bae38b299bd485de71",
+  "captured_date": "2026-09-16",
+  "binding_scheme": "A commit cannot contain its own SHA. base_sha is the required clean start. starting_head_sha is the PR head before this lifecycle-test repair. Per-file sha256 values are of this candidate source. The branch head after commit is the exact candidate SHA for hosted CI.",
+  "files": {
+    "proof/clawsweeper-human-gate-adjudication-20260916/PROOF.md": "18e16b625e8dd7f977cd970b67f7395c2f9739ac6ab981a137e3e8e659595b5e",
+    "proof/runtime-lifecycle-sigterm-determinism-20260916/PROOF.md": "85936724f58c8dae2c0fb80c4b5cdde96dd087c9eaf10e885e9778136dc1b139",
+    "tests/test_runtime_lifecycle.py": "3a6f14fdda510223188aad0c5eb750b65b24159413169929e6d72abd6bee4a47",
+    "tools/service_entrypoint.py": "4524956928ae196ae7ee49313e25e2fafc8f704682d0064be72442205ddc6a85"
+  }
+}

@@ -685,6 +685,7 @@ print('ok', file=sys.stderr)
         previous = {
             signal.SIGINT: signal.getsignal(signal.SIGINT),
             signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+            signal.SIGHUP: signal.getsignal(signal.SIGHUP),
         }
         events = []
         child = LiveChild()
@@ -708,13 +709,14 @@ print('ok', file=sys.stderr)
             self.assertEqual(self.start(config, path, popen), -signal.SIGTERM)
         self.assertEqual(
             [event[0] for event in events],
-            ["signal", "signal", "spawn", "signal", "signal"],
+            ["signal", "signal", "signal", "spawn", "signal", "signal", "signal"],
         )
         self.assertTrue(child.terminated)
         self.assertEqual(child.waits, 1)
         self.assertFalse(child.killed)
         self.assertEqual(signal.getsignal(signal.SIGINT), previous[signal.SIGINT])
         self.assertEqual(signal.getsignal(signal.SIGTERM), previous[signal.SIGTERM])
+        self.assertEqual(signal.getsignal(signal.SIGHUP), previous[signal.SIGHUP])
 
     def test_signal_immediately_after_popen_stops_child_before_wait(self):
         path, config = self.load_enabled()
@@ -722,6 +724,7 @@ print('ok', file=sys.stderr)
         previous = {
             signal.SIGINT: signal.getsignal(signal.SIGINT),
             signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+            signal.SIGHUP: signal.getsignal(signal.SIGHUP),
         }
         child = LiveChild()
         spawned = []
@@ -749,6 +752,7 @@ print('ok', file=sys.stderr)
         self.assertFalse(child.killed)
         self.assertEqual(signal.getsignal(signal.SIGINT), previous[signal.SIGINT])
         self.assertEqual(signal.getsignal(signal.SIGTERM), previous[signal.SIGTERM])
+        self.assertEqual(signal.getsignal(signal.SIGHUP), previous[signal.SIGHUP])
 
     def test_spawn_exception_restores_handlers(self):
         path, config = self.load_enabled()
@@ -756,6 +760,7 @@ print('ok', file=sys.stderr)
         previous = {
             signal.SIGINT: signal.getsignal(signal.SIGINT),
             signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+            signal.SIGHUP: signal.getsignal(signal.SIGHUP),
         }
         events = []
         real_signal = launcher.signal.signal
@@ -773,12 +778,14 @@ print('ok', file=sys.stderr)
                 self.start(config, path, fail_spawn)
         self.assertEqual(
             [event[0] for event in events],
-            ["signal", "signal", "spawn", "signal", "signal"],
+            ["signal", "signal", "signal", "spawn", "signal", "signal", "signal"],
         )
-        self.assertEqual(events[3][2], previous[signal.SIGINT])
-        self.assertEqual(events[4][2], previous[signal.SIGTERM])
+        self.assertEqual(events[4][2], previous[signal.SIGINT])
+        self.assertEqual(events[5][2], previous[signal.SIGTERM])
+        self.assertEqual(events[6][2], previous[signal.SIGHUP])
         self.assertEqual(signal.getsignal(signal.SIGINT), previous[signal.SIGINT])
         self.assertEqual(signal.getsignal(signal.SIGTERM), previous[signal.SIGTERM])
+        self.assertEqual(signal.getsignal(signal.SIGHUP), previous[signal.SIGHUP])
 
     def test_normal_exit_restores_handlers_and_reaps_child_once(self):
         path, config = self.load_enabled()
@@ -786,13 +793,16 @@ print('ok', file=sys.stderr)
         previous = {
             signal.SIGINT: signal.getsignal(signal.SIGINT),
             signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+            signal.SIGHUP: signal.getsignal(signal.SIGHUP),
         }
         child = LiveChild()
         stops = []
-        real_stop = launcher.stop_child
+        timeouts = []
+        real_stop = launcher.stop_standalone_child
 
         def stop(process):
             stops.append(process)
+            timeouts.append(launcher.STANDALONE_CHILD_STOP_SECONDS)
             return real_stop(process)
 
         def popen(command, **kwargs):
@@ -801,14 +811,16 @@ print('ok', file=sys.stderr)
             child.returncode = 0
             return child
 
-        with patch.object(launcher, "stop_child", side_effect=stop):
+        with patch.object(launcher, "stop_standalone_child", side_effect=stop):
             self.assertEqual(self.start(config, path, popen), 0)
         self.assertEqual(stops, [child])
+        self.assertEqual(timeouts, [launcher.STANDALONE_CHILD_STOP_SECONDS])
         self.assertEqual(child.waits, 1)
         self.assertFalse(child.terminated)
         self.assertFalse(child.killed)
         self.assertEqual(signal.getsignal(signal.SIGINT), previous[signal.SIGINT])
         self.assertEqual(signal.getsignal(signal.SIGTERM), previous[signal.SIGTERM])
+        self.assertEqual(signal.getsignal(signal.SIGHUP), previous[signal.SIGHUP])
 
     def test_command_behavior_docs_and_proof_are_consistent(self):
         files = {
@@ -965,7 +977,7 @@ class SuiteActivationLauncherMutationTests(unittest.TestCase):
         (
             "install standalone stop handlers after supervisor spawn",
             "tools/review_conductor_userland_launcher.py",
-            "        for signum in (signal.SIGINT, signal.SIGTERM):\n"
+            "        for signum in STANDALONE_STOP_SIGNALS:\n"
             "            previous_handlers[signum] = signal.signal(signum, request_stop)\n"
             "        # Own stop handlers before spawn so a startup-time signal cannot\n"
             "        # leave the supervisor child running without its foreground launcher.\n"
@@ -1005,9 +1017,16 @@ class SuiteActivationLauncherMutationTests(unittest.TestCase):
             "                pass_fds=(webhook_fd, github_fd),\n"
             "            )\n"
             "        assert child is not None\n"
-            "        for signum in (signal.SIGINT, signal.SIGTERM):\n"
+            "        for signum in STANDALONE_STOP_SIGNALS:\n"
             "            previous_handlers[signum] = signal.signal(signum, request_stop)\n",
             "test_suite_activation_launcher.SuiteActivationLauncherTests.test_signal_during_popen_stops_and_reaps_child",
+        ),
+        (
+            "keep standalone outer stop on the Blocks ten-second budget",
+            "tools/review_conductor_userland_launcher.py",
+            "            stop_standalone_child(child)\n",
+            "            stop_child(child)\n",
+            "test_suite_activation_launcher.SuiteActivationLauncherTests.test_normal_exit_restores_handlers_and_reaps_child_once",
         ),
     )
 

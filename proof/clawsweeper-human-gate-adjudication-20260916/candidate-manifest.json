@@ -1,0 +1,18 @@
+{
+  "schema": "review-conductor.candidate-manifest.v1",
+  "base_sha": "e5824afe876b28ce8cb74e97080b1d1b1f23482b",
+  "starting_head_sha": "e5824afe876b28ce8cb74e97080b1d1b1f23482b",
+  "captured_date": "2026-09-16",
+  "binding_scheme": "A commit cannot contain its own SHA. base_sha and starting_head_sha are the required clean start. Per-file sha256 values are of this candidate source. The branch head after commit is the exact candidate SHA for hosted CI.",
+  "files": {
+    "docs/provenance.json": "8e4ff533ecc49300b0ecc8d0c2670588807f8a286cb8ae2a706e8c7fe7658745",
+    "proof/clawsweeper-human-gate-adjudication-20260916/PROOF.md": "1513accd8bb59d5a5fbc9b22045a030f00c36344250cdddbc0deaf8f93adc71d",
+    "proof/runtime-lifecycle-sigterm-determinism-20260916/PROOF.md": "85936724f58c8dae2c0fb80c4b5cdde96dd087c9eaf10e885e9778136dc1b139",
+    "tests/test_review_conductor.py": "608a4c768852403a8851dabfa13f11ccc6ed5ab418395b5233cdd258bc3ed178",
+    "tests/test_review_conductor_userland.py": "5c5a5732b1764e3b34e953cf64fbac460c9d45a076ea3d8edb08cbc284de1ff1",
+    "tests/test_review_result_projection.py": "74329ea05f7eab640a40aa3ba2521fcb6b4c29f70ae499e140fa01691269feb4",
+    "tests/test_runtime_lifecycle.py": "3a6f14fdda510223188aad0c5eb750b65b24159413169929e6d72abd6bee4a47",
+    "tools/review_conductor.py": "a8286640bc4d8d6a0dd958604d9c312534a48f73733a3b4b4c1689579a77310b",
+    "tools/review_conductor_runtime.py": "bae02fcfe9130342e25dded8e0f5f9d8f28dc7e21041cebc17a2811c57c8d41f"
+  }
+}

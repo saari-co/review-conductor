@@ -455,6 +455,89 @@ class ArtifactPublicationTests(unittest.TestCase):
         self.assertIn("legacy summary only", self.http.comments[0]["body"])
         self.assertNotIn("rating: 🐚 platinum hermit", self.http.labels)
 
+    def test_later_leftover_terminal_keeps_exact_request_rich_publication(self):
+        self.prepare()
+        with closing(self.db()) as db:
+            row = db.execute("SELECT event_id,payload_json FROM events WHERE kind='clawsweeper.terminal'").fetchone()
+            original = json.loads(row["payload_json"])
+            leftover = {**original, "workflow_run_id": "802"}
+            core.insert_event(
+                db, event_id="leftover-clawsweeper-802", kind="clawsweeper.terminal", stale=False,
+                repository=original["repository"], pr_number=original["pr_number"],
+                base_sha=original["base_sha"], head_sha=original["head_sha"], payload=leftover,
+            )
+            db.commit()
+        first = self.project()
+        self.assertEqual(first["projected"][0]["publication"]["result"], "published")
+        self.assertFalse(first["merge_authorized"])
+        body = self.http.comments[0]["body"]
+        self.assertIn("## What This Changes", body)
+        self.assertIn("/actions/runs/801", body)
+        self.assertNotIn("/actions/runs/802", body)
+        self.assertIn(hashlib.sha256(self.report.encode()).hexdigest(), body)
+
+    def test_waiting_human_owner_adjudication_keeps_rich_bind_without_merge(self):
+        self.prepare(proof_status="insufficient")
+        with closing(self.db()) as db:
+            head = db.execute("SELECT * FROM heads WHERE is_current=1").fetchone()
+            self.assertEqual(head["state"], "waiting_human")
+            self.assertEqual(head["rail"], "clawsweeper")
+            self.assertEqual(str(head["review_request_id"]), "801")
+            row = db.execute("SELECT payload_json FROM events WHERE kind='clawsweeper.terminal'").fetchone()
+            leftover = {**json.loads(row["payload_json"]), "workflow_run_id": "802"}
+            core.insert_event(
+                db, event_id="leftover-waiting-human-802", kind="clawsweeper.terminal", stale=False,
+                repository=leftover["repository"], pr_number=leftover["pr_number"],
+                base_sha=leftover["base_sha"], head_sha=leftover["head_sha"], payload=leftover,
+            )
+            db.commit()
+        with self.assertRaisesRegex(core.ContractError, "supports only defer and reject_false_positive"):
+            core.ingest_internal_event(
+                config_path=Path(self.config["core_config"]),
+                state_root=Path(self.config["paths"]["state_root"]),
+                event_payload={
+                    "schema": core.INTERNAL_EVENT_SCHEMA, "event_id": "rich-waiting-human-required-fix",
+                    "type": "adjudication.completed", "repository": profiles.REPO, "pr_number": 7,
+                    "base_sha": profiles.BASE, "head_sha": profiles.HEAD, "request_id": "801",
+                    "rail": "clawsweeper", "classifications": ["required_fix"],
+                    "reviewer_actor": "fixture-suite-clawsweeper",
+                    "proof_ref": "proof/adjudication/rich-waiting-human/ADJUDICATION.md",
+                    "review_epoch": 0,
+                },
+            )
+        with closing(self.db()) as db:
+            self.assertEqual(db.execute("SELECT state FROM heads WHERE is_current=1").fetchone()[0], "waiting_human")
+        outcome = core.ingest_internal_event(
+            config_path=Path(self.config["core_config"]),
+            state_root=Path(self.config["paths"]["state_root"]),
+            event_payload={
+                "schema": core.INTERNAL_EVENT_SCHEMA, "event_id": "rich-waiting-human-defer",
+                "type": "adjudication.completed", "repository": profiles.REPO, "pr_number": 7,
+                "base_sha": profiles.BASE, "head_sha": profiles.HEAD, "request_id": "801",
+                "rail": "clawsweeper", "classifications": ["defer", "reject_false_positive"],
+                "reviewer_actor": "fixture-suite-clawsweeper",
+                "proof_ref": "proof/adjudication/rich-waiting-human/ADJUDICATION.md",
+                "review_epoch": 0,
+            },
+        )
+        self.assertEqual(outcome["state"], "ready_for_human_merge")
+        self.assertFalse(outcome["merge_dispatched"])
+        self.assertFalse(outcome["action_created"])
+        first = self.project()
+        self.assertFalse(first["merge_authorized"])
+        self.assertEqual(first["projected"][0]["publication"]["result"], "published")
+        self.assertIn(runtime.READY_LABEL, self.http.labels)
+        body = self.http.comments[0]["body"]
+        digest = hashlib.sha256(self.report.encode()).hexdigest()
+        for expected in ("## What This Changes", "Native proof status: insufficient",
+                         "Original review content: proof_deficient", digest, "/actions/runs/801",
+                         "human_only", "Merge authorized: no"):
+            self.assertIn(expected, body)
+        self.assertNotIn("/actions/runs/802", body)
+        with closing(self.db()) as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM actions WHERE kind='clawsweeper.dispatch'").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT count(*) FROM actions WHERE kind IN ('repair.route','merge')").fetchone()[0], 0)
+
     def test_wrong_comment_app_not_replaced_and_closed_ownership_retraction(self):
         self.prepare()
         self.project()

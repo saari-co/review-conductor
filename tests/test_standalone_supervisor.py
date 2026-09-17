@@ -222,6 +222,10 @@ class StandaloneSupervisorTests(unittest.TestCase):
                 str(kwargs["pass_fds"][3]),
             )
             self.assertEqual(
+                kwargs["env"][supervisor.PARENT_LIFETIME_FD_ENV],
+                str(kwargs["pass_fds"][4]),
+            )
+            self.assertEqual(
                 kwargs["env"][supervisor.PROFILE_DIGEST_ENV],
                 supervisor.profile_config_digest(self.config),
             )
@@ -372,6 +376,10 @@ os.fstat(leader)
             environment[supervisor.LEADER_FD_ENV],
             str(captured["kwargs"]["pass_fds"][3]),
         )
+        self.assertEqual(
+            environment[supervisor.PARENT_LIFETIME_FD_ENV],
+            str(captured["kwargs"]["pass_fds"][4]),
+        )
         self.assertIs(captured["kwargs"]["start_new_session"], True)
         self.assertEqual(environment["TEST_WEBHOOK_SECRET_FD"], str(credentials[0]))
         self.assertEqual(environment["TEST_GITHUB_PRIVATE_KEY_FD"], str(credentials[1]))
@@ -441,16 +449,20 @@ os.fstat(leader)
         changed["paths"]["state_root"] += "-replaced"
         generation_read, generation_write = os.pipe()
         leader_read, leader_write = os.pipe()
+        parent_read, parent_write = os.pipe()
         self.addCleanup(lambda: supervisor._close_descriptor(generation_read))
         self.addCleanup(lambda: supervisor._close_descriptor(generation_write))
         self.addCleanup(lambda: supervisor._close_descriptor(leader_read))
         self.addCleanup(lambda: supervisor._close_descriptor(leader_write))
+        self.addCleanup(lambda: supervisor._close_descriptor(parent_read))
+        self.addCleanup(lambda: supervisor._close_descriptor(parent_write))
         environment = {
             entrypoint.PROFILE_DIGEST_ENV: supervisor.profile_config_digest(
                 self.config
             ),
             entrypoint.GENERATION_FD_ENV: str(generation_write),
             entrypoint.LEADER_FD_ENV: str(leader_write),
+            entrypoint.PARENT_LIFETIME_FD_ENV: str(parent_read),
         }
         with patch.dict(os.environ, environment, clear=False), patch.object(
             entrypoint.userland, "load_config", return_value=changed
@@ -468,18 +480,23 @@ os.fstat(leader)
     def test_entrypoint_keeps_leader_handle_out_of_adapter_execs(self):
         generation_read, generation_write = os.pipe()
         leader_read, leader_write = os.pipe()
+        parent_read, parent_write = os.pipe()
         self.addCleanup(lambda: supervisor._close_descriptor(generation_read))
         self.addCleanup(lambda: supervisor._close_descriptor(generation_write))
         self.addCleanup(lambda: supervisor._close_descriptor(leader_read))
         self.addCleanup(lambda: supervisor._close_descriptor(leader_write))
+        self.addCleanup(lambda: supervisor._close_descriptor(parent_read))
+        self.addCleanup(lambda: supervisor._close_descriptor(parent_write))
         environment = {
             entrypoint.PROFILE_DIGEST_ENV: supervisor.profile_config_digest(
                 self.config
             ),
             entrypoint.GENERATION_FD_ENV: str(generation_write),
             entrypoint.LEADER_FD_ENV: str(leader_write),
+            entrypoint.PARENT_LIFETIME_FD_ENV: str(parent_read),
         }
         os.set_inheritable(leader_write, True)
+        os.set_inheritable(parent_read, True)
         with patch.dict(os.environ, environment, clear=False), patch.object(
             entrypoint.userland, "load_config", return_value=self.config
         ):
@@ -487,6 +504,7 @@ os.fstat(leader)
                 entrypoint.load_supervised_profile(self.profile), self.config
             )
         self.assertFalse(os.get_inheritable(leader_write))
+        self.assertFalse(os.get_inheritable(parent_read))
 
     def test_open_generation_status_does_not_reap_leader(self):
         class ReapingLeader(FakeProcess):
@@ -1218,10 +1236,11 @@ os._exit(0)
                 )
         self.assertEqual(
             [event[0] for event in events],
-            ["signal", "signal", "spawn", "signal", "signal"],
+            ["signal", "signal", "signal", "spawn", "signal", "signal", "signal"],
         )
-        self.assertEqual(events[3][2], f"previous-{signal.SIGINT}")
-        self.assertEqual(events[4][2], f"previous-{signal.SIGTERM}")
+        self.assertEqual(events[4][2], f"previous-{signal.SIGINT}")
+        self.assertEqual(events[5][2], f"previous-{signal.SIGTERM}")
+        self.assertEqual(events[6][2], f"previous-{signal.SIGHUP}")
 
 
 class MutationTests(unittest.TestCase):
@@ -1232,18 +1251,18 @@ class MutationTests(unittest.TestCase):
             'test_spawn_rejects_inherited_ignored_sigchld_before_resource_creation',
         ),
         (
-            '            pass_fds=(*credentials, lifetime_write, leader_write),\n',
-            '            pass_fds=(lifetime_write, leader_write),\n',
+            '            pass_fds=(*credentials, lifetime_write, leader_write, parent_read),\n',
+            '            pass_fds=(lifetime_write, leader_write, parent_read),\n',
             'test_spawn_argv_and_environment_contain_only_paths_and_descriptor_numbers',
         ),
         (
-            '            pass_fds=(*credentials, lifetime_write, leader_write),\n',
-            '            pass_fds=(*credentials, leader_write),\n',
+            '            pass_fds=(*credentials, lifetime_write, leader_write, parent_read),\n',
+            '            pass_fds=(*credentials, leader_write, parent_read),\n',
             'test_spawn_argv_and_environment_contain_only_paths_and_descriptor_numbers',
         ),
         (
+            '            pass_fds=(*credentials, lifetime_write, leader_write, parent_read),\n',
             '            pass_fds=(*credentials, lifetime_write, leader_write),\n',
-            '            pass_fds=(*credentials, lifetime_write),\n',
             'test_spawn_argv_and_environment_contain_only_paths_and_descriptor_numbers',
         ),
         (
@@ -1420,8 +1439,13 @@ class MutationTests(unittest.TestCase):
             'test_control_response_requires_matching_identity',
         ),
         (
-            '            if install_signals:\n                for signum in (signal.SIGINT, signal.SIGTERM):\n                    previous_handlers[signum] = signal.signal(signum, request_stop)\n            # Install handlers before spawning so a startup-time signal cannot\n            # leave the service child running without its foreground supervisor.\n            supervisor.start_child()\n',
-            '            supervisor.start_child()\n            if install_signals:\n                for signum in (signal.SIGINT, signal.SIGTERM):\n                    previous_handlers[signum] = signal.signal(signum, request_stop)\n',
+            'STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)\n',
+            'STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM)\n',
+            'test_stop_signals_are_installed_before_child_spawn_and_restored',
+        ),
+        (
+            '            if install_signals:\n                for signum in STOP_SIGNALS:\n                    previous_handlers[signum] = signal.signal(signum, request_stop)\n            # Install handlers before spawning so a startup-time signal cannot\n            # leave the service child running without its foreground supervisor.\n            supervisor.start_child()\n',
+            '            supervisor.start_child()\n            if install_signals:\n                for signum in STOP_SIGNALS:\n                    previous_handlers[signum] = signal.signal(signum, request_stop)\n',
             'test_stop_signals_are_installed_before_child_spawn_and_restored',
         ),
     )

@@ -32,6 +32,7 @@ import urllib.request
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from socketserver import TCPServer
 from typing import Any, Callable
 
 
@@ -1137,10 +1138,23 @@ def accepted_quality_row(connection: sqlite3.Connection, row: sqlite3.Row) -> di
     result = dict(quality)
     result.setdefault("content_verdict", None)
     result.setdefault("process_gates_json", None)
+    bind_projected_clawsweeper_quality(row, result)
     return result
 
 
+def bind_projected_clawsweeper_quality(row: sqlite3.Row, quality: Any) -> None:
+    if quality is None:
+        return
+    request_id = row["review_request_id"]
+    if row["rail"] != "clawsweeper" or not request_id:
+        return
+    core.require_bound_clawsweeper_quality_workflow_run(
+        str(request_id), quality["workflow_run_id"]
+    )
+
+
 def effective_quality(connection: sqlite3.Connection, row: sqlite3.Row, quality: Any) -> Any:
+    bind_projected_clawsweeper_quality(row, quality)
     if quality is None or row["state"] != "ready_for_human_merge":
         return quality
     events = connection.execute(
@@ -1180,19 +1194,28 @@ def accepted_clawsweeper_presentation(
     identity = {key: row[key] for key in ("repository", "pr_number", "base_sha", "head_sha", "review_epoch")}
     if any(not core.same_typed_value(quality[key], value) for key, value in identity.items()):
         raise RuntimeError("native quality does not match the current exact tuple")
+    run_id = str(quality["workflow_run_id"])
+    if row["rail"] == "clawsweeper" and row["review_request_id"]:
+        core.require_bound_clawsweeper_quality_workflow_run(str(row["review_request_id"]), run_id)
+    result_projection.workflow_run_url(row["repository"], run_id)
+    actor = config["review_policy"]["reviewers"]["clawsweeper"]
     events = connection.execute(
         "SELECT payload_json FROM events WHERE kind='clawsweeper.terminal' "
         "AND repository=? AND pr_number=? AND base_sha=? AND head_sha=? AND stale=0 ORDER BY sequence DESC",
         tuple(identity[key] for key in ("repository", "pr_number", "base_sha", "head_sha")),
     )
-    terminal = next((payload for event in events
-                     if isinstance((payload := json.loads(event["payload_json"])), dict)
-                     and core.same_typed_value(payload.get("review_epoch"), row["review_epoch"])), None)
-    if terminal is None or "proof_sha256" not in terminal:
+    same_epoch = [
+        payload for event in events
+        if isinstance((payload := json.loads(event["payload_json"])), dict)
+        and core.same_typed_value(payload.get("review_epoch"), row["review_epoch"])
+    ]
+    terminal = next((payload for payload in same_epoch if str(payload.get("workflow_run_id", "")) == run_id), None)
+    if terminal is None:
+        if same_epoch:
+            raise RuntimeError("native accepted receipt conflicts with publication evidence")
         return None  # Older accepted receipts are explicitly presentation-unavailable.
-    run_id = str(quality["workflow_run_id"])
-    result_projection.workflow_run_url(row["repository"], run_id)
-    actor = config["review_policy"]["reviewers"]["clawsweeper"]
+    if "proof_sha256" not in terminal:
+        return None  # Older accepted receipts are explicitly presentation-unavailable.
     if (str(terminal.get("workflow_run_id")) != run_id
             or terminal.get("proof_sha256") != quality["report_sha256"]
             or terminal.get("reviewer_actor") != actor
@@ -1398,6 +1421,7 @@ def projection_check_report(
             row["repository"], str(request_id)
         )
     if quality is not None:
+        bind_projected_clawsweeper_quality(row, quality)
         if "adjudication_reason" in quality.keys():
             report["reason"] = quality["adjudication_reason"]
         report["artifact_digest"] = quality["report_sha256"]
@@ -3159,6 +3183,13 @@ class BoundedHTTPServer(ThreadingHTTPServer):
         self._capacity = threading.BoundedSemaphore(max_clients)
         self._request_timeout_seconds = request_timeout_seconds
         super().__init__(*args, **kwargs)
+
+    def server_bind(self) -> None:
+        # Ingress readiness must not wait on reverse DNS (macOS mDNS).
+        TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host or "127.0.0.1"
+        self.server_port = port
 
     def get_request(self) -> tuple[Any, Any]:
         request, client_address = super().get_request()

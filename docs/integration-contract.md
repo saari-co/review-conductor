@@ -57,14 +57,42 @@ and GitHub App credentials move only through explicitly inherited descriptors.
 The foreground supervisor exposes identity-bound local health/stop/restart
 control, retains anonymous descriptor copies for explicit restart, and leaves a
 crashed service failed until that restart is requested. The service runs in an
-owned process session and inherits dedicated leader and generation descriptors
-alongside the credential descriptors. The entrypoint makes the leader descriptor
-close-on-exec, while every direct adapter command uses one authoritative wrapper
-that explicitly preserves the generation descriptor and selector through
-`close_fds`. Explicit stop/restart keeps the unreaped leader and generation
-descriptor as race-free identities, signals the process group, and reaps the
-leader only after every inheritor has closed the generation descriptor; no
-numeric PGID is probed after identity release. The entrypoint verifies the
+owned process session and inherits dedicated leader, generation, and
+parent-lifetime descriptors alongside the credential descriptors. The entrypoint
+makes the leader and parent-lifetime descriptors close-on-exec, while every
+direct adapter command uses one authoritative wrapper that explicitly preserves
+the generation descriptor and selector through `close_fds`. If the supervisor
+exits or is killed, the service observes EOF on the parent-lifetime descriptor
+and drains its still-owned session instead of remaining a listening orphan.
+Entrypoint SIGINT/SIGTERM/SIGHUP request shutdown on a helper thread so the
+serving loop cannot deadlock, and parent-loss uses a bounded full-session drain
+that does not wait for an in-flight worker tick or admit further work.
+That drain observes remaining owned-session descendants without reaping
+worker-owned children, so adapter `subprocess.run` exit status stays intact, and
+it is marked complete only after the owned-session drain succeeds. A signaling
+error leaves the drain incomplete so the watcher can retry, including while
+`worker.join` is blocked. Final service exit waits for that drain, including
+when EOF arrives during `worker.join` and the worker then returns, so a daemon
+watcher cannot be torn down mid-drain. Repeated parent-loss retries schedule
+the HTTP shutdown helper once and retain only the first signaling failure.
+Parent-liveness supervision continues after stop is requested until shutdown
+actually completes; if the supervisor write end closes while worker.join is
+still blocked, the service still drains its owned listener, lock, and
+generation. Ingress bind records the listen host and port without
+reverse-resolving through `getfqdn`, so macOS mDNS cannot stall readiness
+before the owned listener exists.
+Standalone launcher stop waits through the supervisor drain budget and treats
+SIGHUP as orderly stop via `stop_standalone_child`; legacy Blocks `start`
+keeps `stop_child`'s ten-second default. An installed caller that stops both
+the conductor and tunnel through `stop_child` changes only the conductor call
+to `stop_standalone_child` after this lands. This repository does not contain
+a launchd unit; root prepares that host externally with KeepAlive=false, no
+automatic retry, RunAtLoad=true, AbandonProcessGroup=false, and ExitTimeOut
+longer than the complete standalone stack drain. Explicit
+stop/restart keeps the unreaped leader and generation descriptor as race-free
+identities, signals the process group, and reaps the leader only after every
+inheritor has closed the generation descriptor; no numeric PGID is probed after
+identity release. The entrypoint verifies the
 supervisor's digest of the complete
 normalized profile before registry or state access. Restart and stop control
 wait longer than the shutdown bound; failed normal or exceptional shutdown
