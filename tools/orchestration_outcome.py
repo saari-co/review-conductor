@@ -2,10 +2,13 @@
 """Canonical Review Conductor orchestration-outcome decision.
 
 Source-only library. One versioned function interprets enrollment, rail
-results, the two-cycle repair ledger, and terminal engine state into a
-structured dispatch/notification decision. The existing notification
-queue consumes this outcome; this is not a second notification system
-and it does not import or invoke x-api.
+results, the saturating two-cycle automatic-repair ledger, and terminal
+engine state into a structured dispatch/notification decision. The
+existing notification queue consumes this outcome; this is not a second
+notification system and it does not import, invoke, or dispatch x-api.
+Representable fail-closed states suppress routing and keep
+legacy_dispatch false, but they remain eligible for the blocked
+notification path.
 """
 
 from __future__ import annotations
@@ -154,8 +157,21 @@ def _enrollment_route(enrollment: Mapping[str, str]) -> tuple[str, str]:
             return "review_conductor", "review_conductor_wins_duplicate_legacy_forbidden"
         return "review_conductor", "review_conductor_enrolled"
     if legacy_xapi == "present":
-        return "legacy_xapi", "legacy_xapi_only"
+        return "legacy_xapi", "legacy_xapi_handoff_required"
     return "none", "unenrolled_no_review_no_notification"
+
+
+def next_repair_cycle(current: int) -> int:
+    """Advance the saturating 2/2 automatic-repair ledger.
+
+    Cycle 2 is not a ceiling on later scoped ``required_fix`` routes. It only
+    records that the first two broad automatic rounds are exhausted.
+    """
+    if type(current) is not int or current < 0:
+        _fail("repair cycle must be a non-negative integer")
+    if current >= MAX_REPAIR_CYCLES:
+        return MAX_REPAIR_CYCLES
+    return current + 1
 
 
 def _notification(eligibility: str, kind: str | None) -> dict[str, Any]:
@@ -170,6 +186,20 @@ def _notification(eligibility: str, kind: str | None) -> dict[str, Any]:
             _fail("notification kind must be null when no send is eligible")
         channels = []
     return {"eligibility": eligibility, "kind": kind, "channels": channels}
+
+
+def _fail_closed_blocked(repair: dict[str, Any], reason: str) -> dict[str, Any]:
+    """Suppress routing/dispatch while remaining eligible for blocked notify."""
+    return _outcome(
+        route="fail_closed",
+        review_dispatch=False,
+        legacy_dispatch=False,
+        clawsweeper_eligible=False,
+        merge_ready_eligible=False,
+        notification=_notification("blocked", "human_action_required"),
+        repair=repair,
+        reason=reason,
+    )
 
 
 def _outcome(
@@ -251,16 +281,7 @@ def decide_orchestration_outcome(raw: Any) -> dict[str, Any]:
         {"review_conductor": review_conductor, "legacy_xapi": legacy_xapi}
     )
     if route == "fail_closed":
-        return _outcome(
-            route=route,
-            review_dispatch=False,
-            legacy_dispatch=False,
-            clawsweeper_eligible=False,
-            merge_ready_eligible=False,
-            notification=_notification("fail_closed", None),
-            repair=repair,
-            reason=route_reason,
-        )
+        return _fail_closed_blocked(repair, route_reason)
     if route == "none":
         return _outcome(
             route=route,
@@ -276,7 +297,7 @@ def decide_orchestration_outcome(raw: Any) -> dict[str, Any]:
         return _outcome(
             route=route,
             review_dispatch=False,
-            legacy_dispatch=True,
+            legacy_dispatch=False,
             clawsweeper_eligible=False,
             merge_ready_eligible=False,
             notification=_notification("none", None),
@@ -285,27 +306,9 @@ def decide_orchestration_outcome(raw: Any) -> dict[str, Any]:
         )
 
     if state not in KNOWN_STATES:
-        return _outcome(
-            route="fail_closed",
-            review_dispatch=False,
-            legacy_dispatch=False,
-            clawsweeper_eligible=False,
-            merge_ready_eligible=False,
-            notification=_notification("fail_closed", None),
-            repair=repair,
-            reason="unknown_state_fail_closed",
-        )
+        return _fail_closed_blocked(repair, "unknown_state_fail_closed")
     if openclaw_result == "unknown" or clawsweeper_result == "unknown":
-        return _outcome(
-            route="fail_closed",
-            review_dispatch=False,
-            legacy_dispatch=False,
-            clawsweeper_eligible=False,
-            merge_ready_eligible=False,
-            notification=_notification("fail_closed", None),
-            repair=repair,
-            reason="unknown_rail_result_fail_closed",
-        )
+        return _fail_closed_blocked(repair, "unknown_rail_result_fail_closed")
 
     clawsweeper_eligible = openclaw_result not in {"absent"}
     if openclaw_result in BLOCKING_OPENCLAW:
@@ -386,16 +389,7 @@ def decide_orchestration_outcome(raw: Any) -> dict[str, Any]:
             repair=repair,
             reason="human_action_required",
         )
-    return _outcome(
-        route="fail_closed",
-        review_dispatch=False,
-        legacy_dispatch=False,
-        clawsweeper_eligible=False,
-        merge_ready_eligible=False,
-        notification=_notification("fail_closed", None),
-        repair=repair,
-        reason="unknown_outcome_fail_closed",
-    )
+    return _fail_closed_blocked(repair, "unknown_outcome_fail_closed")
 
 
 def derive_rail_results(state: str, rail: str | None) -> tuple[str, str]:

@@ -348,6 +348,40 @@ class EmptyGitHub:
         return []
 
 
+VERBOSE_TERMINAL_FRAGMENTS = (
+    "Review Conductor",
+    "Bobby",
+    "Repair cycle",
+    "overall tier",
+    "proof sufficient",
+    "No merge was attempted",
+    "exact-head",
+    "Spark-2",
+    "transcript",
+    "progress",
+)
+
+
+def concise_ready(pr: int) -> str:
+    return f"dinkuskit/blocks#{pr} ready to merge https://github.com/dinkuskit/blocks/pull/{pr}"
+
+
+def concise_blocked(pr: int, reason: str) -> str:
+    return f"dinkuskit/blocks#{pr} blocked — {reason} https://github.com/dinkuskit/blocks/pull/{pr}"
+
+
+def assert_exact_terminal_messages(notifier: FakeNotifier, expected: str) -> None:
+    assert [channel for channel, _message in notifier.sent] == [
+        "openclaw_context",
+        "discord",
+        "signal",
+    ]
+    for _channel, message in notifier.sent:
+        assert message == expected
+        for fragment in VERBOSE_TERMINAL_FRAGMENTS:
+            assert fragment not in message
+
+
 class FakeNotifier:
     def __init__(self) -> None:
         self.sent: list[tuple[str, str]] = []
@@ -711,13 +745,8 @@ def test_ci_failure_alerts_without_starting_either_review_rail() -> None:
             connection.close()
         notifier = FakeNotifier()
         userland.deliver_notifications(config, notifier, dry_run=False)
-        assert [channel for channel, _message in notifier.sent] == [
-            "openclaw_context",
-            "discord",
-            "signal",
-        ]
-        assert all("ci_failed" in message for _channel, message in notifier.sent)
-        assert all("No merge was attempted" in message for _channel, message in notifier.sent)
+        row = current(config, pr)
+        assert_exact_terminal_messages(notifier, concise_blocked(pr, row["blocker"]))
 
 
 def test_real_spark_receipt_shape_bridges_nonzero_human_gate() -> None:
@@ -817,14 +846,7 @@ def test_exact_artifacts_drive_ready_notification_once_without_merge() -> None:
         assert current(config, pr)["state"] == "ready_for_human_merge"
         notifier = FakeNotifier()
         first = userland.deliver_notifications(config, notifier, dry_run=False)
-        assert [channel for channel, _message in notifier.sent] == [
-            "openclaw_context",
-            "discord",
-            "signal",
-        ]
-        assert all("No merge was attempted" in message for _channel, message in notifier.sent)
-        assert all("overall tier B" in message for _channel, message in notifier.sent)
-        assert all("proof sufficient" in message for _channel, message in notifier.sent)
+        assert_exact_terminal_messages(notifier, concise_ready(pr))
         assert len(first["deliveries"]) == 3
         second = userland.deliver_notifications(config, notifier, dry_run=False)
         assert second["deliveries"] == []
@@ -901,7 +923,7 @@ def test_first_round_openclaw_findings_and_repair_required_are_silent() -> None:
         assert second["deliveries"] == []
 
 
-def test_unknown_head_outcome_fails_closed_instead_of_notifying() -> None:
+def test_unknown_head_outcome_fail_closed_routes_blocked_notification() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         config = config_fixture(Path(temporary))
         pr = 79
@@ -913,14 +935,56 @@ def test_unknown_head_outcome_fails_closed_instead_of_notifying() -> None:
                 (pr,),
             )
             connection.commit()
+            row = connection.execute(
+                "SELECT * FROM heads WHERE pr_number = ? AND is_current = 1",
+                (pr,),
+            ).fetchone()
+            decision = userland.orchestration.decide_orchestration_outcome(
+                userland.orchestration.outcome_from_review_row(row)
+            )
         finally:
             connection.close()
+        assert decision["route"] == "fail_closed"
+        assert decision["review_dispatch"] is False
+        assert decision["legacy_dispatch"] is False
+        assert decision["reason"] == "unknown_state_fail_closed"
+        notifier = FakeNotifier()
+        delivered = userland.deliver_notifications(config, notifier, dry_run=False)
+        assert len(delivered["deliveries"]) == 3
+        assert_exact_terminal_messages(notifier, concise_blocked(pr, "unknown state"))
+
+
+def test_broken_enrollment_fail_closed_routes_blocked_notification() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        config = config_fixture(Path(temporary))
+        pr = 80
+        ingress(config, "pull_request", "broken-enrollment-pr", pr_payload(pr))
+        enrollment = {"review_conductor": "broken", "legacy_xapi": "absent"}
+        notifier = FakeNotifier()
+        delivered = userland.deliver_notifications(
+            config, notifier, dry_run=False, enrollment=enrollment
+        )
+        assert current(config, pr)["state"] == "ci_running"
+        assert len(delivered["deliveries"]) == 3
+        assert_exact_terminal_messages(
+            notifier, concise_blocked(pr, "ambiguous or broken enrollment")
+        )
+        connection = core.open_database(Path(config["paths"]["state_root"]))
         try:
-            userland.deliver_notifications(config, FakeNotifier(), dry_run=False)
-        except userland.orchestration.OrchestrationError as exc:
-            assert "unknown_state_fail_closed" in str(exc)
-        else:
-            raise AssertionError("unknown head outcome must fail closed")
+            payloads = [
+                json.loads(row["payload_json"])
+                for row in connection.execute(
+                    "SELECT payload_json FROM notification_deliveries ORDER BY channel"
+                )
+            ]
+        finally:
+            connection.close()
+        assert payloads
+        for payload in payloads:
+            outcome = payload["orchestration_outcome"]
+            assert outcome["route"] == "fail_closed"
+            assert outcome["reason"] == "ambiguous_or_broken_enrollment"
+            assert outcome["notification"]["eligibility"] == "blocked"
 
 
 def test_keep_open_without_defects_is_review_success_not_merge() -> None:
@@ -980,12 +1044,8 @@ def test_sub_platinum_or_insufficient_proof_stops_at_human_gate() -> None:
         assert current(config, pr)["state"] == "waiting_human"
         notifier = FakeNotifier()
         userland.deliver_notifications(config, notifier, dry_run=False)
-        assert [channel for channel, _message in notifier.sent] == [
-            "openclaw_context",
-            "discord",
-            "signal",
-        ]
-        assert all("No merge was attempted" in message for _channel, message in notifier.sent)
+        row = current(config, pr)
+        assert_exact_terminal_messages(notifier, concise_blocked(pr, row["blocker"]))
 
 
 def test_completed_clawsweeper_human_gate_owner_adjudication_projects_ready() -> None:
@@ -1268,13 +1328,8 @@ def test_failed_clawsweeper_publisher_binds_exact_artifact_and_fails_pr() -> Non
         assert current(config, pr)["state"] == "clawsweeper_failed"
         notifier = FakeNotifier()
         userland.deliver_notifications(config, notifier, dry_run=False)
-        assert [channel for channel, _message in notifier.sent] == [
-            "openclaw_context",
-            "discord",
-            "signal",
-        ]
-        assert all("clawsweeper_failed" in message for _channel, message in notifier.sent)
-        assert all("No merge was attempted" in message for _channel, message in notifier.sent)
+        row = current(config, pr)
+        assert_exact_terminal_messages(notifier, concise_blocked(pr, row["blocker"]))
 
 
 def test_notification_commands_use_gateway_without_secret_flags() -> None:
@@ -1512,12 +1567,8 @@ def test_adapter_failure_stops_retry_loop_notifies_and_allows_explicit_retry() -
 
         notifier = FakeNotifier()
         userland.deliver_notifications(config, notifier, dry_run=False)
-        assert [channel for channel, _message in notifier.sent] == [
-            "openclaw_context",
-            "discord",
-            "signal",
-        ]
-        assert all("openclaw_failed" in message for _channel, message in notifier.sent)
+        row = current(config, pr)
+        assert_exact_terminal_messages(notifier, concise_blocked(pr, row["blocker"]))
 
         planned = userland.retry_failed_openclaw(config, pr, apply=False)
         assert planned["result"] == "planned"
@@ -1548,7 +1599,8 @@ def main() -> None:
         test_keep_open_without_defects_is_review_success_not_merge,
         test_clawsweeper_finding_waits_for_adjudication_without_notification,
         test_first_round_openclaw_findings_and_repair_required_are_silent,
-        test_unknown_head_outcome_fails_closed_instead_of_notifying,
+        test_unknown_head_outcome_fail_closed_routes_blocked_notification,
+        test_broken_enrollment_fail_closed_routes_blocked_notification,
         test_sub_platinum_or_insufficient_proof_stops_at_human_gate,
         test_completed_clawsweeper_human_gate_owner_adjudication_projects_ready,
         test_unbound_clawsweeper_workflow_failure_alerts_without_guessing_a_pr,

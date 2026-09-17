@@ -33,16 +33,18 @@ not Gateway startup or unrelated agent work. No automatic merge endpoint.
 The canonical tuple is repository + PR + base SHA + head SHA + review epoch.
 Any base/head change invalidates evidence. Webhook authentication precedes
 parsing; replays are idempotent; conflicting deliveries fail closed. Uncertain
-non-idempotent dispatch is reconciled, not blindly retried. Two repair cycles
-exhaust automatic repair; reviewers never become mutation owners.
+non-idempotent dispatch is reconciled, not blindly retried. The first two
+repair cycles are a saturating automatic-repair ledger, not a ceiling on later
+scoped ``required_fix`` routes; reviewers never become mutation owners.
 
 Enrollment and terminal notification eligibility are one Conductor-owned
 decision, [`decide_orchestration_outcome`](../tools/orchestration_outcome.py)
 with schema `review-conductor.orchestration-outcome.v1`. A Review
 Conductor-enrolled repository uses the automatic CI → OpenClaw →
 repair/adjudication → ClawSweeper pipeline. A repository enrolled only in
-legacy x-api rails keeps that agent-driven path; Conductor does not depend on
-x-api at runtime and does not alter it. Dual enrollment selects Review
+legacy x-api rails is reported as `route=legacy_xapi` with handoff required;
+Conductor does not import, encode, or dispatch the x-api conveyor
+(`legacy_dispatch` stays false). Dual enrollment selects Review
 Conductor and forbids duplicate legacy dispatch. Neither enrollment ends the
 process with no review and no notification. Ambiguous or broken enrollment
 fails closed and is never treated as unenrolled.
@@ -50,14 +52,23 @@ fails closed and is never treated as unenrolled.
 The existing notification queue consumes that outcome. It does not invent a
 second sender. `repair_required` and `awaiting_adjudication` without a genuine
 human gate are silent internal progression, including the first two automatic
-repair rounds. OpenClaw findings suppress ClawSweeper eligibility. ClawSweeper
-findings suppress merge-ready eligibility. Merge-ready notification requires
-both required exact-head rails to be effectively clean, including authorized
-deferrals or rejections on an unchanged head, plus the existing ready-quality
-policy. Only merge-ready or genuinely blocked/human-action-required outcomes
-notify. A changed head preserves the 2/2 repair ledger. Unknown or malformed
-outcomes fail closed. See the [decision map](orchestration-decision-map.md)
-for later #687 workstreams.
+repair rounds. At ledger cycle 2, `required_fix` may still create a scoped
+repair route, change the head, and rerun exact-head rails while preserving
+cycle 2; later findings stay in adjudication without another broad automatic
+round or ledger reset. OpenClaw findings suppress ClawSweeper eligibility.
+ClawSweeper findings suppress merge-ready eligibility. Merge-ready notification
+requires both required exact-head rails to be effectively clean, including
+authorized deferrals or rejections on an unchanged head, plus the existing
+ready-quality policy. Only merge-ready or genuinely blocked/human-action-required
+outcomes notify. Terminal copy is
+`<repo>#<pr> ready to merge` or `<repo>#<pr> blocked — <specific reason>`,
+optionally with the PR URL, and carries no transcript, progress, cycle, tier,
+or proof prose. A changed head preserves the 2/2 repair ledger. Representable
+fail-closed enrollment, unknown state/result, and equivalent invalid
+orchestration states keep routing and dispatch suppressed and stay eligible
+for the blocked notification path; the queue must not raise or silently pass
+them. Malformed inputs still raise. See the
+[decision map](orchestration-decision-map.md) for later #687 workstreams.
 
 The Conductor is the sole writer of the authoritative `OpenClaw Review Rail`
 and `ClawSweeper Review Rail` checks after it validates reviewer-native evidence.

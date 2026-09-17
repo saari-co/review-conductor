@@ -71,8 +71,17 @@ notification queue consumes
 no second notification system and no x-api runtime dependency. Silent first
 and second automatic repair rounds, third-set adjudication without a human
 gate, rail suppression, merge-ready, blocked/human-gate, unenrolled-none, and
-fail-closed broken/unknown outcomes are source-qualified. Later #687
-workstreams are sequenced in
+fail-closed broken/unknown outcomes are source-qualified. Representable
+fail-closed enrollment, unknown state/result, and equivalent invalid
+orchestration states keep dispatch suppressed (`legacy_dispatch` remains
+false) and use the blocked notification path; the queue delivers that
+concise blocked message instead of raising or passing. `repair_cycle` is the
+saturating ledger for the first two broad automatic rounds: cycle 2 still
+allows a scoped `required_fix` route, head change, and exact-head rerun
+without a third automatic round or ledger reset. Terminal messages are
+`<repo>#<pr> ready to merge` or `<repo>#<pr> blocked — <reason>`. Legacy-only
+output names `route=legacy_xapi` / handoff required and does not dispatch
+x-api. Later #687 workstreams are sequenced in
 [orchestration-decision-map.md](orchestration-decision-map.md).
 
 ## Not completed / prerequisites for migration

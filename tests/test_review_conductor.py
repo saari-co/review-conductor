@@ -1319,7 +1319,7 @@ def test_legacy_database_migrates_review_epoch(temp: Path) -> None:
 
 def test_repair_owner_and_two_cycle_governor(temp: Path) -> None:
     state = temp / "state-repair"
-    heads = ["5" * 40, "6" * 40, "7" * 40]
+    heads = ["5" * 40, "6" * 40, "7" * 40, "c" * 40]
     for index, head in enumerate(heads):
         action = "opened" if index == 0 else "synchronize"
         github_event(temp, state, "pull_request", f"delivery-repair-pr-{index}", pr_payload(103, head, action))
@@ -1331,6 +1331,16 @@ def test_repair_owner_and_two_cycle_governor(temp: Path) -> None:
             f"repair-findings-{index}",
             openclaw_event(f"internal:repair-findings-{index}", "openclaw.terminal", 103, head, request_id, result="findings", findings=1),
         )
+        current = status(state, 103)
+        if index == 3:
+            assert current["head"]["state"] == "awaiting_adjudication"
+            assert current["head"]["repair_cycle"] == 2
+            assert not [
+                item
+                for item in current["actions"]
+                if item["kind"] == "repair.route" and item["head_sha"] == head
+            ]
+            continue
         if index == 0:
             rejected = internal_event(
                 temp,
@@ -1347,16 +1357,14 @@ def test_repair_owner_and_two_cycle_governor(temp: Path) -> None:
             adjudication_event(f"internal:repair-adjudication-{index}", 103, head, request_id, ["required_fix"]),
         )
         current = status(state, 103)
-        if index < 2:
-            assert adjudicated["state"] == "repair_required"
-            repair_actions = [item for item in current["actions"] if item["kind"] == "repair.route"]
-            assert len(repair_actions) == 1
-            assert repair_actions[0]["payload"]["repair_owner"] == "alice"
-            assert repair_actions[0]["payload"]["mutation_owner_count"] == 1
-        else:
-            assert adjudicated["state"] == "waiting_human"
+        assert adjudicated["state"] == "repair_required"
+        repair_actions = [item for item in current["actions"] if item["kind"] == "repair.route"]
+        assert len(repair_actions) == 1
+        assert repair_actions[0]["payload"]["repair_owner"] == "alice"
+        assert repair_actions[0]["payload"]["mutation_owner_count"] == 1
+        if index >= 2:
             assert current["head"]["repair_cycle"] == 2
-            assert not [item for item in current["actions"] if item["kind"] == "repair.route"]
+            assert repair_actions[0]["payload"]["repair_cycle"] == 2
 
 
 def test_openclaw_clean_dispatches_clawsweeper_and_never_merge(temp: Path) -> None:
@@ -1826,30 +1834,16 @@ def test_clawsweeper_waiting_human_adjudication_requires_human_gate_terminal(tem
             review_epoch=0,
         ),
     )
-    assert exhausted["state"] == "waiting_human"
-    rejected_exhausted = internal_event(
-        temp,
-        exhausted_state,
-        "exhausted-required-fix-defer",
-        adjudication_event(
-            "internal:exhausted-required-fix-defer",
-            305,
-            exhausted_head,
-            exhausted_request,
-            ["reject_false_positive"],
-            reviewer="saari-clawsweeper",
-            rail="clawsweeper",
-            review_epoch=0,
-        ),
-        expected=2,
-    )
-    assert "requires the exact human_gate terminal" in rejected_exhausted["stderr"]
+    assert exhausted["state"] == "repair_required"
     exhausted_current = status(exhausted_state, 305)
-    assert exhausted_current["head"]["state"] == "waiting_human"
+    assert exhausted_current["head"]["state"] == "repair_required"
     assert exhausted_current["head"]["repair_cycle"] == 2
     assert exhausted_current["head"]["rail"] == "clawsweeper"
     assert exhausted_current["head"]["review_request_id"] == exhausted_request
-    assert all(item["kind"] != "repair.route" for item in exhausted_current["actions"])
+    scoped = [item for item in exhausted_current["actions"] if item["kind"] == "repair.route"]
+    assert len(scoped) == 1
+    assert scoped[0]["payload"]["repair_cycle"] == 2
+    assert scoped[0]["payload"]["merge_authorized"] is False
     assert all(item["kind"] != "merge" for item in exhausted_current["actions"])
 
 
@@ -1985,6 +1979,18 @@ def test_precise_openclaw_exact_contract_mutants() -> None:
             "    if str(quality_workflow_run_id) != workflow_run_id:\n",
             "    if False and str(quality_workflow_run_id) != workflow_run_id:\n",
             "test_clawsweeper_waiting_human_adjudication_rejects_mismatched_quality_workflow_run",
+        ),
+        (
+            "restore required_fix ceiling at cycle 2",
+            '            current_cycle = int(row["repair_cycle"])\n            ledger_limit = int(config["max_repair_cycles"])\n',
+            '            if int(row["repair_cycle"]) >= int(config["max_repair_cycles"]):\n                raise ContractError("two automatic repair cycles exhausted")\n            current_cycle = int(row["repair_cycle"])\n            ledger_limit = int(config["max_repair_cycles"])\n',
+            "test_repair_owner_and_two_cycle_governor",
+        ),
+        (
+            "increment ledger past two on later repair heads",
+            "            if repair_cycle < 2:\n                repair_cycle += 1\n",
+            "            repair_cycle += 1\n",
+            "test_repair_owner_and_two_cycle_governor",
         ),
     )
     for label, old, new, test_name in mutants:

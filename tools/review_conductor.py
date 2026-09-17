@@ -822,7 +822,10 @@ def begin_new_head(
         repair_cycle = int(previous["repair_cycle"])
         mutation_owner = previous["mutation_owner"]
         if previous["state"] == "repair_required":
-            repair_cycle += 1
+            # Saturating 2/2 ledger: later scoped required_fix heads do not
+            # open a third broad automatic round or reset the count.
+            if repair_cycle < 2:
+                repair_cycle += 1
             mutation_owner = previous["repair_owner"] or mutation_owner
         connection.execute(
             "UPDATE heads SET is_current = 0, updated_at = ? WHERE repository = ? AND pr_number = ? AND is_current = 1",
@@ -1905,39 +1908,38 @@ def process_internal_event(connection: sqlite3.Connection, config: dict[str, Any
             next_state = "waiting_human"
             update_exact_head(connection, identity, state=next_state, blocker="adjudication classified a human gate")
         elif "required_fix" in classifications:
-            if int(row["repair_cycle"]) >= int(config["max_repair_cycles"]):
-                next_state = "waiting_human"
-                update_exact_head(connection, identity, state=next_state, blocker="two automatic repair cycles exhausted")
-            else:
-                selected_owner = event.get("repair_owner") or row["author"]
-                if selected_owner == event["reviewer_actor"]:
-                    raise ContractError("a reviewer may not own repair of its own findings")
-                if selected_owner != row["mutation_owner"]:
-                    handoff = event.get("mutation_handoff")
-                    if not handoff or handoff["from"] != row["mutation_owner"] or handoff["to"] != selected_owner:
-                        raise ContractError("fallback repair owner requires an exact explicit mutation handoff")
-                route_payload = {
-                    "schema": "smoky.review-conductor.action.v1",
-                    "kind": "repair.route",
-                    **identity,
-                    "review_epoch": int(row["review_epoch"]),
-                    "repair_owner": selected_owner,
-                    "source_rail": event["rail"],
-                    "review_request_id": event["request_id"],
-                    "repair_cycle": int(row["repair_cycle"]) + 1,
-                    "mutation_owner_count": 1,
-                    "merge_authorized": False,
-                }
-                action_id, action_created = insert_action(
-                    connection,
-                    kind="repair.route",
-                    payload=route_payload,
-                    suffix=f"{event['rail']}:{event['request_id']}",
-                    review_epoch=int(row["review_epoch"]),
-                    **identity,
-                )
-                next_state = "repair_required"
-                update_exact_head(connection, identity, state=next_state, repair_owner=selected_owner, mutation_owner=selected_owner, blocker="accepted required fix must be patched by the single mutation owner")
+            selected_owner = event.get("repair_owner") or row["author"]
+            if selected_owner == event["reviewer_actor"]:
+                raise ContractError("a reviewer may not own repair of its own findings")
+            if selected_owner != row["mutation_owner"]:
+                handoff = event.get("mutation_handoff")
+                if not handoff or handoff["from"] != row["mutation_owner"] or handoff["to"] != selected_owner:
+                    raise ContractError("fallback repair owner requires an exact explicit mutation handoff")
+            current_cycle = int(row["repair_cycle"])
+            ledger_limit = int(config["max_repair_cycles"])
+            next_cycle = current_cycle + 1 if current_cycle < ledger_limit else current_cycle
+            route_payload = {
+                "schema": "smoky.review-conductor.action.v1",
+                "kind": "repair.route",
+                **identity,
+                "review_epoch": int(row["review_epoch"]),
+                "repair_owner": selected_owner,
+                "source_rail": event["rail"],
+                "review_request_id": event["request_id"],
+                "repair_cycle": next_cycle,
+                "mutation_owner_count": 1,
+                "merge_authorized": False,
+            }
+            action_id, action_created = insert_action(
+                connection,
+                kind="repair.route",
+                payload=route_payload,
+                suffix=f"{event['rail']}:{event['request_id']}",
+                review_epoch=int(row["review_epoch"]),
+                **identity,
+            )
+            next_state = "repair_required"
+            update_exact_head(connection, identity, state=next_state, repair_owner=selected_owner, mutation_owner=selected_owner, blocker="accepted required fix must be patched by the single mutation owner")
         else:
             next_state, action_id, action_created = continue_after_adjudication(connection, config, row, identity, event["rail"])
     insert_event(connection, event_id=event["event_id"], kind=event_type, stale=False, payload=event, **identity)

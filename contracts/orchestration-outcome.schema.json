@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/saari-co/review-conductor/blob/main/contracts/orchestration-outcome.schema.json",
   "title": "Review Conductor orchestration outcome v1",
-  "$comment": "Canonical enrollment-route, rail-suppression, and terminal notification decision. The existing notification queue consumes this outcome. It is not a second notification system and grants no merge, dispatch, or x-api authority.",
+  "$comment": "Canonical enrollment-route, rail-suppression, and terminal notification decision. The existing notification queue consumes this outcome. It is not a second notification system and grants no merge or x-api authority. legacy_dispatch is always false: Conductor describes a legacy_xapi handoff when needed but never encodes or dispatches the x-api conveyor. Representable fail-closed routing keeps dispatch suppressed and uses notification.eligibility=blocked. repair.cycle is the saturating 2/2 automatic-repair ledger, not a ceiling on later scoped required_fix routes.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -32,7 +32,9 @@
       "type": "boolean"
     },
     "legacy_dispatch": {
-      "type": "boolean"
+      "type": "boolean",
+      "const": false,
+      "$comment": "Review Conductor never dispatches the x-api legacy conveyor. route=legacy_xapi means handoff required."
     },
     "clawsweeper_eligible": {
       "type": "boolean"

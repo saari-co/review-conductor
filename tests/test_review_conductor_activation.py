@@ -1372,19 +1372,18 @@ def test_repair_owner_handoff_and_two_cycle_cap(root: Path) -> None:
             state_root=Path(config["paths"]["state_root"]),
             event_payload=adjudication,
         )
-        if cycle < 2:
-            assert result["state"] == "repair_required"
-            repair = next(
-                item for item in actions(config, pr, "repair.route")
-                if item["head_sha"] == head
-            )
-            repair_payload = json.loads(repair["payload_json"])
-            assert repair_payload["repair_owner"] == "alice"
-            assert repair_payload["mutation_owner_count"] == 1
-        else:
-            assert result["state"] == "waiting_human"
+        assert result["state"] == "repair_required"
+        repair = next(
+            item for item in actions(config, pr, "repair.route")
+            if item["head_sha"] == head
+        )
+        repair_payload = json.loads(repair["payload_json"])
+        assert repair_payload["repair_owner"] == "alice"
+        assert repair_payload["mutation_owner_count"] == 1
+        if cycle >= 2:
             assert row["repair_cycle"] == 2
-    assert current(config, pr)["state"] == "waiting_human"
+            assert repair_payload["repair_cycle"] == 2
+    assert current(config, pr)["state"] == "repair_required"
     assert current(config, pr)["repair_cycle"] == 2
 
 

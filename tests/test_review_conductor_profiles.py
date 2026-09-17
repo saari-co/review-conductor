@@ -761,7 +761,7 @@ class ProfilesTest(unittest.TestCase):
             with self.assertRaises(core.ContractError):
                 core.ingest_internal_event(config_path=Path(config['core_config']),state_root=Path(config['paths']['state_root']),event_payload={**event,'reviewer_actor':'untrusted'})
             outcome=core.ingest_internal_event(config_path=Path(config['core_config']),state_root=Path(config['paths']['state_root']),event_payload=event)
-            self.assertEqual(outcome['state'],'repair_required' if cycle<2 else 'waiting_human')
+            self.assertEqual(outcome['state'],'repair_required')
             self.assertFalse(outcome['merge_dispatched'])
 
     def test_app_dispatch_is_repository_workflow_epoch_bound_without_merge_authority(self):

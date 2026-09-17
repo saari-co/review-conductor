@@ -19,7 +19,7 @@ import tempfile
 import threading
 import zipfile
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 
 TOOLS = Path(__file__).resolve().parent
@@ -1416,20 +1416,40 @@ def collect_clawsweeper_terminals(
     return outcomes
 
 
-def notification_message(row: sqlite3.Row, quality: sqlite3.Row | None) -> str:
+CONCISE_BLOCKED_REASONS = {
+    "unknown_state_fail_closed": "unknown state",
+    "unknown_rail_result_fail_closed": "unknown rail result",
+    "unknown_outcome_fail_closed": "unknown orchestration state",
+    "ambiguous_or_broken_enrollment": "ambiguous or broken enrollment",
+    "ci_failed": "CI failed",
+    "openclaw_failed": "OpenClaw failed",
+    "clawsweeper_failed": "ClawSweeper failed",
+    "waiting_human": "human gate",
+}
+
+
+def notification_message(
+    row: sqlite3.Row,
+    quality: sqlite3.Row | None,
+    decision: dict[str, Any] | None = None,
+) -> str:
+    repo_pr = f"{row['repository']}#{row['pr_number']}"
     url = f"https://github.com/{row['repository']}/pull/{row['pr_number']}"
-    short = row["head_sha"][:12]
-    if row["state"] == "ready_for_human_merge":
-        return (
-            f"Review Conductor: {row['repository']}#{row['pr_number']} is ready for Bobby's merge decision at {short}. "
-            f"CI, Spark-2 OpenClaw, and ClawSweeper are exact-head clean; overall tier {quality['overall_tier']}, "
-            f"proof {quality['proof_status']}. No merge was attempted. {url}"
+    eligibility = None if decision is None else decision["notification"]["eligibility"]
+    if eligibility == "merge_ready" or (
+        eligibility is None and row["state"] == "ready_for_human_merge"
+    ):
+        return f"{repo_pr} ready to merge {url}"
+    blocker = str(row["blocker"] or "").strip()
+    if blocker:
+        reason = blocker
+    elif decision is not None:
+        reason = CONCISE_BLOCKED_REASONS.get(
+            decision["reason"], decision["reason"].replace("_", " ")
         )
-    return (
-        f"Review Conductor needs Bobby: {row['repository']}#{row['pr_number']} is {row['state']} at {short}. "
-        f"Reason: {row['blocker'] or 'operator attention required'}. Repair cycle {row['repair_cycle']}/2. "
-        f"No merge was attempted. {url}"
-    )
+    else:
+        reason = CONCISE_BLOCKED_REASONS.get(row["state"], "operator attention required")
+    return f"{repo_pr} blocked — {reason} {url}"
 
 
 def checkout_fingerprint(path: Path) -> tuple[int, int, int, int, int]:
@@ -1986,7 +2006,10 @@ def reconcile_uncertain_notification(
         connection.close()
 
 
-def queue_notifications(config: dict[str, Any]) -> int:
+def queue_notifications(
+    config: dict[str, Any],
+    enrollment: Mapping[str, str] | None = None,
+) -> int:
     connection = core.open_database(Path(config["paths"]["state_root"]), config["github_app"]["repository"])
     created = 0
     try:
@@ -2007,7 +2030,7 @@ def queue_notifications(config: dict[str, Any]) -> int:
                 ),
             ).fetchone()
             decision = orchestration.decide_orchestration_outcome(
-                orchestration.outcome_from_review_row(row, quality)
+                orchestration.outcome_from_review_row(row, quality, enrollment=enrollment)
             )
             eligibility = decision["notification"]["eligibility"]
             if eligibility in {"silent", "none"}:
@@ -2048,7 +2071,7 @@ def queue_notifications(config: dict[str, Any]) -> int:
                 "review_epoch": row["review_epoch"],
                 "state": row["state"],
                 "repair_cycle": row["repair_cycle"],
-                "message": notification_message(row, quality),
+                "message": notification_message(row, quality, decision),
                 "merge_authorized": False,
                 "orchestration_outcome": {
                     "schema": decision["schema"],
@@ -2164,9 +2187,13 @@ def deliver_notifications(
     notifier: OpenClawNotifier | Any,
     *,
     dry_run: bool,
+    enrollment: Mapping[str, str] | None = None,
     authority_client: Any | None = None,
 ) -> dict[str, Any]:
-    queue_notifications(config)
+    if enrollment is None:
+        queue_notifications(config)
+    else:
+        queue_notifications(config, enrollment=enrollment)
     connection = core.open_database(Path(config["paths"]["state_root"]), config["github_app"]["repository"])
     outcomes: list[dict[str, Any]] = []
     try:

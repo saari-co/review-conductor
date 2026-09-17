@@ -54,9 +54,9 @@ class EnrollmentRouteTests(unittest.TestCase):
         )
         self.assertEqual(decision["route"], "legacy_xapi")
         self.assertFalse(decision["review_dispatch"])
-        self.assertTrue(decision["legacy_dispatch"])
+        self.assertFalse(decision["legacy_dispatch"])
         self.assertEqual(decision["notification"]["eligibility"], "none")
-        self.assertEqual(decision["reason"], "legacy_xapi_only")
+        self.assertEqual(decision["reason"], "legacy_xapi_handoff_required")
 
     def test_dual_enrollment_review_conductor_wins_without_legacy_dispatch(self):
         decision = notify(
@@ -90,7 +90,9 @@ class EnrollmentRouteTests(unittest.TestCase):
                 self.assertEqual(decision["route"], "fail_closed")
                 self.assertFalse(decision["review_dispatch"])
                 self.assertFalse(decision["legacy_dispatch"])
-                self.assertEqual(decision["notification"]["eligibility"], "fail_closed")
+                self.assertEqual(decision["notification"]["eligibility"], "blocked")
+                self.assertEqual(decision["notification"]["kind"], "human_action_required")
+                self.assertEqual(decision["notification"]["channels"], list(outcome.NOTIFY_CHANNELS))
                 self.assertEqual(decision["reason"], "ambiguous_or_broken_enrollment")
                 self.assertNotEqual(decision["reason"], "unenrolled_no_review_no_notification")
 
@@ -309,7 +311,10 @@ class FailClosedTests(unittest.TestCase):
     def test_unknown_state_and_rail_results_are_fail_closed_not_silent(self):
         unknown_state = notify(enrolled(state="mystery_state"))
         self.assertEqual(unknown_state["route"], "fail_closed")
-        self.assertEqual(unknown_state["notification"]["eligibility"], "fail_closed")
+        self.assertFalse(unknown_state["review_dispatch"])
+        self.assertFalse(unknown_state["legacy_dispatch"])
+        self.assertEqual(unknown_state["notification"]["eligibility"], "blocked")
+        self.assertEqual(unknown_state["notification"]["kind"], "human_action_required")
         self.assertEqual(unknown_state["reason"], "unknown_state_fail_closed")
         unknown_rail = notify(
             enrolled(
@@ -319,7 +324,10 @@ class FailClosedTests(unittest.TestCase):
                 ready_qualified=True,
             )
         )
-        self.assertEqual(unknown_rail["notification"]["eligibility"], "fail_closed")
+        self.assertEqual(unknown_rail["route"], "fail_closed")
+        self.assertFalse(unknown_rail["review_dispatch"])
+        self.assertFalse(unknown_rail["legacy_dispatch"])
+        self.assertEqual(unknown_rail["notification"]["eligibility"], "blocked")
         self.assertEqual(unknown_rail["reason"], "unknown_rail_result_fail_closed")
 
     def test_row_mapper_preserves_silent_repair_and_blocked_ci(self):
@@ -340,6 +348,29 @@ class FailClosedTests(unittest.TestCase):
         )
         self.assertEqual(blocked["notification"]["eligibility"], "blocked")
 
+    def test_repair_cycle_saturates_and_required_fix_stays_scoped(self):
+        self.assertEqual(outcome.next_repair_cycle(0), 1)
+        self.assertEqual(outcome.next_repair_cycle(1), 2)
+        self.assertEqual(outcome.next_repair_cycle(2), 2)
+        decision = notify(
+            enrolled(
+                state="repair_required",
+                rail="openclaw",
+                repair_cycle=2,
+                head_changed=True,
+                openclaw_result="findings",
+                clawsweeper_result="absent",
+                adjudication_dispositions=["required_fix"],
+            )
+        )
+        self.assertEqual(decision["repair"]["cycle"], 2)
+        self.assertEqual(decision["repair"]["automatic_rounds_remaining"], 0)
+        self.assertTrue(decision["repair"]["ledger_preserved"])
+        self.assertTrue(decision["review_dispatch"])
+        self.assertFalse(decision["legacy_dispatch"])
+        self.assertEqual(decision["notification"]["eligibility"], "silent")
+        self.assertEqual(decision["reason"], "third_set_adjudication_silent")
+
     def test_schema_file_matches_the_python_contract(self):
         schema = json.loads(
             (ROOT / "contracts/orchestration-outcome.schema.json").read_text(encoding="utf-8")
@@ -347,6 +378,7 @@ class FailClosedTests(unittest.TestCase):
         self.assertEqual(schema["properties"]["schema"]["const"], outcome.OUTCOME_SCHEMA)
         self.assertEqual(set(schema["required"]), set(outcome.OUTCOME_KEYS))
         self.assertEqual(set(schema["properties"]["route"]["enum"]), set(outcome.ROUTES))
+        self.assertEqual(schema["properties"]["legacy_dispatch"].get("const"), False)
         self.assertFalse(schema["additionalProperties"])
 
 
@@ -396,9 +428,27 @@ class PreciseMutantTests(unittest.TestCase):
         ),
         (
             "treat unknown state as silent",
-            '            reason="unknown_state_fail_closed",\n',
-            '            reason="silent_internal_progression",\n',
+            '        return _fail_closed_blocked(repair, "unknown_state_fail_closed")\n',
+            '        return _fail_closed_blocked(repair, "silent_internal_progression")\n',
             "test_unknown_state_and_rail_results_are_fail_closed_not_silent",
+        ),
+        (
+            "keep fail-closed routing off the blocked notify path",
+            'def _fail_closed_blocked(repair: dict[str, Any], reason: str) -> dict[str, Any]:\n    """Suppress routing/dispatch while remaining eligible for blocked notify."""\n    return _outcome(\n        route="fail_closed",\n        review_dispatch=False,\n        legacy_dispatch=False,\n        clawsweeper_eligible=False,\n        merge_ready_eligible=False,\n        notification=_notification("blocked", "human_action_required"),\n',
+            'def _fail_closed_blocked(repair: dict[str, Any], reason: str) -> dict[str, Any]:\n    """Suppress routing/dispatch while remaining eligible for blocked notify."""\n    return _outcome(\n        route="fail_closed",\n        review_dispatch=False,\n        legacy_dispatch=False,\n        clawsweeper_eligible=False,\n        merge_ready_eligible=False,\n        notification=_notification("fail_closed", None),\n',
+            "test_unknown_state_and_rail_results_are_fail_closed_not_silent",
+        ),
+        (
+            "encode legacy x-api dispatch",
+            '    if route == "legacy_xapi":\n        return _outcome(\n            route=route,\n            review_dispatch=False,\n            legacy_dispatch=False,\n',
+            '    if route == "legacy_xapi":\n        return _outcome(\n            route=route,\n            review_dispatch=False,\n            legacy_dispatch=True,\n',
+            "test_legacy_only_is_untouched_and_does_not_notify",
+        ),
+        (
+            "increment automatic ledger past two",
+            "    if current >= MAX_REPAIR_CYCLES:\n        return MAX_REPAIR_CYCLES\n",
+            "    if False and current >= MAX_REPAIR_CYCLES:\n        return MAX_REPAIR_CYCLES\n",
+            "test_repair_cycle_saturates_and_required_fix_stays_scoped",
         ),
         (
             "merge-ready without ready_qualified",
