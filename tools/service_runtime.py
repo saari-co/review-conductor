@@ -737,19 +737,26 @@ def trusted_enrollment_from_registry(
 
     Userland activation flags (``enabled`` / ``blockers``) are never consulted.
     A matching registry enrollment is Review Conductor present. Absence of that
-    enrollment is unenrolled unless the registry carries an explicit
-    ``legacy_xapi`` status. Identity, reviewer, or core contradictions fail
+    enrollment is unenrolled unless the loaded registry document names this
+    exact service profile in its optional ``legacy_xapi`` marker. The marker
+    is consumed only from the validated Registry field; subclass attributes
+    cannot grant a status. Identity, reviewer, or core contradictions fail
     closed. Dual is Conductor present plus that same registry-owned legacy
-    marker.
+    marker for this profile.
     """
     broken = {"review_conductor": "broken", "legacy_xapi": "broken"}
-    legacy = getattr(registry, "legacy_xapi", "absent")
-    if legacy not in orchestration.ENROLLMENT_STATUSES:
+    if not isinstance(registry, admission.Registry):
         return dict(broken)
     app = config.get("github_app")
     if not isinstance(app, dict):
         return dict(broken)
     repository = app.get("repository")
+    try:
+        legacy = registry.legacy_status_for(repository)
+    except admission.AdmissionError:
+        return dict(broken)
+    if legacy not in admission.LEGACY_XAPI_STATUSES:
+        return dict(broken)
     matches = [item for item in registry.enrollments if item.repository == repository]
     if len(matches) != 1:
         return {"review_conductor": "absent", "legacy_xapi": legacy} if not matches else dict(broken)

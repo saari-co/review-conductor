@@ -3,18 +3,22 @@
   "base_sha": "8cc4094e88c8cd04c5b7da28e0c6a9ef054ea69c",
   "starting_head_sha": "8cc4094e88c8cd04c5b7da28e0c6a9ef054ea69c",
   "parent_candidate_sha": "10c8e5edf051766ccb5b112899dbd02078324a0e",
+  "retained_starting_head_sha": "f4ef1aad93accd03001ae0db0920091c2a059ef4",
   "captured_date": "2026-09-17",
-  "binding_scheme": "A commit cannot contain its own SHA. base_sha is the required clean start. parent_candidate_sha is the authorized PR #18 frozen head this post-cap repair starts from. Per-file sha256 values are of this candidate source. The branch head after commit is the exact candidate SHA for hosted CI. The Copilot ledger is exhausted at 2/2; this is a frozen repair batch and requests no further automatic review.",
+  "binding_scheme": "A commit cannot contain its own SHA. base_sha is the required clean start. parent_candidate_sha is the authorized PR #18 frozen head cited for this post-cap batch. retained_starting_head_sha is that head's published descendant already on the live branch and PR; this repair starts from that descendant and does not reset or force-push. Per-file sha256 values are of this candidate source. The branch head after commit is the exact candidate SHA for hosted CI. The Copilot ledger is exhausted at 2/2; this is a frozen repair batch and requests no further automatic review.",
   "files": {
     "Makefile": "0ccca52258ff172f41b9247276154fbaaa8c670d9774155781a852a42ba5c241",
     "contracts/orchestration-outcome.schema.json": "16419adee152e4fe94e0c80e825f0e2eec36a6f5754b2cdbeffab661ae7f8aa0",
-    "docs/architecture.md": "bdf24cb274f39d220529517c88fce6adca60825d43964e19cb6500c302a8198a",
-    "docs/migration.md": "f93bedb5188f35afd7200539df14d654c9edd1bcd187f0dadc13b3dbd7f0a448",
-    "docs/orchestration-decision-map.md": "87ade3e8ddaaa6257281a2b9cf92e5add7068e78cf6e45a4d2cbc9f01f67cd04",
+    "docs/architecture.md": "d88dfa5835b0a0f766630130d50c91596d6d0191005a14d8505d4fcfbdc49e9d",
+    "docs/integration-contract.md": "08943c0736565e490832bdb1ab56620828819c804412de7a9c1d575f7020578d",
+    "docs/migration.md": "d7e5c718acbe2366b0adb9729748a64c93bcb9a13457c05ffcef9554b3773290",
+    "docs/orchestration-decision-map.md": "2a6f541a1a542b8633ce69cd89b1d93369c72ff0103332b9a50b86225616eb90",
     "docs/provenance.json": "00d94dfed553f9b6bd3441a665a0ad8195751758fc9bf4456808a6f2a5386e4a",
-    "proof/issue-687-notification-eligibility-20260917/PROOF.md": "d627a182561afa0d542758ceb30e417fb0e291e270132f3bfefdb6059fca4a1d",
+    "docs/trusted-admission.md": "6e2f86c9ca230e04f39aedba70ddba75fbaa5ee035ff154ed62759738d3ddb84",
+    "proof/issue-687-notification-eligibility-20260917/PROOF.md": "6962fc936b48d58e55a0c8ff8a9265d4dc5e8c2f7f5c3c430a12ce4286948d7a",
     "tests/test_orchestration_outcome.py": "bbbc9f97a0acc5d31a9024e18548fff79fe9695278ce379f185ce0b97bf54902",
-    "tests/test_service_runtime.py": "3cc4cb81d8ddabb5582cfc976266b412fa923d0222306ad2f2f4fe8308c169fc",
+    "tests/test_service_runtime.py": "4240e2b046051e2c78d8ae450dd45bab1242f91a1b4e8a39e1bd2833adc7acb1",
+    "tests/test_trusted_admission.py": "d0ca6bd9d4fb1dca3bb1a016d8d49062d66e0e5272604b737c685ecd951a9472",
     "tests/test_review_conductor.py": "5024ed7d76a494f11b6165e622f33299728559ab3c443d5ccd748f38b8d22991",
     "tests/test_review_conductor_activation.py": "370f28ac65f32f0f46a453c73fd1ec9c0c7fbe34689a6d680b35e087905fa48e",
     "tests/test_review_conductor_profiles.py": "77d7e212618618560c4b599ea6b797c94f3d094dff70c0d57f3d2d71b43da9f4",
@@ -22,6 +26,7 @@
     "tools/orchestration_outcome.py": "23ccdac1ba359033001b390dd435cf62b1ff8c8df35146afafe1927e141f8378",
     "tools/review_conductor.py": "3fca87051d45ce51f1a7977561618d4fb1db8adc76b88a124a6451ee315f8ee8",
     "tools/review_conductor_userland.py": "823275f7e975ae7180e27acfe05403cce26095a329648f4dcb4c7f147d02377a",
-    "tools/service_runtime.py": "8414dce34b2dcbdd9f4541029123ada29909ec2d1b7445a553e7015c0f9fad67"
+    "tools/service_runtime.py": "13c68e8adb0a3b13df08ee1e583198a18823eca06b1448752afc609c69246b3d",
+    "tools/trusted_admission.py": "f96ff9f23561cca859e68a214e19623de600f4776be6a2fdc7c049a256564019"
   }
 }

@@ -119,6 +119,57 @@ class RegistryTests(unittest.TestCase):
             with self.subTest(raw=raw[:20]), self.assertRaises(ta.AdmissionError):
                 ta.load_registry(raw)
 
+    def test_omitted_legacy_xapi_is_absent_for_every_scoped_profile(self):
+        registry = self.fx.registry()
+        self.assertIsNone(registry.legacy_xapi)
+        self.assertEqual(registry.legacy_status_for(BLOCKS), "absent")
+        self.assertEqual(registry.legacy_status_for(SMCBD), "absent")
+        empty = self.fx.registry({"schema": ta.REGISTRY_SCHEMA, "enrollments": []})
+        self.assertIsNone(empty.legacy_xapi)
+        self.assertEqual(empty.legacy_status_for(BLOCKS), "absent")
+
+    def test_legacy_xapi_marker_is_exact_profile_status(self):
+        doc = self.fx.registry_doc()
+        doc["legacy_xapi"] = {"repository": SMCBD, "status": "present"}
+        registry = self.fx.registry(doc)
+        self.assertEqual(registry.legacy_status_for(SMCBD), "present")
+        self.assertEqual(registry.legacy_status_for(BLOCKS), "absent")
+        doc["legacy_xapi"] = {"repository": BLOCKS, "status": "absent"}
+        explicit_absent = self.fx.registry(doc)
+        self.assertEqual(explicit_absent.legacy_status_for(BLOCKS), "absent")
+        self.assertEqual(explicit_absent.legacy_status_for(SMCBD), "absent")
+
+    def test_legacy_xapi_malformed_forms_fail_closed(self):
+        doc = self.fx.registry_doc()
+        bad = [
+            {**doc, "legacy_xapi": "present"},
+            {**doc, "legacy_xapi": True},
+            {**doc, "legacy_xapi": 1},
+            {**doc, "legacy_xapi": None},
+            {**doc, "legacy_xapi": []},
+            {**doc, "legacy_xapi": {}},
+            {**doc, "legacy_xapi": {"status": "present"}},
+            {**doc, "legacy_xapi": {"repository": SMCBD}},
+            {**doc, "legacy_xapi": {"repository": SMCBD, "status": "present", "extra": 1}},
+            {**doc, "legacy_xapi": {"repository": "saari-co/x-api", "status": "present"}},
+            {**doc, "legacy_xapi": {"repository": SMCBD, "status": "broken"}},
+            {**doc, "legacy_xapi": {"repository": SMCBD, "status": "Present"}},
+            {**doc, "legacy_xapi": {"repository": SMCBD, "status": True}},
+            {**doc, "legacy_xapi": {"repository": SMCBD, "status": None}},
+        ]
+        enrollment_marker = copy.deepcopy(doc)
+        enrollment_marker["enrollments"][0]["legacy_xapi"] = {"repository": BLOCKS, "status": "present"}
+        bad.append(enrollment_marker)
+        for candidate in bad:
+            with self.subTest(candidate=candidate), self.assertRaises(ta.AdmissionError):
+                self.fx.registry(candidate)
+        with self.assertRaises(ta.AdmissionError):
+            ta.Registry((), legacy_xapi="present")
+        with self.assertRaises(ta.AdmissionError):
+            ta.LegacyXapiMarker("saari-co/x-api", "present")
+        with self.assertRaises(ta.AdmissionError):
+            ta.LegacyXapiMarker(SMCBD, "broken")
+
     def test_lookup_requires_every_identity_component(self):
         registry = self.fx.registry()
         self.assertEqual(registry.lookup(BLOCKS, 1306882611, BLOCKS_APP, BLOCKS_INSTALL).repository, BLOCKS)

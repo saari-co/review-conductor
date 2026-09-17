@@ -19,6 +19,8 @@ BINDING_SCHEMA = "review-conductor.admission-binding.v2"
 MAX_REGISTRY_BYTES = 65536
 SHA1_RE = re.compile(r"[0-9a-f]{40}")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
+# Declared registry marker only. Runtime "broken" is derived, never a document value.
+LEGACY_XAPI_STATUSES = frozenset({"present", "absent"})
 # The initial enrollment decision covers exactly these repositories with the
 # numeric identities recorded in the historical profiles. Any other name or
 # any other numeric identity for these names fails closed. Expanding this map
@@ -101,8 +103,23 @@ class Enrollment:
 
 
 @dataclass(frozen=True)
+class LegacyXapiMarker:
+    """Exact-profile legacy x-api marker loaded from the v2 registry document."""
+
+    repository: str
+    status: str
+
+    def __post_init__(self):
+        if not isinstance(self.repository, str) or self.repository not in INITIAL_ENROLLMENT_SCOPE:
+            _fail("legacy_xapi repository is outside the initial enrollment scope")
+        if type(self.status) is not str or self.status not in LEGACY_XAPI_STATUSES:
+            _fail("legacy_xapi status is unknown")
+
+
+@dataclass(frozen=True)
 class Registry:
     enrollments: tuple
+    legacy_xapi: object = None
 
     def __post_init__(self):
         if not isinstance(self.enrollments, tuple) or not all(isinstance(e, Enrollment) for e in self.enrollments):
@@ -112,6 +129,29 @@ class Registry:
         installations = [e.installation_id for e in self.enrollments]
         if len(set(names)) != len(names) or len(set(ids)) != len(ids) or len(set(installations)) != len(installations):
             _fail("enrollment identities must be unique across the registry")
+        if self.legacy_xapi is not None and not isinstance(self.legacy_xapi, LegacyXapiMarker):
+            _fail("registry legacy_xapi must be a validated marker or omitted")
+
+    def legacy_status_for(self, repository):
+        """Return the loaded legacy marker for one exact service profile.
+
+        The marker is absent when the v2 field is omitted or names another
+        profile. Reads the dataclass field only; subclass attributes and
+        properties cannot grant a status. Malformed stored markers fail closed.
+        """
+        stored = object.__getattribute__(self, "__dict__")
+        marker = stored.get("legacy_xapi") if isinstance(stored, dict) else None
+        if marker is None:
+            return "absent"
+        if not isinstance(marker, LegacyXapiMarker):
+            _fail("registry legacy_xapi is malformed")
+        if type(repository) is not str:
+            _fail("legacy_xapi profile repository is required")
+        if marker.repository != repository:
+            return "absent"
+        if type(marker.status) is not str or marker.status not in LEGACY_XAPI_STATUSES:
+            _fail("registry legacy_xapi is malformed")
+        return marker.status
 
     def lookup(self, repository, repository_id, app_id, installation_id):
         """Resolve one enrollment; every identity component must agree."""
@@ -138,7 +178,10 @@ def load_registry(raw):
         value = json.loads(bytes(raw).decode("utf-8"), object_pairs_hook=unique_object)
     except (UnicodeError, RecursionError, ValueError) as exc:
         raise AdmissionError("registry document is not strict UTF-8 JSON") from exc
-    _exact(value, ["schema", "enrollments"], "registry")
+    registry_keys = ["schema", "enrollments"]
+    if isinstance(value, dict) and "legacy_xapi" in value:
+        registry_keys = ["schema", "enrollments", "legacy_xapi"]
+    _exact(value, registry_keys, "registry")
     if value["schema"] != REGISTRY_SCHEMA:
         _fail("unsupported registry schema")
     if not isinstance(value["enrollments"], list):
@@ -158,7 +201,22 @@ def load_registry(raw):
         _exact(reviewers, ["openclaw", "clawsweeper"], "reviewers")
         enrollments.append(Enrollment(repository, repository_id, github_app["id"], github_app["installation_id"], github_app["installation_account"],
                                       policy["commit"], policy["sha256"], reviewers["openclaw"], reviewers["clawsweeper"]))
-    return Registry(tuple(enrollments))
+    return Registry(tuple(enrollments), _load_legacy_xapi(value))
+
+
+def _load_legacy_xapi(value):
+    """Parse the optional exact-profile legacy marker. Omitted means absent."""
+    if "legacy_xapi" not in value:
+        return None
+    marker = value["legacy_xapi"]
+    _exact(marker, ["repository", "status"], "legacy_xapi")
+    repository = marker["repository"]
+    if not isinstance(repository, str) or repository not in INITIAL_ENROLLMENT_SCOPE:
+        _fail("legacy_xapi repository is outside the initial enrollment scope")
+    status = marker["status"]
+    if type(status) is not str or status not in LEGACY_XAPI_STATUSES:
+        _fail("legacy_xapi status is unknown")
+    return LegacyXapiMarker(repository, status)
 
 
 @dataclass(frozen=True)

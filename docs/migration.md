@@ -87,6 +87,10 @@ an enrollment-route change retires them. `closed` and `closed_merged`
 stay silent and non-dispatchable even when trusted enrollment is broken.
 `run_service_tick` wires registry-owned enrollment into `run_tick` and
 does not infer legacy/none/dual/broken from userland activation flags.
+The v2 registry document may name one exact-profile `legacy_xapi`
+marker; existing documents that omit it stay Conductor-only (legacy
+absent). `load_registry` rejects malformed or ambiguous marker forms.
+`trusted_enrollment_from_registry` consumes only that loaded field.
 `human_gate=true` precedes merge-ready and silent nonterminal dispatch.
 Notification event identity includes canonical route/reason/eligibility
 so a superseded pending row retires while the current blocked decision

@@ -49,7 +49,10 @@ Conductor and forbids duplicate legacy dispatch. Neither enrollment ends the
 process with no review and no notification. Ambiguous or broken enrollment
 fails closed and is never treated as unenrolled. `run_service_tick`
 resolves that pair from the authoritative registry/admission result and
-passes it into `run_tick`. Userland activation flags (`enabled` /
+passes it into `run_tick`. The v2 service-owned registry may carry an
+optional exact-profile `legacy_xapi` marker; omitted documents remain
+legacy absent. `trusted_enrollment_from_registry` reads only that loaded
+field. Userland activation flags (`enabled` /
 `blockers`) do not select legacy, none, dual, or broken routes.
 Hydration, action draining, result collection, and review stages run
 only when the trusted route is `review_conductor`. Dual enrollment

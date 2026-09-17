@@ -1,4 +1,4 @@
-# Issue #687 frozen post-cap repair — human gate, identity, registry enrollment, schema — 2026-09-17
+# Issue #687 frozen post-cap repair — registry legacy_xapi contract — 2026-09-17
 
 ## Ownership
 
@@ -9,6 +9,9 @@
 - Required start/base: `8cc4094e88c8cd04c5b7da28e0c6a9ef054ea69c` (`origin/main`).
 - Authorized frozen starting HEAD / parent candidate:
   `10c8e5edf051766ccb5b112899dbd02078324a0e`.
+- Live retained branch/PR head this reopened batch starts from:
+  `f4ef1aad93accd03001ae0db0920091c2a059ef4` (published descendant of
+  `10c8e5e`; no reset or force-push).
 - Sole source-changing owner: this worktree. No x-api, Suite, or other
   repository was edited.
 - Mode: frozen post-cap source mutation only. Copilot review ledger is
@@ -22,37 +25,34 @@ branch head after this commit is the exact candidate SHA for later CI.
 
 ## Defect and required behavior
 
-Owner adjudication of Copilot review `5241986535` on PR #18 kept the already
-adjudicated false positives and authorized this frozen post-cap
-`required_fix` batch. The automatic-repair ledger remains saturated at
-cycle 2. This packet repairs the four required invariants.
+This reopened frozen batch repairs one newly found registry-contract gap
+inside the already-approved post-cap invariants. The Copilot ledger remains
+exhausted at 2/2. No further review is requested.
 
-1. `human_gate=true` takes precedence. No structurally valid input with
-   that gate may produce `merge_ready` or silently continue review
-   dispatch. Closed heads stay silent and non-dispatchable. Direct
-   regressions cover terminal-ready and nonterminal states.
-2. Notification event identity includes canonical decision route, reason,
-   and eligibility. A stale pending row retires while the new blocked
-   decision enqueues and delivers exactly once. Identical decisions remain
-   deduped.
-3. `service_runtime.run_service_tick` wires registry-owned enrollment into
-   `run_tick` from the authoritative registry/admission result. Userland
-   `enabled` / `blockers` flags do not select legacy, none, dual, or
-   broken routes. Bounded service-runtime regressions cover conductor,
-   legacy-only, none, dual, and broken/ambiguous routes, with no review
-   dispatch off the Review Conductor route and fail-closed behavior where
-   required.
-4. `contracts/orchestration-outcome.schema.json` accepts only
-   producer-emittable notification eligibility/kind/channel combinations.
-   Positive producer samples and negative impossible combinations are
-   covered.
+The versioned external service-owned registry
+(`review-conductor.enrollment.v2`) now represents an optional exact-profile
+`legacy_xapi` marker. Existing documents that omit the field stay valid and
+mean legacy absent (backward-compatible Conductor-only behavior). The marker
+may appear only as a top-level object with exact keys `repository` and
+`status`, exact `INITIAL_ENROLLMENT_SCOPE` placement, and status
+`present` or `absent`. Strings, booleans, lists, `null`, `broken`, unknown
+repositories, missing or extra keys, and enrollment-nested copies fail
+closed at `load_registry`.
 
-Preserved from the parent head: versioned
-`review-conductor.orchestration-outcome.v1`, silent first/second automatic
-rounds, saturating `repair_cycle=2` with scoped `required_fix`, no Conductor
-legacy dispatch, human-only merge, rail suppression, concise ready/blocked
-copy, closed-first silence, pending revalidation, and x-api runtime
-independence. No second notification system and no live adapters.
+`trusted_enrollment_from_registry` consumes only that validated loaded
+field for the running service profile. Synthetic subclass attributes and
+userland `enabled` / `blockers` cannot grant or select a route. Dual is
+Conductor present plus this profile's loaded marker. Legacy-only reports
+`route=legacy_xapi` / handoff required while `legacy_dispatch` stays false.
+Non-Conductor service ticks do not dispatch review stages. Broken or
+ambiguous enrollment remains fail-closed.
+
+Preserved: versioned `review-conductor.orchestration-outcome.v1`, silent
+first/second automatic rounds, saturating `repair_cycle=2`, no Conductor
+legacy dispatch, human-only merge, closed-first silence, pending
+revalidation, human_gate precedence, notification identity, producer-only
+schema combinations, and x-api runtime independence. No second notification
+system and no live adapters.
 
 ## Bounded refusals
 
@@ -71,9 +71,10 @@ is not a deployed review PASS.
 
 | Command | Result |
 | --- | --- |
+| `python3 tests/test_trusted_admission.py` | recorded after the candidate source |
 | `python3 tests/test_orchestration_outcome.py` | recorded after the candidate source |
+| `python3 tests/test_service_runtime.py` selected registry-enrollment, malformed-marker, identity, and related tick tests | recorded after the candidate source |
 | `python3 tests/test_review_conductor_userland.py` | recorded after the candidate source |
-| `python3 tests/test_service_runtime.py` selected registry-enrollment, identity, and related tick tests | recorded after the candidate source |
 | `python3 tests/test_review_conductor.py` | recorded after the candidate source |
 | `python3 tests/test_review_conductor_activation.py` | recorded after the candidate source |
 | `python3 tests/test_review_conductor_profiles.py` | recorded after the candidate source |

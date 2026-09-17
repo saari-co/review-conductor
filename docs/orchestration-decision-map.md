@@ -20,7 +20,10 @@ Trusted enrollment resolver: [`resolve_trusted_enrollment`](../tools/orchestrati
 Queue consumer: [`queue_notifications`](../tools/review_conductor_userland.py).
 `run_service_tick` must resolve trusted enrollment from the
 registry/admission result and pass that pair into `run_tick` before
-review stages and the queue. Userland `enabled` / `blockers` flags do
+review stages and the queue. The v2 registry may carry an optional
+exact-profile `legacy_xapi` marker; omitted means legacy absent.
+`trusted_enrollment_from_registry` reads only the loaded field.
+Userland `enabled` / `blockers` flags do
 not select the route. Pending rows are revalidated before send; event
 identity includes route, reason, and eligibility. `human_gate=true`
 precedes merge-ready and silent nonterminal dispatch. `closed` /

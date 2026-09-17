@@ -37,7 +37,10 @@ engine profile, and persists the policy binding in the same SQLite transaction
 as the accepted `pull_request` delivery that established the head. `workflow_run`
 deliveries never create bindings. Worker/check projection is blocked if a
 current head lacks a current binding; the registry is re-read on every delivery
-and tick. See [trusted admission](trusted-admission.md).
+and tick. The same v2 registry may carry an optional exact-profile
+`legacy_xapi` marker; omitted documents remain legacy absent, and
+`trusted_enrollment_from_registry` consumes only that loaded field.
+See [trusted admission](trusted-admission.md).
 No live registry, credential, HTTPS edge or deployment exists, so this is
 qualified source behavior, not live admission.
 

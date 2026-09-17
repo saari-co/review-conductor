@@ -1361,18 +1361,27 @@ class AdmissionIngressTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def _load_route_registry(self, *, enroll=True, legacy=None, app_id=APP_ID):
+        if enroll:
+            doc = self.fx.registry_document(app_id=app_id)
+        else:
+            doc = {"schema": admission.REGISTRY_SCHEMA, "enrollments": []}
+        if legacy is not None:
+            doc = {**doc, "legacy_xapi": legacy}
+        return admission.load_registry(json.dumps(doc).encode())
+
     def test_service_tick_wires_registry_owned_enrollment_routes(self):
         self.fx.ingest("initial", self.fx.payload())
         enabled = {"enabled": True, "blockers": []}
-
-        @dataclasses.dataclass(frozen=True)
-        class RoutedRegistry(admission.Registry):
-            legacy_xapi: str = "absent"
+        blocked = {"enabled": True, "blockers": ["userland-blocker"]}
+        this_profile = {"repository": REPOSITORY, "status": "present"}
+        other_profile = {"repository": "dinkuskit/blocks", "status": "present"}
+        explicit_absent = {"repository": REPOSITORY, "status": "absent"}
 
         cases = (
             (
                 "conductor",
-                self.fx.registry(),
+                self._load_route_registry(),
                 {"review_conductor": "present", "legacy_xapi": "absent"},
                 "review_conductor",
                 True,
@@ -1380,7 +1389,7 @@ class AdmissionIngressTests(unittest.TestCase):
             ),
             (
                 "legacy-only",
-                RoutedRegistry((), legacy_xapi="present"),
+                self._load_route_registry(enroll=False, legacy=this_profile),
                 {"review_conductor": "absent", "legacy_xapi": "present"},
                 "legacy_xapi",
                 False,
@@ -1388,7 +1397,15 @@ class AdmissionIngressTests(unittest.TestCase):
             ),
             (
                 "none",
-                admission.Registry(()),
+                self._load_route_registry(enroll=False),
+                {"review_conductor": "absent", "legacy_xapi": "absent"},
+                "none",
+                False,
+                False,
+            ),
+            (
+                "none-other-profile-marker",
+                self._load_route_registry(enroll=False, legacy=other_profile),
                 {"review_conductor": "absent", "legacy_xapi": "absent"},
                 "none",
                 False,
@@ -1396,15 +1413,31 @@ class AdmissionIngressTests(unittest.TestCase):
             ),
             (
                 "dual",
-                RoutedRegistry(self.fx.registry().enrollments, legacy_xapi="present"),
+                self._load_route_registry(legacy=this_profile),
                 {"review_conductor": "present", "legacy_xapi": "present"},
                 "review_conductor",
                 True,
                 False,
             ),
             (
+                "conductor-other-profile-marker",
+                self._load_route_registry(legacy=other_profile),
+                {"review_conductor": "present", "legacy_xapi": "absent"},
+                "review_conductor",
+                True,
+                False,
+            ),
+            (
+                "conductor-explicit-absent",
+                self._load_route_registry(legacy=explicit_absent),
+                {"review_conductor": "present", "legacy_xapi": "absent"},
+                "review_conductor",
+                True,
+                False,
+            ),
+            (
                 "broken",
-                self.fx.registry(app_id=APP_ID + 1),
+                self._load_route_registry(app_id=APP_ID + 1),
                 {"review_conductor": "broken", "legacy_xapi": "broken"},
                 "fail_closed",
                 False,
@@ -1418,10 +1451,40 @@ class AdmissionIngressTests(unittest.TestCase):
                     expected_pair,
                 )
                 self.assertEqual(orchestration.enrollment_route(expected_pair)[0], route)
+                decision = orchestration.decide_orchestration_outcome({
+                    "schema": orchestration.INPUT_SCHEMA,
+                    "enrollment": expected_pair,
+                    "state": "ci_running",
+                    "rail": None,
+                    "repair_cycle": 0,
+                    "head_changed": False,
+                    "openclaw_result": "absent",
+                    "clawsweeper_result": "absent",
+                    "ready_qualified": None,
+                    "adjudication_dispositions": None,
+                    "human_gate": False,
+                })
+                self.assertFalse(decision["legacy_dispatch"])
+                self.assertEqual(decision["route"], route)
+                if route == "legacy_xapi":
+                    self.assertEqual(decision["reason"], "legacy_xapi_handoff_required")
+                    self.assertFalse(decision["review_dispatch"])
+                if route == "fail_closed":
+                    self.assertEqual(decision["reason"], "ambiguous_or_broken_enrollment")
+                    self.assertFalse(decision["review_dispatch"])
                 enabled_config = {**self.fx.app_config(), "enrollment": dict(enabled)}
                 self.assertEqual(
                     service.trusted_enrollment_from_registry(enabled_config, registry),
                     expected_pair,
+                )
+                blocked_config = {**self.fx.app_config(), "enrollment": dict(blocked)}
+                self.assertEqual(
+                    service.trusted_enrollment_from_registry(blocked_config, registry),
+                    expected_pair,
+                )
+                self.assertEqual(
+                    orchestration.resolve_trusted_enrollment(blocked_config),
+                    {"review_conductor": "broken", "legacy_xapi": "broken"},
                 )
                 captured = {}
                 real_tick = userland.run_tick
@@ -1493,6 +1556,62 @@ class AdmissionIngressTests(unittest.TestCase):
                         self.assertEqual(item["result"], "planned")
                 else:
                     self.assertEqual(tick["notifications"]["deliveries"], [])
+
+    def test_registry_legacy_xapi_malformed_and_synthetic_attributes_fail_closed(self):
+        self.fx.ingest("initial", self.fx.payload())
+        doc = self.fx.registry_document()
+        malformed = [
+            {**doc, "legacy_xapi": "present"},
+            {**doc, "legacy_xapi": True},
+            {**doc, "legacy_xapi": {"repository": REPOSITORY}},
+            {**doc, "legacy_xapi": {"repository": REPOSITORY, "status": "broken"}},
+            {**doc, "legacy_xapi": {"repository": "saari-co/x-api", "status": "present"}},
+            {**{"schema": admission.REGISTRY_SCHEMA, "enrollments": []}, "legacy_xapi": "present"},
+        ]
+        enrollment_marker = copy.deepcopy(doc)
+        enrollment_marker["enrollments"][0]["legacy_xapi"] = {
+            "repository": REPOSITORY,
+            "status": "present",
+        }
+        malformed.append(enrollment_marker)
+        for item in malformed:
+            with self.subTest(item=item), self.assertRaises(admission.AdmissionError):
+                admission.load_registry(json.dumps(item).encode())
+
+        forged = admission.Registry(())
+        object.__setattr__(forged, "legacy_xapi", "present")
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(self.fx.app_config(), forged),
+            {"review_conductor": "broken", "legacy_xapi": "broken"},
+        )
+        with self.assertRaises(admission.AdmissionError):
+            admission.Registry((), legacy_xapi="present")
+
+        class ExtraAttrRegistry(admission.Registry):
+            synthetic_legacy_xapi = "present"
+
+        extra = ExtraAttrRegistry(())
+        self.assertEqual(extra.synthetic_legacy_xapi, "present")
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(self.fx.app_config(), extra),
+            {"review_conductor": "absent", "legacy_xapi": "absent"},
+        )
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(
+                self.fx.app_config(),
+                self._load_route_registry(enroll=False),
+            ),
+            {"review_conductor": "absent", "legacy_xapi": "absent"},
+        )
+
+        def broken_provider():
+            admission.load_registry(json.dumps({**doc, "legacy_xapi": "present"}).encode())
+            return self.fx.registry()
+
+        with self.assertRaises(admission.AdmissionError):
+            service.run_service_tick(
+                self.fx.app_config(), broken_provider, object(), object(), dry_run=True
+            )
 
     def test_notification_event_identity_distinguishes_route_changes(self):
         with tempfile.TemporaryDirectory() as temporary:

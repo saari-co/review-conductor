@@ -27,9 +27,23 @@ to this repository; tests build synthetic registries in memory.
       "approved_policy": {"commit": "<40 lowercase hex>", "sha256": "<64 lowercase hex>"},
       "reviewers": {"openclaw": "<openclaw-actor>", "clawsweeper": "<clawsweeper-actor>"}
     }
-  ]
+  ],
+  "legacy_xapi": {
+    "repository": "saari-co/openclaw-smcbd-suite",
+    "status": "present"
+  }
 }
 ```
+
+The optional top-level `legacy_xapi` object is the only allowed placement for the
+legacy marker. It names exactly one `INITIAL_ENROLLMENT_SCOPE` repository and
+`status` `present` or `absent`. Existing v2 documents that omit the field stay
+valid and mean legacy absent for every profile (backward-compatible
+Conductor-only behavior). A marker for another repository does not apply to
+the running service profile. Strings, booleans, lists, `null`, `broken`,
+unknown repositories, missing keys, extra keys, and enrollment-nested copies
+fail closed. Declared `broken` is not a document value; runtime broken is
+derived from contradictions.
 
 Rules enforced by `load_registry`:
 
@@ -59,6 +73,12 @@ Rules enforced by `load_registry`:
   to serve, tick or accept deliveries while the engine profile's
   `review_policy.reviewers` differs from the enrollment, so a profile cannot
   supply or change the actors the engine trusts.
+- Optional `legacy_xapi` may appear only as a top-level object with exact keys
+  `repository` and `status`. `Registry.legacy_status_for(repository)` returns
+  that loaded status for the exact service profile and `absent` when the field
+  is omitted or names another profile. `trusted_enrollment_from_registry`
+  consumes only this validated field. Userland `enabled` / `blockers` and
+  synthetic subclass attributes cannot grant a legacy status.
 
 `Registry.lookup(repository, repository_id, app_id, installation_id)` succeeds
 only when all four agree with one enrollment; strings, booleans or a neighbouring
