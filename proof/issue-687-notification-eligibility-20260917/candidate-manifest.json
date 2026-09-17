@@ -1,0 +1,20 @@
+{
+  "schema": "review-conductor.candidate-manifest.v1",
+  "base_sha": "8cc4094e88c8cd04c5b7da28e0c6a9ef054ea69c",
+  "starting_head_sha": "8cc4094e88c8cd04c5b7da28e0c6a9ef054ea69c",
+  "captured_date": "2026-09-17",
+  "binding_scheme": "A commit cannot contain its own SHA. base_sha and starting_head_sha are the required clean start. Per-file sha256 values are of this candidate source. The branch head after commit is the exact candidate SHA for hosted CI.",
+  "files": {
+    "Makefile": "0ccca52258ff172f41b9247276154fbaaa8c670d9774155781a852a42ba5c241",
+    "contracts/orchestration-outcome.schema.json": "f5e1727509e74f467270efc10ac07ea2f2ecb0cfca4b9d09084652d5856d6f45",
+    "docs/architecture.md": "e67d2d907fabe01a149eb85fb1bf8a5c1974aa1c9cbbf68eb0203941c3c23ccd",
+    "docs/migration.md": "8bbfa7c73f97dcfa5c7db2030f20267a6ff6e1428a72ba15a3af2be76d042c73",
+    "docs/orchestration-decision-map.md": "600e9302270a3a17ec36eb9150b5d52a6d80966e522664e41a0a52e53e74695c",
+    "docs/provenance.json": "77a73c0034b4509b146a0c75dbbdbe3306b696071858cb0dfd52654d6af5bfd8",
+    "proof/issue-687-notification-eligibility-20260917/PROOF.md": "dcb379b88a110a8171e51ae1c8ce290ff144a3c9711a1b71592f318b00625a83",
+    "tests/test_orchestration_outcome.py": "85dd38cddce569369e359e25abdbea100d464173d644e7d1977262bebcbcf5ec",
+    "tests/test_review_conductor_userland.py": "967f6603d45dd1262d73161b53d3f25c4ed0d98619721de7cd28a887a57101a9",
+    "tools/orchestration_outcome.py": "093f1ce39eb2b13ac3896722fe4c730b9fee0fde5feb4b60afde089406ea1cea",
+    "tools/review_conductor_userland.py": "d88da7c6a6c49aebe9f0697f96ff93787ecd49bb473d56f21017bcc50a39008c"
+  }
+}

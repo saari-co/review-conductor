@@ -62,6 +62,19 @@ and evidence-consumer dependency only. It does not attach, pin, publish,
 install, or activate the x-api transport or a spark-dgx applied-P3 attestation
 source.
 
+## Completed for issue #687 slice 1 (source-only; not deployed)
+
+Deterministic terminal notification eligibility now lives in Review Conductor
+as `review-conductor.orchestration-outcome.v1`. The existing userland
+notification queue consumes
+[`decide_orchestration_outcome`](../tools/orchestration_outcome.py); there is
+no second notification system and no x-api runtime dependency. Silent first
+and second automatic repair rounds, third-set adjudication without a human
+gate, rail suppression, merge-ready, blocked/human-gate, unenrolled-none, and
+fail-closed broken/unknown outcomes are source-qualified. Later #687
+workstreams are sequenced in
+[orchestration-decision-map.md](orchestration-decision-map.md).
+
 ## Not completed / prerequisites for migration
 
 1. Trusted enrollment, approved base-policy loading and policy-hash binding now

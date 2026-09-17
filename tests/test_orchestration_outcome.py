@@ -1,0 +1,472 @@
+#!/usr/bin/env python3
+"""Deterministic notification eligibility and enrollment-route contract."""
+
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools"))
+import orchestration_outcome as outcome
+
+
+def enrolled(**overrides):
+    value = {
+        "schema": outcome.INPUT_SCHEMA,
+        "enrollment": {"review_conductor": "present", "legacy_xapi": "absent"},
+        "state": "ci_running",
+        "rail": None,
+        "repair_cycle": 0,
+        "head_changed": False,
+        "openclaw_result": "absent",
+        "clawsweeper_result": "absent",
+        "ready_qualified": None,
+        "adjudication_dispositions": None,
+        "human_gate": False,
+    }
+    value.update(overrides)
+    return value
+
+
+def notify(value):
+    return outcome.decide_orchestration_outcome(value)
+
+
+class EnrollmentRouteTests(unittest.TestCase):
+    def test_review_conductor_only_wins_and_dispatches(self):
+        decision = notify(enrolled())
+        self.assertEqual(decision["schema"], outcome.OUTCOME_SCHEMA)
+        self.assertEqual(decision["route"], "review_conductor")
+        self.assertTrue(decision["review_dispatch"])
+        self.assertFalse(decision["legacy_dispatch"])
+        self.assertEqual(decision["notification"]["eligibility"], "silent")
+
+    def test_legacy_only_is_untouched_and_does_not_notify(self):
+        decision = notify(
+            enrolled(enrollment={"review_conductor": "absent", "legacy_xapi": "present"})
+        )
+        self.assertEqual(decision["route"], "legacy_xapi")
+        self.assertFalse(decision["review_dispatch"])
+        self.assertTrue(decision["legacy_dispatch"])
+        self.assertEqual(decision["notification"]["eligibility"], "none")
+        self.assertEqual(decision["reason"], "legacy_xapi_only")
+
+    def test_dual_enrollment_review_conductor_wins_without_legacy_dispatch(self):
+        decision = notify(
+            enrolled(enrollment={"review_conductor": "present", "legacy_xapi": "present"})
+        )
+        self.assertEqual(decision["route"], "review_conductor")
+        self.assertTrue(decision["review_dispatch"])
+        self.assertFalse(decision["legacy_dispatch"])
+        self.assertEqual(decision["reason"], "review_conductor_wins_duplicate_legacy_forbidden")
+
+    def test_neither_enrolled_ends_without_review_or_notification(self):
+        decision = notify(
+            enrolled(enrollment={"review_conductor": "absent", "legacy_xapi": "absent"})
+        )
+        self.assertEqual(decision["route"], "none")
+        self.assertFalse(decision["review_dispatch"])
+        self.assertFalse(decision["legacy_dispatch"])
+        self.assertEqual(decision["notification"]["eligibility"], "none")
+        self.assertEqual(decision["reason"], "unenrolled_no_review_no_notification")
+
+    def test_broken_enrollment_is_not_treated_as_unenrolled(self):
+        for enrollment in (
+            {"review_conductor": "broken", "legacy_xapi": "absent"},
+            {"review_conductor": "absent", "legacy_xapi": "broken"},
+            {"review_conductor": "broken", "legacy_xapi": "present"},
+            {"review_conductor": "present", "legacy_xapi": "broken"},
+            {"review_conductor": "broken", "legacy_xapi": "broken"},
+        ):
+            with self.subTest(enrollment=enrollment):
+                decision = notify(enrolled(enrollment=enrollment))
+                self.assertEqual(decision["route"], "fail_closed")
+                self.assertFalse(decision["review_dispatch"])
+                self.assertFalse(decision["legacy_dispatch"])
+                self.assertEqual(decision["notification"]["eligibility"], "fail_closed")
+                self.assertEqual(decision["reason"], "ambiguous_or_broken_enrollment")
+                self.assertNotEqual(decision["reason"], "unenrolled_no_review_no_notification")
+
+
+class NotificationEligibilityTests(unittest.TestCase):
+    def test_first_and_second_repair_rounds_are_silent(self):
+        for cycle, state, rail_result in (
+            (0, "awaiting_adjudication", "findings"),
+            (0, "repair_required", "findings"),
+            (1, "awaiting_adjudication", "findings"),
+            (1, "repair_required", "findings"),
+        ):
+            with self.subTest(cycle=cycle, state=state):
+                decision = notify(
+                    enrolled(
+                        state=state,
+                        rail="openclaw",
+                        repair_cycle=cycle,
+                        openclaw_result=rail_result,
+                        clawsweeper_result="absent",
+                    )
+                )
+                self.assertEqual(decision["notification"]["eligibility"], "silent")
+                self.assertEqual(decision["notification"]["channels"], [])
+                self.assertFalse(decision["clawsweeper_eligible"])
+                self.assertFalse(decision["merge_ready_eligible"])
+                self.assertEqual(decision["repair"]["cycle"], cycle)
+                self.assertEqual(decision["repair"]["finding_set"], cycle + 1)
+                self.assertTrue(decision["repair"]["ledger_preserved"])
+
+    def test_third_set_dispositions_stay_silent_until_human_gate_state(self):
+        awaiting = notify(
+            enrolled(
+                state="awaiting_adjudication",
+                rail="openclaw",
+                repair_cycle=2,
+                openclaw_result="findings",
+                clawsweeper_result="absent",
+                adjudication_dispositions=["required_fix", "defer", "reject_false_positive"],
+            )
+        )
+        self.assertEqual(awaiting["notification"]["eligibility"], "silent")
+        self.assertEqual(awaiting["reason"], "third_set_adjudication_silent")
+        self.assertEqual(awaiting["repair"]["finding_set"], 3)
+        self.assertEqual(awaiting["repair"]["automatic_rounds_remaining"], 0)
+
+        blocked = notify(
+            enrolled(
+                state="waiting_human",
+                rail="openclaw",
+                repair_cycle=2,
+                openclaw_result="human_gate",
+                clawsweeper_result="absent",
+                adjudication_dispositions=["required_fix", "human_gate"],
+                human_gate=True,
+            )
+        )
+        self.assertEqual(blocked["notification"]["eligibility"], "blocked")
+        self.assertEqual(blocked["notification"]["kind"], "human_action_required")
+        self.assertEqual(blocked["notification"]["channels"], list(outcome.NOTIFY_CHANNELS))
+        self.assertEqual(blocked["reason"], "human_action_required")
+
+    def test_changed_head_preserves_the_repair_ledger(self):
+        decision = notify(
+            enrolled(
+                state="repair_required",
+                rail="openclaw",
+                repair_cycle=1,
+                head_changed=True,
+                openclaw_result="findings",
+                clawsweeper_result="absent",
+            )
+        )
+        self.assertEqual(decision["repair"]["cycle"], 1)
+        self.assertEqual(decision["repair"]["finding_set"], 2)
+        self.assertTrue(decision["repair"]["ledger_preserved"])
+        self.assertEqual(decision["notification"]["eligibility"], "silent")
+
+    def test_openclaw_findings_suppress_clawsweeper(self):
+        decision = notify(
+            enrolled(
+                state="awaiting_adjudication",
+                rail="openclaw",
+                openclaw_result="findings",
+                clawsweeper_result="absent",
+            )
+        )
+        self.assertFalse(decision["clawsweeper_eligible"])
+        self.assertFalse(decision["merge_ready_eligible"])
+        self.assertEqual(decision["reason"], "openclaw_findings_suppress_clawsweeper")
+        self.assertEqual(decision["notification"]["eligibility"], "silent")
+
+    def test_clawsweeper_findings_suppress_merge_ready(self):
+        awaiting = notify(
+            enrolled(
+                state="awaiting_adjudication",
+                rail="clawsweeper",
+                openclaw_result="clean",
+                clawsweeper_result="findings",
+            )
+        )
+        self.assertTrue(awaiting["clawsweeper_eligible"])
+        self.assertFalse(awaiting["merge_ready_eligible"])
+        self.assertEqual(awaiting["reason"], "clawsweeper_findings_suppress_merge_ready")
+        self.assertEqual(awaiting["notification"]["eligibility"], "silent")
+        ready_blocked = notify(
+            enrolled(
+                state="ready_for_human_merge",
+                rail="clawsweeper",
+                openclaw_result="clean",
+                clawsweeper_result="findings",
+                ready_qualified=True,
+            )
+        )
+        self.assertTrue(ready_blocked["clawsweeper_eligible"])
+        self.assertFalse(ready_blocked["merge_ready_eligible"])
+        self.assertEqual(ready_blocked["notification"]["eligibility"], "silent")
+        self.assertEqual(ready_blocked["reason"], "merge_ready_suppressed")
+
+    def test_merge_ready_requires_both_effectively_clean_rails(self):
+        decision = notify(
+            enrolled(
+                state="ready_for_human_merge",
+                rail="clawsweeper",
+                openclaw_result="clean",
+                clawsweeper_result="effectively_clean",
+                ready_qualified=True,
+            )
+        )
+        self.assertTrue(decision["clawsweeper_eligible"])
+        self.assertTrue(decision["merge_ready_eligible"])
+        self.assertEqual(decision["notification"]["eligibility"], "merge_ready")
+        self.assertEqual(decision["notification"]["kind"], "merge_ready")
+        self.assertEqual(decision["notification"]["channels"], list(outcome.NOTIFY_CHANNELS))
+        self.assertEqual(decision["reason"], "both_rails_effectively_clean")
+
+    def test_authorized_deferrals_on_unchanged_head_can_be_merge_ready(self):
+        decision = notify(
+            enrolled(
+                state="ready_for_human_merge",
+                rail="clawsweeper",
+                repair_cycle=2,
+                openclaw_result="effectively_clean",
+                clawsweeper_result="effectively_clean",
+                ready_qualified=True,
+                adjudication_dispositions=["defer", "reject_false_positive"],
+            )
+        )
+        self.assertEqual(decision["notification"]["eligibility"], "merge_ready")
+        self.assertTrue(decision["repair"]["ledger_preserved"])
+        self.assertEqual(decision["repair"]["cycle"], 2)
+
+    def test_ready_state_without_ready_policy_stays_silent(self):
+        for ready in (None, False):
+            with self.subTest(ready_qualified=ready):
+                decision = notify(
+                    enrolled(
+                        state="ready_for_human_merge",
+                        rail="clawsweeper",
+                        openclaw_result="clean",
+                        clawsweeper_result="effectively_clean",
+                        ready_qualified=ready,
+                    )
+                )
+                self.assertEqual(decision["notification"]["eligibility"], "silent")
+                self.assertFalse(decision["merge_ready_eligible"])
+                self.assertEqual(decision["reason"], "merge_ready_suppressed")
+
+    def test_blocked_human_action_states_notify(self):
+        for state, openclaw_result, clawsweeper_result, rail in (
+            ("ci_failed", "absent", "absent", None),
+            ("openclaw_failed", "failed", "absent", "openclaw"),
+            ("clawsweeper_failed", "clean", "failed", "clawsweeper"),
+            ("waiting_human", "human_gate", "absent", "openclaw"),
+        ):
+            with self.subTest(state=state):
+                decision = notify(
+                    enrolled(
+                        state=state,
+                        rail=rail,
+                        openclaw_result=openclaw_result,
+                        clawsweeper_result=clawsweeper_result,
+                        human_gate=state == "waiting_human",
+                    )
+                )
+                self.assertEqual(decision["notification"]["eligibility"], "blocked")
+                self.assertEqual(decision["notification"]["kind"], "human_action_required")
+                self.assertEqual(
+                    decision["notification"]["channels"], list(outcome.NOTIFY_CHANNELS)
+                )
+
+
+class FailClosedTests(unittest.TestCase):
+    def test_malformed_and_unknown_inputs_fail_closed(self):
+        cases = [
+            {**enrolled(), "schema": "review-conductor.orchestration-input.v0"},
+            {k: v for k, v in enrolled().items() if k != "state"},
+            {**enrolled(), "extra": True},
+            {**enrolled(), "repair_cycle": True},
+            {**enrolled(), "repair_cycle": 3},
+            {**enrolled(), "head_changed": 1},
+            {**enrolled(), "ready_qualified": "yes"},
+            {**enrolled(), "human_gate": "true"},
+            {**enrolled(), "rail": "spark"},
+            {**enrolled(), "openclaw_result": "chunked findings: 2"},
+            {**enrolled(), "enrollment": {"review_conductor": "maybe", "legacy_xapi": "absent"}},
+            {**enrolled(), "adjudication_dispositions": ["required_fix", "invented"]},
+            {**enrolled(), "adjudication_dispositions": ["required_fix", "required_fix"]},
+            {**enrolled(), "adjudication_dispositions": []},
+        ]
+        for raw in cases:
+            with self.subTest(raw=raw):
+                with self.assertRaises(outcome.OrchestrationError):
+                    notify(raw)
+
+    def test_unknown_state_and_rail_results_are_fail_closed_not_silent(self):
+        unknown_state = notify(enrolled(state="mystery_state"))
+        self.assertEqual(unknown_state["route"], "fail_closed")
+        self.assertEqual(unknown_state["notification"]["eligibility"], "fail_closed")
+        self.assertEqual(unknown_state["reason"], "unknown_state_fail_closed")
+        unknown_rail = notify(
+            enrolled(
+                state="ready_for_human_merge",
+                openclaw_result="unknown",
+                clawsweeper_result="clean",
+                ready_qualified=True,
+            )
+        )
+        self.assertEqual(unknown_rail["notification"]["eligibility"], "fail_closed")
+        self.assertEqual(unknown_rail["reason"], "unknown_rail_result_fail_closed")
+
+    def test_row_mapper_preserves_silent_repair_and_blocked_ci(self):
+        silent = outcome.decide_orchestration_outcome(
+            outcome.outcome_from_review_row(
+                {
+                    "state": "awaiting_adjudication",
+                    "rail": "openclaw",
+                    "repair_cycle": 0,
+                }
+            )
+        )
+        self.assertEqual(silent["notification"]["eligibility"], "silent")
+        blocked = outcome.decide_orchestration_outcome(
+            outcome.outcome_from_review_row(
+                {"state": "ci_failed", "rail": None, "repair_cycle": 0}
+            )
+        )
+        self.assertEqual(blocked["notification"]["eligibility"], "blocked")
+
+    def test_schema_file_matches_the_python_contract(self):
+        schema = json.loads(
+            (ROOT / "contracts/orchestration-outcome.schema.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(schema["properties"]["schema"]["const"], outcome.OUTCOME_SCHEMA)
+        self.assertEqual(set(schema["required"]), set(outcome.OUTCOME_KEYS))
+        self.assertEqual(set(schema["properties"]["route"]["enum"]), set(outcome.ROUTES))
+        self.assertFalse(schema["additionalProperties"])
+
+
+class PreciseMutantTests(unittest.TestCase):
+    MUTANTS = (
+        (
+            "notify awaiting_adjudication",
+            '    if state in SILENT_INTERNAL_STATES and not value["human_gate"]:\n',
+            "    if False and state in SILENT_INTERNAL_STATES and not value[\"human_gate\"]:\n",
+            "test_first_and_second_repair_rounds_are_silent",
+        ),
+        (
+            "notify repair_required by dropping the silent set",
+            'SILENT_INTERNAL_STATES = frozenset({"awaiting_adjudication", "repair_required"})\n',
+            'SILENT_INTERNAL_STATES = frozenset({"awaiting_adjudication"})\n',
+            "test_first_and_second_repair_rounds_are_silent",
+        ),
+        (
+            "treat unenrolled as review_conductor",
+            '    return "none", "unenrolled_no_review_no_notification"\n',
+            '    return "review_conductor", "unenrolled_no_review_no_notification"\n',
+            "test_neither_enrolled_ends_without_review_or_notification",
+        ),
+        (
+            "treat broken enrollment as unenrolled",
+            '    if review_conductor == "broken" or legacy_xapi == "broken":\n',
+            "    if False and (review_conductor == \"broken\" or legacy_xapi == \"broken\"):\n",
+            "test_broken_enrollment_is_not_treated_as_unenrolled",
+        ),
+        (
+            "allow clawsweeper after openclaw findings",
+            "    if openclaw_result in BLOCKING_OPENCLAW:\n        clawsweeper_eligible = False\n",
+            "    if False and openclaw_result in BLOCKING_OPENCLAW:\n        clawsweeper_eligible = False\n",
+            "test_openclaw_findings_suppress_clawsweeper",
+        ),
+        (
+            "allow merge-ready after clawsweeper findings",
+            "    if clawsweeper_result in BLOCKING_CLAWSWEEPER:\n        merge_ready_eligible = False\n",
+            "    if False and clawsweeper_result in BLOCKING_CLAWSWEEPER:\n        merge_ready_eligible = False\n",
+            "test_clawsweeper_findings_suppress_merge_ready",
+        ),
+        (
+            "reset ledger on changed head",
+            "    repair_cycle = value[\"repair_cycle\"]\n",
+            '    repair_cycle = 0 if value["head_changed"] else value["repair_cycle"]\n',
+            "test_changed_head_preserves_the_repair_ledger",
+        ),
+        (
+            "treat unknown state as silent",
+            '            reason="unknown_state_fail_closed",\n',
+            '            reason="silent_internal_progression",\n',
+            "test_unknown_state_and_rail_results_are_fail_closed_not_silent",
+        ),
+        (
+            "merge-ready without ready_qualified",
+            "        and ready_qualified is True\n",
+            "        and ready_qualified is not False\n",
+            "test_ready_state_without_ready_policy_stays_silent",
+        ),
+        (
+            "duplicate legacy dispatch when both enrolled",
+            '            return "review_conductor", "review_conductor_wins_duplicate_legacy_forbidden"\n',
+            '            return "legacy_xapi", "review_conductor_wins_duplicate_legacy_forbidden"\n',
+            "test_dual_enrollment_review_conductor_wins_without_legacy_dispatch",
+        ),
+    )
+
+    def test_precise_orchestration_outcome_mutants(self):
+        source = (ROOT / "tools" / "orchestration_outcome.py").read_text(encoding="utf-8")
+        for label, old, new, test_name in self.MUTANTS:
+            with self.subTest(mutant=label):
+                self.assertEqual(source.count(old), 1, f"mutant anchor drifted: {label}")
+                with tempfile.TemporaryDirectory(prefix="review-conductor-mutant-") as temp_name:
+                    copy_root = Path(temp_name) / "copy"
+                    for name in ("tools", "tests", "contracts"):
+                        shutil.copytree(ROOT / name, copy_root / name)
+                    target = copy_root / "tools" / "orchestration_outcome.py"
+                    target.write_text(source.replace(old, new, 1), encoding="utf-8")
+                    completed = subprocess.run(
+                        [
+                            sys.executable,
+                            str(copy_root / "tests" / "test_orchestration_outcome.py"),
+                            test_name,
+                        ],
+                        cwd=copy_root,
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                        env={
+                            "PATH": "/usr/bin:/bin",
+                            "HOME": temp_name,
+                            "PYTHONDONTWRITEBYTECODE": "1",
+                        },
+                    )
+                self.assertNotEqual(
+                    completed.returncode, 0, f"mutant survived: {label}\n{completed.stderr}"
+                )
+                self.assertTrue(
+                    "AssertionError" in completed.stderr or "assert " in completed.stderr,
+                    f"mutant did not fail its intended assertion: {label}\n{completed.stderr}",
+                )
+
+
+def main() -> int:
+    loader = unittest.TestLoader()
+    selected = [argument for argument in sys.argv[1:] if not argument.startswith("-")]
+    if selected:
+        suite = unittest.TestSuite()
+        full = loader.loadTestsFromModule(sys.modules[__name__])
+        for test in full:
+            for case in test:
+                if case.id().rsplit(".", 1)[-1] in selected:
+                    suite.addTest(case)
+        if suite.countTestCases() == 0:
+            raise SystemExit(f"unknown orchestration outcome tests: {selected}")
+    else:
+        suite = loader.loadTestsFromModule(sys.modules[__name__])
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    return 0 if result.wasSuccessful() else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

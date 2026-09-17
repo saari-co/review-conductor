@@ -36,6 +36,29 @@ parsing; replays are idempotent; conflicting deliveries fail closed. Uncertain
 non-idempotent dispatch is reconciled, not blindly retried. Two repair cycles
 exhaust automatic repair; reviewers never become mutation owners.
 
+Enrollment and terminal notification eligibility are one Conductor-owned
+decision, [`decide_orchestration_outcome`](../tools/orchestration_outcome.py)
+with schema `review-conductor.orchestration-outcome.v1`. A Review
+Conductor-enrolled repository uses the automatic CI → OpenClaw →
+repair/adjudication → ClawSweeper pipeline. A repository enrolled only in
+legacy x-api rails keeps that agent-driven path; Conductor does not depend on
+x-api at runtime and does not alter it. Dual enrollment selects Review
+Conductor and forbids duplicate legacy dispatch. Neither enrollment ends the
+process with no review and no notification. Ambiguous or broken enrollment
+fails closed and is never treated as unenrolled.
+
+The existing notification queue consumes that outcome. It does not invent a
+second sender. `repair_required` and `awaiting_adjudication` without a genuine
+human gate are silent internal progression, including the first two automatic
+repair rounds. OpenClaw findings suppress ClawSweeper eligibility. ClawSweeper
+findings suppress merge-ready eligibility. Merge-ready notification requires
+both required exact-head rails to be effectively clean, including authorized
+deferrals or rejections on an unchanged head, plus the existing ready-quality
+policy. Only merge-ready or genuinely blocked/human-action-required outcomes
+notify. A changed head preserves the 2/2 repair ledger. Unknown or malformed
+outcomes fail closed. See the [decision map](orchestration-decision-map.md)
+for later #687 workstreams.
+
 The Conductor is the sole writer of the authoritative `OpenClaw Review Rail`
 and `ClawSweeper Review Rail` checks after it validates reviewer-native evidence.
 A completed exact-head review can project review-success while merge stays

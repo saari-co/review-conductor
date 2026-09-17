@@ -832,7 +832,7 @@ def test_exact_artifacts_drive_ready_notification_once_without_merge() -> None:
         assert current(config, pr)["state"] == "ready_for_human_merge"
 
 
-def test_clawsweeper_finding_waits_for_adjudication_and_notifies_discord_only() -> None:
+def test_clawsweeper_finding_waits_for_adjudication_without_notification() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         config = config_fixture(root)
@@ -851,12 +851,76 @@ def test_clawsweeper_finding_waits_for_adjudication_and_notifies_discord_only() 
         runtime.drain_bridge_inboxes(config)
         assert current(config, pr)["state"] == "awaiting_adjudication"
         notifier = FakeNotifier()
-        userland.deliver_notifications(config, notifier, dry_run=False)
-        assert [channel for channel, _message in notifier.sent] == [
-            "openclaw_context",
-            "discord",
-        ]
-        assert all("awaiting bounded adjudication" in message for _channel, message in notifier.sent)
+        delivered = userland.deliver_notifications(config, notifier, dry_run=False)
+        assert notifier.sent == []
+        assert delivered["deliveries"] == []
+
+
+def test_first_round_openclaw_findings_and_repair_required_are_silent() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        config = config_fixture(Path(temporary))
+        pr = 76
+        ingress(config, "pull_request", "silent-openclaw-pr", pr_payload(pr))
+        ingress(config, "workflow_run", "silent-openclaw-ci", ci_payload(pr, 1076))
+        connection = core.open_database(Path(config["paths"]["state_root"]))
+        try:
+            connection.execute(
+                """
+                UPDATE heads
+                SET state = 'awaiting_adjudication', rail = 'openclaw',
+                    repair_cycle = 0, blocker = 'OpenClaw findings require bounded adjudication'
+                WHERE pr_number = ? AND is_current = 1
+                """,
+                (pr,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        notifier = FakeNotifier()
+        first = userland.deliver_notifications(config, notifier, dry_run=False)
+        assert current(config, pr)["state"] == "awaiting_adjudication"
+        assert notifier.sent == []
+        assert first["deliveries"] == []
+        connection = core.open_database(Path(config["paths"]["state_root"]))
+        try:
+            connection.execute(
+                """
+                UPDATE heads
+                SET state = 'repair_required', repair_cycle = 1,
+                    blocker = 'accepted required fix must be patched by the single mutation owner'
+                WHERE pr_number = ? AND is_current = 1
+                """,
+                (pr,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        second = userland.deliver_notifications(config, notifier, dry_run=False)
+        assert current(config, pr)["state"] == "repair_required"
+        assert notifier.sent == []
+        assert second["deliveries"] == []
+
+
+def test_unknown_head_outcome_fails_closed_instead_of_notifying() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        config = config_fixture(Path(temporary))
+        pr = 79
+        ingress(config, "pull_request", "unknown-outcome-pr", pr_payload(pr))
+        connection = core.open_database(Path(config["paths"]["state_root"]))
+        try:
+            connection.execute(
+                "UPDATE heads SET state = 'mystery_state' WHERE pr_number = ? AND is_current = 1",
+                (pr,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        try:
+            userland.deliver_notifications(config, FakeNotifier(), dry_run=False)
+        except userland.orchestration.OrchestrationError as exc:
+            assert "unknown_state_fail_closed" in str(exc)
+        else:
+            raise AssertionError("unknown head outcome must fail closed")
 
 
 def test_keep_open_without_defects_is_review_success_not_merge() -> None:
@@ -1482,7 +1546,9 @@ def main() -> None:
         test_legacy_openclaw_terminal_without_review_policy_does_not_require_applied_p3,
         test_exact_artifacts_drive_ready_notification_once_without_merge,
         test_keep_open_without_defects_is_review_success_not_merge,
-        test_clawsweeper_finding_waits_for_adjudication_and_notifies_discord_only,
+        test_clawsweeper_finding_waits_for_adjudication_without_notification,
+        test_first_round_openclaw_findings_and_repair_required_are_silent,
+        test_unknown_head_outcome_fails_closed_instead_of_notifying,
         test_sub_platinum_or_insufficient_proof_stops_at_human_gate,
         test_completed_clawsweeper_human_gate_owner_adjudication_projects_ready,
         test_unbound_clawsweeper_workflow_failure_alerts_without_guessing_a_pr,

@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/saari-co/review-conductor/blob/main/contracts/orchestration-outcome.schema.json",
+  "title": "Review Conductor orchestration outcome v1",
+  "$comment": "Canonical enrollment-route, rail-suppression, and terminal notification decision. The existing notification queue consumes this outcome. It is not a second notification system and grants no merge, dispatch, or x-api authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "route",
+    "review_dispatch",
+    "legacy_dispatch",
+    "clawsweeper_eligible",
+    "merge_ready_eligible",
+    "notification",
+    "repair",
+    "reason"
+  ],
+  "properties": {
+    "schema": {
+      "const": "review-conductor.orchestration-outcome.v1"
+    },
+    "route": {
+      "enum": [
+        "review_conductor",
+        "legacy_xapi",
+        "none",
+        "fail_closed"
+      ]
+    },
+    "review_dispatch": {
+      "type": "boolean"
+    },
+    "legacy_dispatch": {
+      "type": "boolean"
+    },
+    "clawsweeper_eligible": {
+      "type": "boolean"
+    },
+    "merge_ready_eligible": {
+      "type": "boolean"
+    },
+    "notification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "eligibility",
+        "kind",
+        "channels"
+      ],
+      "properties": {
+        "eligibility": {
+          "enum": [
+            "silent",
+            "merge_ready",
+            "blocked",
+            "none",
+            "fail_closed"
+          ]
+        },
+        "kind": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "merge_ready",
+            "human_action_required",
+            null
+          ]
+        },
+        "channels": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "openclaw_context",
+              "discord",
+              "signal"
+            ]
+          }
+        }
+      }
+    },
+    "repair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cycle",
+        "finding_set",
+        "automatic_rounds_remaining",
+        "ledger_preserved"
+      ],
+      "properties": {
+        "cycle": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "finding_set": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        },
+        "automatic_rounds_remaining": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "ledger_preserved": {
+          "const": true
+        }
+      }
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    }
+  }
+}

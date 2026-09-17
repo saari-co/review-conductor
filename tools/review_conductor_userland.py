@@ -30,11 +30,14 @@ import review_conductor as core  # noqa: E402
 import review_conductor_runtime as runtime  # noqa: E402
 import review_conductor_profiles as profiles  # noqa: E402
 import review_result_projection as projection  # noqa: E402
+import orchestration_outcome as orchestration  # noqa: E402
 
 
 USERLAND_SCHEMA = "smoky.review-conductor.userland.v1"
 NOTIFICATION_SCHEMA = "smoky.review-conductor.notification.v1"
 DEFAULT_CONFIG = ROOT / "contracts/review-conductor/dinkuskit-blocks-userland.json"
+# Engine terminal states. Notification eligibility is decided by
+# orchestration_outcome, not by membership in this set.
 TERMINAL_STATES = {
     "ci_failed",
     "awaiting_adjudication",
@@ -1422,17 +1425,6 @@ def notification_message(row: sqlite3.Row, quality: sqlite3.Row | None) -> str:
             f"CI, Spark-2 OpenClaw, and ClawSweeper are exact-head clean; overall tier {quality['overall_tier']}, "
             f"proof {quality['proof_status']}. No merge was attempted. {url}"
         )
-    if row["state"] == "repair_required":
-        return (
-            f"Review Conductor: {row['repository']}#{row['pr_number']} needs repair cycle "
-            f"{int(row['repair_cycle']) + 1}/2 from {row['repair_owner'] or row['mutation_owner']} after "
-            f"{row['rail']} review at {short}. A new head must restart CI and both rails. {url}"
-        )
-    if row["state"] == "awaiting_adjudication":
-        return (
-            f"Review Conductor: {row['repository']}#{row['pr_number']} has {row['rail']} findings awaiting "
-            f"bounded adjudication at {short}; the reviewer cannot patch its own findings. {url}"
-        )
     return (
         f"Review Conductor needs Bobby: {row['repository']}#{row['pr_number']} is {row['state']} at {short}. "
         f"Reason: {row['blocker'] or 'operator attention required'}. Repair cycle {row['repair_cycle']}/2. "
@@ -2003,8 +1995,6 @@ def queue_notifications(config: dict[str, Any]) -> int:
             "SELECT * FROM heads WHERE is_current = 1 ORDER BY pr_number"
         ).fetchall()
         for row in rows:
-            if row["state"] not in TERMINAL_STATES:
-                continue
             quality = connection.execute(
                 """
                 SELECT * FROM clawsweeper_quality
@@ -2016,6 +2006,16 @@ def queue_notifications(config: dict[str, Any]) -> int:
                     row["head_sha"], row["review_epoch"],
                 ),
             ).fetchone()
+            decision = orchestration.decide_orchestration_outcome(
+                orchestration.outcome_from_review_row(row, quality)
+            )
+            eligibility = decision["notification"]["eligibility"]
+            if eligibility in {"silent", "none"}:
+                continue
+            if eligibility not in {"merge_ready", "blocked"}:
+                raise orchestration.OrchestrationError(
+                    decision["reason"] or "notification eligibility is not actionable"
+                )
             failure_attempt = 0
             if row["state"] == "openclaw_failed":
                 failed_action = core.tuple_action(
@@ -2030,15 +2030,7 @@ def queue_notifications(config: dict[str, Any]) -> int:
                     int(row["review_epoch"]),
                 )
                 failure_attempt = int(failed_action["attempts"]) if failed_action else 0
-            if row["state"] == "ready_for_human_merge" and (
-                quality is None or not bool(quality["ready_qualified"])
-            ):
-                continue
-            channels = (
-                ["openclaw_context", "discord"]
-                if row["state"] in {"awaiting_adjudication", "repair_required"}
-                else ["openclaw_context", "discord", "signal"]
-            )
+            channels = decision["notification"]["channels"]
             event_identity = (
                 f"{row['repository']}|{row['pr_number']}|{row['base_sha']}|"
                 f"{row['head_sha']}|{row['review_epoch']}|{row['state']}|{row['repair_cycle']}"
@@ -2058,6 +2050,12 @@ def queue_notifications(config: dict[str, Any]) -> int:
                 "repair_cycle": row["repair_cycle"],
                 "message": notification_message(row, quality),
                 "merge_authorized": False,
+                "orchestration_outcome": {
+                    "schema": decision["schema"],
+                    "route": decision["route"],
+                    "notification": decision["notification"],
+                    "reason": decision["reason"],
+                },
             }
             for channel in channels:
                 inserted = connection.execute(
