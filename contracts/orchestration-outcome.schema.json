@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/saari-co/review-conductor/blob/main/contracts/orchestration-outcome.schema.json",
   "title": "Review Conductor orchestration outcome v1",
-  "$comment": "Canonical enrollment-route, rail-suppression, and terminal notification decision. The existing notification queue consumes this outcome. It is not a second notification system and grants no merge or x-api authority. legacy_dispatch is always false: Conductor describes a legacy_xapi handoff when needed but never encodes or dispatches the x-api conveyor. Representable fail-closed routing keeps dispatch suppressed and uses notification.eligibility=blocked. repair.cycle is the saturating 2/2 automatic-repair ledger, not a ceiling on later scoped required_fix routes.",
+  "$comment": "Canonical enrollment-route, rail-suppression, and terminal notification decision. The existing notification queue consumes this outcome. It is not a second notification system and grants no merge or x-api authority. legacy_dispatch is always false: Conductor describes a legacy_xapi handoff when needed but never encodes or dispatches the x-api conveyor. Representable fail-closed routing keeps dispatch suppressed and uses notification.eligibility=blocked. notification.eligibility/kind/channels accept only producer-emittable combinations. repair.cycle is the saturating 2/2 automatic-repair ledger, not a ceiling on later scoped required_fix routes.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -43,44 +43,101 @@
       "type": "boolean"
     },
     "notification": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "eligibility",
-        "kind",
-        "channels"
-      ],
-      "properties": {
-        "eligibility": {
-          "enum": [
-            "silent",
-            "merge_ready",
-            "blocked",
-            "none"
-          ]
-        },
-        "kind": {
-          "type": [
-            "string",
-            "null"
+      "$comment": "Exactly the producer-emittable combinations from decide_orchestration_outcome. Independent eligibility/kind/channels fields are rejected.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "eligibility",
+            "kind",
+            "channels"
           ],
-          "enum": [
-            "merge_ready",
-            "human_action_required",
-            null
-          ]
+          "properties": {
+            "eligibility": {
+              "const": "merge_ready"
+            },
+            "kind": {
+              "const": "merge_ready"
+            },
+            "channels": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 3,
+              "prefixItems": [
+                {
+                  "const": "openclaw_context"
+                },
+                {
+                  "const": "discord"
+                },
+                {
+                  "const": "signal"
+                }
+              ],
+              "items": false
+            }
+          }
         },
-        "channels": {
-          "type": "array",
-          "items": {
-            "enum": [
-              "openclaw_context",
-              "discord",
-              "signal"
-            ]
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "eligibility",
+            "kind",
+            "channels"
+          ],
+          "properties": {
+            "eligibility": {
+              "const": "blocked"
+            },
+            "kind": {
+              "const": "human_action_required"
+            },
+            "channels": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 3,
+              "prefixItems": [
+                {
+                  "const": "openclaw_context"
+                },
+                {
+                  "const": "discord"
+                },
+                {
+                  "const": "signal"
+                }
+              ],
+              "items": false
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "eligibility",
+            "kind",
+            "channels"
+          ],
+          "properties": {
+            "eligibility": {
+              "enum": [
+                "silent",
+                "none"
+              ]
+            },
+            "kind": {
+              "type": "null"
+            },
+            "channels": {
+              "type": "array",
+              "maxItems": 0
+            }
           }
         }
-      }
+      ]
     },
     "repair": {
       "type": "object",

@@ -84,7 +84,13 @@ and fail-closed copy prefers the canonical reason over stale persisted
 blocker text. Pending notification rows are revalidated against the
 current head and trusted enrollment before send; close, supersession, or
 an enrollment-route change retires them. `closed` and `closed_merged`
-stay silent and non-dispatchable even when trusted enrollment is broken. `repair_cycle` is the
+stay silent and non-dispatchable even when trusted enrollment is broken.
+`run_service_tick` wires registry-owned enrollment into `run_tick` and
+does not infer legacy/none/dual/broken from userland activation flags.
+`human_gate=true` precedes merge-ready and silent nonterminal dispatch.
+Notification event identity includes canonical route/reason/eligibility
+so a superseded pending row retires while the current blocked decision
+delivers exactly once. `repair_cycle` is the
 saturating ledger for the first two broad automatic rounds: cycle 2 still
 allows a scoped `required_fix` route, head change, and exact-head rerun
 without a third automatic round or ledger reset. Terminal messages are

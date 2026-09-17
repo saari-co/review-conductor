@@ -18,9 +18,14 @@ Canonical function: [`decide_orchestration_outcome`](../tools/orchestration_outc
 Canonical schema: [`orchestration-outcome.schema.json`](../contracts/orchestration-outcome.schema.json).
 Trusted enrollment resolver: [`resolve_trusted_enrollment`](../tools/orchestration_outcome.py).
 Queue consumer: [`queue_notifications`](../tools/review_conductor_userland.py).
-`run_tick` must resolve trusted enrollment before review stages and pass
-that pair into the queue. Pending rows are revalidated before send.
-`closed` / `closed_merged` are terminal, silent, and non-dispatchable
-even when enrollment is broken; closed-state handling precedes enrollment
+`run_service_tick` must resolve trusted enrollment from the
+registry/admission result and pass that pair into `run_tick` before
+review stages and the queue. Userland `enabled` / `blockers` flags do
+not select the route. Pending rows are revalidated before send; event
+identity includes route, reason, and eligibility. `human_gate=true`
+precedes merge-ready and silent nonterminal dispatch. `closed` /
+`closed_merged` are terminal, silent, and non-dispatchable even when
+enrollment is broken; closed-state handling precedes enrollment
 short-circuits. `notification.eligibility` has no `fail_closed` value;
-representable failures use `blocked`.
+representable failures use `blocked`. The public schema accepts only
+producer-emittable eligibility/kind/channel combinations.

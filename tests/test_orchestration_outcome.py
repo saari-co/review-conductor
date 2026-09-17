@@ -39,6 +39,37 @@ def notify(value):
     return outcome.decide_orchestration_outcome(value)
 
 
+def notification_matches_schema(notification):
+    schema = json.loads(
+        (ROOT / "contracts/orchestration-outcome.schema.json").read_text(encoding="utf-8")
+    )
+    if not isinstance(notification, dict) or set(notification) != {"eligibility", "kind", "channels"}:
+        return False
+    channels = notification["channels"]
+    if not isinstance(channels, list):
+        return False
+    for branch in schema["properties"]["notification"]["oneOf"]:
+        eligibility = branch["properties"]["eligibility"]
+        kind = branch["properties"]["kind"]
+        allowed = {eligibility["const"]} if "const" in eligibility else set(eligibility["enum"])
+        if notification["eligibility"] not in allowed:
+            continue
+        if "const" in kind:
+            if notification["kind"] != kind["const"]:
+                continue
+        elif kind.get("type") == "null" and notification["kind"] is not None:
+            continue
+        channel_schema = branch["properties"]["channels"]
+        if channel_schema.get("maxItems") == 0:
+            if channels:
+                continue
+            return True
+        expected = [item["const"] for item in channel_schema.get("prefixItems", ())]
+        if channels == expected:
+            return True
+    return False
+
+
 class EnrollmentRouteTests(unittest.TestCase):
     def test_review_conductor_only_wins_and_dispatches(self):
         decision = notify(enrolled())
@@ -284,6 +315,36 @@ class NotificationEligibilityTests(unittest.TestCase):
                     decision["notification"]["channels"], list(outcome.NOTIFY_CHANNELS)
                 )
 
+    def test_human_gate_precedes_terminal_ready_and_nonterminal_dispatch(self):
+        ready = notify(
+            enrolled(
+                state="ready_for_human_merge",
+                rail="clawsweeper",
+                openclaw_result="clean",
+                clawsweeper_result="effectively_clean",
+                ready_qualified=True,
+                human_gate=True,
+            )
+        )
+        self.assertEqual(ready["notification"]["eligibility"], "blocked")
+        self.assertEqual(ready["notification"]["kind"], "human_action_required")
+        self.assertEqual(ready["notification"]["channels"], list(outcome.NOTIFY_CHANNELS))
+        self.assertFalse(ready["merge_ready_eligible"])
+        self.assertEqual(ready["reason"], "human_action_required")
+        self.assertNotEqual(ready["notification"]["eligibility"], "merge_ready")
+
+        running = notify(enrolled(state="ci_running", human_gate=True))
+        self.assertEqual(running["notification"]["eligibility"], "blocked")
+        self.assertEqual(running["notification"]["kind"], "human_action_required")
+        self.assertEqual(running["reason"], "human_action_required")
+        self.assertNotEqual(running["notification"]["eligibility"], "silent")
+        self.assertTrue(running["review_dispatch"])
+
+        closed = notify(enrolled(state="closed", human_gate=True))
+        self.assertEqual(closed["notification"]["eligibility"], "silent")
+        self.assertFalse(closed["review_dispatch"])
+        self.assertEqual(closed["reason"], "terminal_closed_non_dispatchable")
+
 
 class FailClosedTests(unittest.TestCase):
     def test_malformed_and_unknown_inputs_fail_closed(self):
@@ -495,16 +556,63 @@ class FailClosedTests(unittest.TestCase):
         self.assertEqual(schema["properties"]["schema"]["const"], outcome.OUTCOME_SCHEMA)
         self.assertEqual(set(schema["required"]), set(outcome.OUTCOME_KEYS))
         self.assertEqual(set(schema["properties"]["route"]["enum"]), set(outcome.ROUTES))
-        self.assertEqual(
-            set(schema["properties"]["notification"]["properties"]["eligibility"]["enum"]),
-            set(outcome.NOTIFICATION_ELIGIBILITIES),
-        )
-        self.assertNotIn(
-            "fail_closed",
-            schema["properties"]["notification"]["properties"]["eligibility"]["enum"],
-        )
+        branches = schema["properties"]["notification"]["oneOf"]
+        self.assertEqual(len(branches), 3)
+        eligibilities = set()
+        for branch in branches:
+            eligibility = branch["properties"]["eligibility"]
+            if "const" in eligibility:
+                eligibilities.add(eligibility["const"])
+            else:
+                eligibilities.update(eligibility["enum"])
+        self.assertEqual(eligibilities, set(outcome.NOTIFICATION_ELIGIBILITIES))
+        self.assertNotIn("fail_closed", eligibilities)
         self.assertEqual(schema["properties"]["legacy_dispatch"].get("const"), False)
         self.assertFalse(schema["additionalProperties"])
+
+    def test_notification_schema_accepts_producer_samples_and_rejects_impossibles(self):
+        samples = [
+            notify(enrolled()),
+            notify(
+                enrolled(
+                    state="ready_for_human_merge",
+                    rail="clawsweeper",
+                    openclaw_result="clean",
+                    clawsweeper_result="effectively_clean",
+                    ready_qualified=True,
+                )
+            ),
+            notify(enrolled(state="ci_failed")),
+            notify(
+                enrolled(enrollment={"review_conductor": "absent", "legacy_xapi": "absent"})
+            ),
+            notify(
+                enrolled(enrollment={"review_conductor": "broken", "legacy_xapi": "absent"})
+            ),
+        ]
+        for decision in samples:
+            with self.subTest(reason=decision["reason"]):
+                self.assertTrue(notification_matches_schema(decision["notification"]))
+        impossibles = (
+            {"eligibility": "merge_ready", "kind": None, "channels": []},
+            {
+                "eligibility": "silent",
+                "kind": "human_action_required",
+                "channels": list(outcome.NOTIFY_CHANNELS),
+            },
+            {"eligibility": "blocked", "kind": "merge_ready", "channels": list(outcome.NOTIFY_CHANNELS)},
+            {"eligibility": "none", "kind": "merge_ready", "channels": list(outcome.NOTIFY_CHANNELS)},
+            {"eligibility": "blocked", "kind": "human_action_required", "channels": []},
+            {"eligibility": "merge_ready", "kind": "merge_ready", "channels": ["discord"]},
+            {
+                "eligibility": "merge_ready",
+                "kind": "human_action_required",
+                "channels": list(outcome.NOTIFY_CHANNELS),
+            },
+        )
+        for raw in impossibles:
+            with self.subTest(raw=raw):
+                self.assertFalse(notification_matches_schema(raw))
 
 
 class PreciseMutantTests(unittest.TestCase):
@@ -622,6 +730,18 @@ class PreciseMutantTests(unittest.TestCase):
             '    if not isinstance(claimed, Mapping) or dict(claimed) != trusted:\n        return {"review_conductor": "broken", "legacy_xapi": "broken"}\n',
             '    if False and (not isinstance(claimed, Mapping) or dict(claimed) != trusted):\n        return {"review_conductor": "broken", "legacy_xapi": "broken"}\n',
             "test_trusted_enrollment_resolution_covers_runtime_routes",
+        ),
+        (
+            "let human_gate produce merge_ready",
+            '    if value["human_gate"]:\n        return _outcome(\n            route=route,\n            review_dispatch=True,\n            legacy_dispatch=False,\n            clawsweeper_eligible=False,\n            merge_ready_eligible=False,\n            notification=_notification("blocked", "human_action_required"),\n            repair=repair,\n            reason="human_action_required",\n        )\n',
+            "    if False and value[\"human_gate\"]:\n        return _outcome(\n            route=route,\n            review_dispatch=True,\n            legacy_dispatch=False,\n            clawsweeper_eligible=False,\n            merge_ready_eligible=False,\n            notification=_notification(\"blocked\", \"human_action_required\"),\n            repair=repair,\n            reason=\"human_action_required\",\n        )\n",
+            "test_human_gate_precedes_terminal_ready_and_nonterminal_dispatch",
+        ),
+        (
+            "emit merge_ready with a null kind",
+            '        if kind not in {"merge_ready", "human_action_required"}:\n            _fail("notification kind is required for a terminal send")\n        channels = list(NOTIFY_CHANNELS)',
+            '        kind = None\n        channels = list(NOTIFY_CHANNELS)',
+            "test_notification_schema_accepts_producer_samples_and_rejects_impossibles",
         ),
     )
 

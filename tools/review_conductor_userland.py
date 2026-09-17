@@ -1421,6 +1421,7 @@ CONCISE_BLOCKED_REASONS = {
     "unknown_rail_result_fail_closed": "unknown rail result",
     "unknown_outcome_fail_closed": "unknown orchestration state",
     "ambiguous_or_broken_enrollment": "ambiguous or broken enrollment",
+    "human_action_required": "human gate",
     "ci_failed": "CI failed",
     "openclaw_failed": "OpenClaw failed",
     "clawsweeper_failed": "ClawSweeper failed",
@@ -2011,10 +2012,33 @@ def reconcile_uncertain_notification(
         connection.close()
 
 
+def notification_event_identity(
+    row: Mapping[str, Any],
+    decision: Mapping[str, Any],
+    *,
+    failure_attempt: int = 0,
+) -> str:
+    """Canonical queue identity: exact tuple plus decision route/reason/eligibility."""
+    eligibility = decision["notification"]["eligibility"]
+    identity = (
+        f"{row['repository']}|{row['pr_number']}|{row['base_sha']}|"
+        f"{row['head_sha']}|{row['review_epoch']}|{row['state']}|{row['repair_cycle']}|"
+        f"{decision['route']}|{decision['reason']}|{eligibility}"
+    )
+    if row["state"] == "openclaw_failed":
+        identity += f"|{failure_attempt}"
+    return identity
+
+
 def queue_notifications(
     config: dict[str, Any],
     enrollment: Mapping[str, str] | None = None,
+    *,
+    authoritative: bool = False,
 ) -> int:
+    trusted_enrollment = orchestration.effective_trusted_enrollment(
+        config, enrollment, authoritative=authoritative
+    )
     connection = core.open_database(Path(config["paths"]["state_root"]), config["github_app"]["repository"])
     created = 0
     try:
@@ -2034,9 +2058,6 @@ def queue_notifications(
                     row["head_sha"], row["review_epoch"],
                 ),
             ).fetchone()
-            trusted_enrollment = orchestration.effective_trusted_enrollment(
-                config, enrollment
-            )
             decision = orchestration.decide_orchestration_outcome(
                 orchestration.outcome_from_review_row(
                     row, quality, enrollment=trusted_enrollment
@@ -2064,12 +2085,9 @@ def queue_notifications(
                 )
                 failure_attempt = int(failed_action["attempts"]) if failed_action else 0
             channels = decision["notification"]["channels"]
-            event_identity = (
-                f"{row['repository']}|{row['pr_number']}|{row['base_sha']}|"
-                f"{row['head_sha']}|{row['review_epoch']}|{row['state']}|{row['repair_cycle']}"
+            event_identity = notification_event_identity(
+                row, decision, failure_attempt=failure_attempt
             )
-            if row["state"] == "openclaw_failed":
-                event_identity += f"|{failure_attempt}"
             event_key = hashlib.sha256(event_identity.encode()).hexdigest()
             payload = {
                 "schema": NOTIFICATION_SCHEMA,
@@ -2320,13 +2338,16 @@ def deliver_notifications(
     dry_run: bool,
     enrollment: Mapping[str, str] | None = None,
     authority_client: Any | None = None,
+    authoritative: bool = False,
 ) -> dict[str, Any]:
-    trusted_enrollment = orchestration.effective_trusted_enrollment(config, enrollment)
+    trusted_enrollment = orchestration.effective_trusted_enrollment(
+        config, enrollment, authoritative=authoritative
+    )
     routed = dict(config)
     owned = dict(routed.get("enrollment") or {})
     owned.update(trusted_enrollment)
     routed["enrollment"] = owned
-    queue_notifications(routed)
+    queue_notifications(routed, enrollment=trusted_enrollment, authoritative=True)
     connection = core.open_database(Path(config["paths"]["state_root"]), config["github_app"]["repository"])
     outcomes: list[dict[str, Any]] = []
     try:
@@ -2465,9 +2486,13 @@ def run_tick(
     notifier: OpenClawNotifier | Any | None,
     *,
     dry_run: bool,
+    enrollment: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     profiles.require_enabled(config)
-    trusted_enrollment = orchestration.resolve_trusted_enrollment(config)
+    if enrollment is None:
+        trusted_enrollment = orchestration.resolve_trusted_enrollment(config)
+    else:
+        trusted_enrollment = orchestration.require_trusted_pair(enrollment)
     route, _reason = orchestration.enrollment_route(trusted_enrollment)
     if route == "review_conductor":
         first_bridge = (
@@ -2502,6 +2527,7 @@ def run_tick(
         dry_run=dry_run,
         enrollment=trusted_enrollment,
         authority_client=client,
+        authoritative=True,
     )
     return {
         "schema": "smoky.review-conductor.userland-tick.v1",

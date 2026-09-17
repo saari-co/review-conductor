@@ -16,6 +16,7 @@ from typing import Any, Callable, Union
 
 import review_conductor as core
 import review_conductor_runtime as runtime
+import orchestration_outcome as orchestration
 import trusted_admission as admission
 from target_manifest import unique_object, validate_manifest
 
@@ -726,6 +727,59 @@ def require_exact_current_binding(
         connection.close()
 
 
+def trusted_enrollment_from_registry(
+    config: dict[str, Any],
+    registry: admission.Registry,
+    *,
+    core_config: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """Derive the trusted pair from the registry/admission result only.
+
+    Userland activation flags (``enabled`` / ``blockers``) are never consulted.
+    A matching registry enrollment is Review Conductor present. Absence of that
+    enrollment is unenrolled unless the registry carries an explicit
+    ``legacy_xapi`` status. Identity, reviewer, or core contradictions fail
+    closed. Dual is Conductor present plus that same registry-owned legacy
+    marker.
+    """
+    broken = {"review_conductor": "broken", "legacy_xapi": "broken"}
+    legacy = getattr(registry, "legacy_xapi", "absent")
+    if legacy not in orchestration.ENROLLMENT_STATUSES:
+        return dict(broken)
+    app = config.get("github_app")
+    if not isinstance(app, dict):
+        return dict(broken)
+    repository = app.get("repository")
+    matches = [item for item in registry.enrollments if item.repository == repository]
+    if len(matches) != 1:
+        return {"review_conductor": "absent", "legacy_xapi": legacy} if not matches else dict(broken)
+    try:
+        enrolled = registry.lookup(
+            app.get("repository"),
+            app.get("repository_id"),
+            app.get("app_id"),
+            app.get("installation_id"),
+        )
+    except admission.AdmissionError:
+        return dict(broken)
+    if core_config is None and config.get("core_config"):
+        try:
+            core_config = core.load_config(Path(config["core_config"]))
+        except (OSError, core.ContractError):
+            return dict(broken)
+    if isinstance(core_config, dict):
+        if (
+            core_config.get("repository") != enrolled.repository
+            or core_config.get("repository_id") != enrolled.repository_id
+        ):
+            return dict(broken)
+        review_policy = core_config.get("review_policy")
+        if isinstance(review_policy, dict) and "reviewers" in review_policy:
+            if review_policy.get("reviewers") != enrolled.reviewers:
+                return dict(broken)
+    return {"review_conductor": "present", "legacy_xapi": legacy}
+
+
 def run_service_tick(
     config: dict[str, Any],
     registry: RegistrySource,
@@ -740,11 +794,17 @@ def run_service_tick(
     (check creation/update, ClawSweeper dispatch) through the client's authority
     guard, so a registry revocation or profile edit after the gate stops the
     remainder of the tick instead of letting it publish under stale authority.
+    Trusted enrollment comes from the registry/admission result and is passed
+    into ``run_tick``; userland activation flags do not select the route.
     """
-    require_current_bindings(config, registry)
+    resolved = resolve_registry(registry)
+    trusted_enrollment = trusted_enrollment_from_registry(config, resolved)
+    route, _reason = orchestration.enrollment_route(trusted_enrollment)
+    if route == "review_conductor":
+        require_current_bindings(config, resolved)
     import review_conductor_userland as userland
 
-    if not dry_run:
+    if route == "review_conductor" and not dry_run:
         install = getattr(client, "set_authority_guard", None)
         assertion = getattr(client, "assert_authority", None)
         if not callable(install) or not callable(assertion):
@@ -766,4 +826,6 @@ def run_service_tick(
                 require_exact_current_binding(config, registry, authority)
 
         install(authority_guard)
-    return userland.run_tick(config, client, notifier, dry_run=dry_run)
+    return userland.run_tick(
+        config, client, notifier, dry_run=dry_run, enrollment=trusted_enrollment
+    )

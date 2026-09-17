@@ -47,14 +47,22 @@ Conductor does not import, encode, or dispatch the x-api conveyor
 (`legacy_dispatch` stays false). Dual enrollment selects Review
 Conductor and forbids duplicate legacy dispatch. Neither enrollment ends the
 process with no review and no notification. Ambiguous or broken enrollment
-fails closed and is never treated as unenrolled. `run_tick` resolves that
-pair from service-owned enrollment at tick start. Hydration, action
-draining, result collection, and review stages run only when the trusted
-route is `review_conductor`. Dual enrollment selects Review Conductor;
-legacy-only, unenrolled, and broken routes stay real runtime behavior and
-never dispatch x-api. The existing notification queue still consumes the
-current-head decision; pending rows are revalidated against the current
-head and trusted enrollment before claim or send, and ineligible rows are
+fails closed and is never treated as unenrolled. `run_service_tick`
+resolves that pair from the authoritative registry/admission result and
+passes it into `run_tick`. Userland activation flags (`enabled` /
+`blockers`) do not select legacy, none, dual, or broken routes.
+Hydration, action draining, result collection, and review stages run
+only when the trusted route is `review_conductor`. Dual enrollment
+selects Review Conductor; legacy-only, unenrolled, and broken routes
+stay real runtime behavior and never dispatch x-api. An explicit
+`human_gate=true` takes precedence over merge-ready and silent
+nonterminal progression: no structurally valid gated input may become
+`merge_ready` or continue review dispatch silently. The existing
+notification queue still consumes the current-head decision; event
+identity includes canonical route, reason, and eligibility so a stale
+pending row can retire while the current blocked decision enqueues and
+delivers once. Pending rows are revalidated against the current head
+and trusted enrollment before claim or send, and ineligible rows are
 retired. Caller payloads cannot grant Conductor authority. `closed` and
 `closed_merged` are terminal silent non-dispatchable states on every
 direct and service-loop path, including when trusted enrollment is
@@ -70,8 +78,8 @@ round or ledger reset. OpenClaw findings suppress ClawSweeper eligibility.
 ClawSweeper findings suppress merge-ready eligibility. Merge-ready notification
 requires both required exact-head rails to be effectively clean, including
 authorized deferrals or rejections on an unchanged head, plus the existing
-ready-quality policy. Only merge-ready or genuinely blocked/human-action-required
-outcomes notify. Terminal copy is
+ready-quality policy, and no explicit `human_gate`. Only merge-ready or
+genuinely blocked/human-action-required outcomes notify. Terminal copy is
 `<repo>#<pr> ready to merge` or `<repo>#<pr> blocked — <specific reason>`,
 optionally with the PR URL, and carries no transcript, progress, cycle, tier,
 or proof prose. A changed head preserves the 2/2 repair ledger. Representable

@@ -198,11 +198,35 @@ def resolve_trusted_enrollment(config: Mapping[str, Any] | None) -> dict[str, st
     return dict(broken)
 
 
+def require_trusted_pair(value: Mapping[str, str] | None) -> dict[str, str]:
+    """Accept an already-resolved trusted pair; anything else fails closed."""
+    broken = {"review_conductor": "broken", "legacy_xapi": "broken"}
+    if not isinstance(value, Mapping):
+        return dict(broken)
+    if set(value) != set(ENROLLMENT_KEYS):
+        return dict(broken)
+    review_conductor = value["review_conductor"]
+    legacy_xapi = value["legacy_xapi"]
+    if review_conductor not in ENROLLMENT_STATUSES or legacy_xapi not in ENROLLMENT_STATUSES:
+        return dict(broken)
+    return {"review_conductor": review_conductor, "legacy_xapi": legacy_xapi}
+
+
 def effective_trusted_enrollment(
     config: Mapping[str, Any] | None,
     claimed: Mapping[str, str] | None = None,
+    *,
+    authoritative: bool = False,
 ) -> dict[str, str]:
-    """Use service-owned enrollment; a contradicting caller claim fails closed."""
+    """Use service-owned enrollment; a contradicting caller claim fails closed.
+
+    ``authoritative=True`` accepts an already-resolved registry/admission pair
+    without consulting userland activation flags.
+    """
+    if authoritative:
+        if claimed is None:
+            return resolve_trusted_enrollment(config)
+        return require_trusted_pair(claimed)
     trusted = resolve_trusted_enrollment(config)
     if claimed is None:
         return trusted
@@ -370,6 +394,17 @@ def decide_orchestration_outcome(raw: Any) -> dict[str, Any]:
         return _fail_closed_blocked(repair, "unknown_state_fail_closed")
     if openclaw_result == "unknown" or clawsweeper_result == "unknown":
         return _fail_closed_blocked(repair, "unknown_rail_result_fail_closed")
+    if value["human_gate"]:
+        return _outcome(
+            route=route,
+            review_dispatch=True,
+            legacy_dispatch=False,
+            clawsweeper_eligible=False,
+            merge_ready_eligible=False,
+            notification=_notification("blocked", "human_action_required"),
+            repair=repair,
+            reason="human_action_required",
+        )
 
     clawsweeper_eligible = openclaw_result not in {"absent"}
     if openclaw_result in BLOCKING_OPENCLAW:
