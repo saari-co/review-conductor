@@ -16,4 +16,7 @@ activation, x-api removal, or a second notification system.
 
 Canonical function: [`decide_orchestration_outcome`](../tools/orchestration_outcome.py).
 Canonical schema: [`orchestration-outcome.schema.json`](../contracts/orchestration-outcome.schema.json).
+Trusted enrollment resolver: [`resolve_trusted_enrollment`](../tools/orchestration_outcome.py).
 Queue consumer: [`queue_notifications`](../tools/review_conductor_userland.py).
+`run_tick` must pass the resolved service-owned enrollment into that queue.
+`closed` / `closed_merged` are terminal and non-dispatchable.

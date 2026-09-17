@@ -56,6 +56,7 @@ SILENT_INTERNAL_STATES = frozenset({"awaiting_adjudication", "repair_required"})
 BLOCKED_STATES = frozenset(
     {"ci_failed", "openclaw_failed", "clawsweeper_failed", "waiting_human"}
 )
+TERMINAL_CLOSED_STATES = frozenset({"closed", "closed_merged"})
 NONTERMINAL_STATES = frozenset(
     {
         "ci_running",
@@ -65,8 +66,6 @@ NONTERMINAL_STATES = frozenset(
         "clawsweeper_queued",
         "clawsweeper_running",
         "clawsweeper_clean_draft",
-        "closed",
-        "closed_merged",
     }
 )
 NOTIFY_CHANNELS = ("openclaw_context", "discord", "signal")
@@ -159,6 +158,52 @@ def _enrollment_route(enrollment: Mapping[str, str]) -> tuple[str, str]:
     if legacy_xapi == "present":
         return "legacy_xapi", "legacy_xapi_handoff_required"
     return "none", "unenrolled_no_review_no_notification"
+
+
+def resolve_trusted_enrollment(config: Mapping[str, Any] | None) -> dict[str, str]:
+    """Resolve Conductor/legacy enrollment from service-owned config only.
+
+    Caller payloads cannot grant enrollment. A legacy userland profile with no
+    enrollment object is the historical Conductor-only Blocks route. Explicit
+    ``review_conductor`` / ``legacy_xapi`` statuses, when both present, are the
+    trusted pair. Missing one status, an inactive profile without statuses, or
+    any malformed value fails closed as broken and is never treated as
+    unenrolled.
+    """
+    broken = {"review_conductor": "broken", "legacy_xapi": "broken"}
+    if not isinstance(config, Mapping):
+        return dict(broken)
+    raw = config.get("enrollment")
+    if raw is None:
+        return {"review_conductor": "present", "legacy_xapi": "absent"}
+    if not isinstance(raw, Mapping):
+        return dict(broken)
+    has_review = "review_conductor" in raw
+    has_legacy = "legacy_xapi" in raw
+    if has_review or has_legacy:
+        if not has_review or not has_legacy:
+            return dict(broken)
+        review_conductor = raw["review_conductor"]
+        legacy_xapi = raw["legacy_xapi"]
+        if review_conductor not in ENROLLMENT_STATUSES or legacy_xapi not in ENROLLMENT_STATUSES:
+            return dict(broken)
+        return {"review_conductor": review_conductor, "legacy_xapi": legacy_xapi}
+    if raw.get("enabled") is True and raw.get("blockers") in (None, []):
+        return {"review_conductor": "present", "legacy_xapi": "absent"}
+    return dict(broken)
+
+
+def effective_trusted_enrollment(
+    config: Mapping[str, Any] | None,
+    claimed: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Use service-owned enrollment; a contradicting caller claim fails closed."""
+    trusted = resolve_trusted_enrollment(config)
+    if claimed is None:
+        return trusted
+    if not isinstance(claimed, Mapping) or dict(claimed) != trusted:
+        return {"review_conductor": "broken", "legacy_xapi": "broken"}
+    return trusted
 
 
 def next_repair_cycle(current: int) -> int:
@@ -309,6 +354,17 @@ def decide_orchestration_outcome(raw: Any) -> dict[str, Any]:
         return _fail_closed_blocked(repair, "unknown_state_fail_closed")
     if openclaw_result == "unknown" or clawsweeper_result == "unknown":
         return _fail_closed_blocked(repair, "unknown_rail_result_fail_closed")
+    if state in TERMINAL_CLOSED_STATES:
+        return _outcome(
+            route=route,
+            review_dispatch=False,
+            legacy_dispatch=False,
+            clawsweeper_eligible=False,
+            merge_ready_eligible=False,
+            notification=_notification("silent", None),
+            repair=repair,
+            reason="terminal_closed_non_dispatchable",
+        )
 
     clawsweeper_eligible = openclaw_result not in {"absent"}
     if openclaw_result in BLOCKING_OPENCLAW:
@@ -434,9 +490,11 @@ def outcome_from_review_row(
     ready_qualified = None
     if quality is not None:
         ready_qualified = bool(quality["ready_qualified"])
+    if enrollment is None:
+        enrollment = {"review_conductor": "broken", "legacy_xapi": "broken"}
     return {
         "schema": INPUT_SCHEMA,
-        "enrollment": dict(enrollment or {"review_conductor": "present", "legacy_xapi": "absent"}),
+        "enrollment": dict(enrollment),
         "state": state,
         "rail": rail,
         "repair_cycle": int(row["repair_cycle"]),

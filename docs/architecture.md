@@ -47,7 +47,11 @@ Conductor does not import, encode, or dispatch the x-api conveyor
 (`legacy_dispatch` stays false). Dual enrollment selects Review
 Conductor and forbids duplicate legacy dispatch. Neither enrollment ends the
 process with no review and no notification. Ambiguous or broken enrollment
-fails closed and is never treated as unenrolled.
+fails closed and is never treated as unenrolled. `run_tick` resolves that
+pair from service-owned enrollment and passes it into the existing
+notification queue; caller payloads cannot grant Conductor authority.
+`closed` and `closed_merged` are terminal non-dispatchable states on every
+direct and service-loop routing path.
 
 The existing notification queue consumes that outcome. It does not invent a
 second sender. `repair_required` and `awaiting_adjudication` without a genuine
@@ -67,7 +71,8 @@ or proof prose. A changed head preserves the 2/2 repair ledger. Representable
 fail-closed enrollment, unknown state/result, and equivalent invalid
 orchestration states keep routing and dispatch suppressed and stay eligible
 for the blocked notification path; the queue must not raise or silently pass
-them. Malformed inputs still raise. See the
+them. Fail-closed copy uses the canonical decision reason, not stale
+persisted blocker text. Malformed inputs still raise. See the
 [decision map](orchestration-decision-map.md) for later #687 workstreams.
 
 The Conductor is the sole writer of the authoritative `OpenClaw Review Rail`

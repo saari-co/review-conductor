@@ -331,22 +331,105 @@ class FailClosedTests(unittest.TestCase):
         self.assertEqual(unknown_rail["reason"], "unknown_rail_result_fail_closed")
 
     def test_row_mapper_preserves_silent_repair_and_blocked_ci(self):
+        enrolled_pair = {"review_conductor": "present", "legacy_xapi": "absent"}
         silent = outcome.decide_orchestration_outcome(
             outcome.outcome_from_review_row(
                 {
                     "state": "awaiting_adjudication",
                     "rail": "openclaw",
                     "repair_cycle": 0,
-                }
+                },
+                enrollment=enrolled_pair,
             )
         )
         self.assertEqual(silent["notification"]["eligibility"], "silent")
         blocked = outcome.decide_orchestration_outcome(
             outcome.outcome_from_review_row(
-                {"state": "ci_failed", "rail": None, "repair_cycle": 0}
+                {"state": "ci_failed", "rail": None, "repair_cycle": 0},
+                enrollment=enrolled_pair,
             )
         )
         self.assertEqual(blocked["notification"]["eligibility"], "blocked")
+
+    def test_closed_states_are_terminal_and_non_dispatchable(self):
+        for state in ("closed", "closed_merged"):
+            with self.subTest(state=state):
+                decision = notify(enrolled(state=state, rail=None))
+                self.assertEqual(decision["route"], "review_conductor")
+                self.assertFalse(decision["review_dispatch"])
+                self.assertFalse(decision["legacy_dispatch"])
+                self.assertFalse(decision["clawsweeper_eligible"])
+                self.assertFalse(decision["merge_ready_eligible"])
+                self.assertEqual(decision["notification"]["eligibility"], "silent")
+                self.assertEqual(decision["notification"]["channels"], [])
+                self.assertEqual(decision["reason"], "terminal_closed_non_dispatchable")
+                mapped = outcome.decide_orchestration_outcome(
+                    outcome.outcome_from_review_row(
+                        {"state": state, "rail": None, "repair_cycle": 0},
+                        enrollment={"review_conductor": "present", "legacy_xapi": "absent"},
+                    )
+                )
+                self.assertFalse(mapped["review_dispatch"])
+                self.assertEqual(mapped["reason"], "terminal_closed_non_dispatchable")
+
+    def test_missing_row_enrollment_fails_closed_instead_of_granting_conductor(self):
+        decision = outcome.decide_orchestration_outcome(
+            outcome.outcome_from_review_row(
+                {"state": "ci_failed", "rail": None, "repair_cycle": 0}
+            )
+        )
+        self.assertEqual(decision["route"], "fail_closed")
+        self.assertFalse(decision["review_dispatch"])
+        self.assertEqual(decision["reason"], "ambiguous_or_broken_enrollment")
+        self.assertEqual(decision["notification"]["eligibility"], "blocked")
+
+    def test_trusted_enrollment_resolution_covers_runtime_routes(self):
+        self.assertEqual(
+            outcome.resolve_trusted_enrollment({}),
+            {"review_conductor": "present", "legacy_xapi": "absent"},
+        )
+        self.assertEqual(
+            outcome.resolve_trusted_enrollment(
+                {"enrollment": {"enabled": True, "blockers": []}}
+            ),
+            {"review_conductor": "present", "legacy_xapi": "absent"},
+        )
+        cases = (
+            ({"review_conductor": "present", "legacy_xapi": "absent"}, "present"),
+            ({"review_conductor": "absent", "legacy_xapi": "present"}, "absent"),
+            ({"review_conductor": "present", "legacy_xapi": "present"}, "present"),
+            ({"review_conductor": "absent", "legacy_xapi": "absent"}, "absent"),
+            ({"review_conductor": "broken", "legacy_xapi": "absent"}, "broken"),
+        )
+        for enrollment, review_status in cases:
+            with self.subTest(enrollment=enrollment):
+                self.assertEqual(
+                    outcome.resolve_trusted_enrollment({"enrollment": enrollment}),
+                    enrollment,
+                )
+                self.assertEqual(enrollment["review_conductor"], review_status)
+        self.assertEqual(
+            outcome.resolve_trusted_enrollment(
+                {"enrollment": {"review_conductor": "present"}}
+            ),
+            {"review_conductor": "broken", "legacy_xapi": "broken"},
+        )
+        self.assertEqual(
+            outcome.resolve_trusted_enrollment({"enrollment": {"enabled": False, "blockers": ["x"]}}),
+            {"review_conductor": "broken", "legacy_xapi": "broken"},
+        )
+        trusted = {"review_conductor": "absent", "legacy_xapi": "absent"}
+        self.assertEqual(
+            outcome.effective_trusted_enrollment({"enrollment": trusted}, trusted),
+            trusted,
+        )
+        self.assertEqual(
+            outcome.effective_trusted_enrollment(
+                {"enrollment": trusted},
+                {"review_conductor": "present", "legacy_xapi": "absent"},
+            ),
+            {"review_conductor": "broken", "legacy_xapi": "broken"},
+        )
 
     def test_repair_cycle_saturates_and_required_fix_stays_scoped(self):
         self.assertEqual(outcome.next_repair_cycle(0), 1)
@@ -461,6 +544,30 @@ class PreciseMutantTests(unittest.TestCase):
             '            return "review_conductor", "review_conductor_wins_duplicate_legacy_forbidden"\n',
             '            return "legacy_xapi", "review_conductor_wins_duplicate_legacy_forbidden"\n',
             "test_dual_enrollment_review_conductor_wins_without_legacy_dispatch",
+        ),
+        (
+            "dispatch reviews on closed heads",
+            '    if state in TERMINAL_CLOSED_STATES:\n        return _outcome(\n            route=route,\n            review_dispatch=False,\n',
+            '    if state in TERMINAL_CLOSED_STATES:\n        return _outcome(\n            route=route,\n            review_dispatch=True,\n',
+            "test_closed_states_are_terminal_and_non_dispatchable",
+        ),
+        (
+            "skip the closed-state dispatch fence",
+            "    if state in TERMINAL_CLOSED_STATES:\n",
+            "    if False and state in TERMINAL_CLOSED_STATES:\n",
+            "test_closed_states_are_terminal_and_non_dispatchable",
+        ),
+        (
+            "default missing enrollment to Review Conductor present",
+            '        enrollment = {"review_conductor": "broken", "legacy_xapi": "broken"}\n',
+            '        enrollment = {"review_conductor": "present", "legacy_xapi": "absent"}\n',
+            "test_missing_row_enrollment_fails_closed_instead_of_granting_conductor",
+        ),
+        (
+            "treat a contradicting caller enrollment as trusted",
+            '    if not isinstance(claimed, Mapping) or dict(claimed) != trusted:\n        return {"review_conductor": "broken", "legacy_xapi": "broken"}\n',
+            '    if False and (not isinstance(claimed, Mapping) or dict(claimed) != trusted):\n        return {"review_conductor": "broken", "legacy_xapi": "broken"}\n',
+            "test_trusted_enrollment_resolution_covers_runtime_routes",
         ),
     )
 

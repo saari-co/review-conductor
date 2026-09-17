@@ -1440,15 +1440,20 @@ def notification_message(
         eligibility is None and row["state"] == "ready_for_human_merge"
     ):
         return f"{repo_pr} ready to merge {url}"
-    blocker = str(row["blocker"] or "").strip()
-    if blocker:
-        reason = blocker
-    elif decision is not None:
+    if decision is not None and decision.get("route") == "fail_closed":
         reason = CONCISE_BLOCKED_REASONS.get(
             decision["reason"], decision["reason"].replace("_", " ")
         )
     else:
-        reason = CONCISE_BLOCKED_REASONS.get(row["state"], "operator attention required")
+        blocker = str(row["blocker"] or "").strip()
+        if blocker:
+            reason = blocker
+        elif decision is not None:
+            reason = CONCISE_BLOCKED_REASONS.get(
+                decision["reason"], decision["reason"].replace("_", " ")
+            )
+        else:
+            reason = CONCISE_BLOCKED_REASONS.get(row["state"], "operator attention required")
     return f"{repo_pr} blocked — {reason} {url}"
 
 
@@ -2029,8 +2034,13 @@ def queue_notifications(
                     row["head_sha"], row["review_epoch"],
                 ),
             ).fetchone()
+            trusted_enrollment = orchestration.effective_trusted_enrollment(
+                config, enrollment
+            )
             decision = orchestration.decide_orchestration_outcome(
-                orchestration.outcome_from_review_row(row, quality, enrollment=enrollment)
+                orchestration.outcome_from_review_row(
+                    row, quality, enrollment=trusted_enrollment
+                )
             )
             eligibility = decision["notification"]["eligibility"]
             if eligibility in {"silent", "none"}:
@@ -2190,10 +2200,12 @@ def deliver_notifications(
     enrollment: Mapping[str, str] | None = None,
     authority_client: Any | None = None,
 ) -> dict[str, Any]:
-    if enrollment is None:
-        queue_notifications(config)
-    else:
-        queue_notifications(config, enrollment=enrollment)
+    trusted_enrollment = orchestration.effective_trusted_enrollment(config, enrollment)
+    routed = dict(config)
+    owned = dict(routed.get("enrollment") or {})
+    owned.update(trusted_enrollment)
+    routed["enrollment"] = owned
+    queue_notifications(routed)
     connection = core.open_database(Path(config["paths"]["state_root"]), config["github_app"]["repository"])
     outcomes: list[dict[str, Any]] = []
     try:
@@ -2331,6 +2343,7 @@ def run_tick(
         config,
         notifier,
         dry_run=dry_run,
+        enrollment=orchestration.resolve_trusted_enrollment(config),
         authority_client=client,
     )
     return {

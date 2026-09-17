@@ -75,7 +75,12 @@ fail-closed broken/unknown outcomes are source-qualified. Representable
 fail-closed enrollment, unknown state/result, and equivalent invalid
 orchestration states keep dispatch suppressed (`legacy_dispatch` remains
 false) and use the blocked notification path; the queue delivers that
-concise blocked message instead of raising or passing. `repair_cycle` is the
+concise blocked message instead of raising or passing. `run_tick` resolves
+trusted/service-owned enrollment into that queue so Review Conductor,
+legacy-only, dual, unenrolled, and broken semantics are runtime behavior.
+Caller payloads cannot grant enrollment, and fail-closed copy prefers the
+canonical reason over stale persisted blocker text. `closed` and
+`closed_merged` stay terminal and non-dispatchable. `repair_cycle` is the
 saturating ledger for the first two broad automatic rounds: cycle 2 still
 allows a scoped `required_fix` route, head change, and exact-head rerun
 without a third automatic round or ledger reset. Terminal messages are
