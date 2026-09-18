@@ -17,10 +17,10 @@ activation, x-api removal, or a second notification system.
 Canonical function: [`decide_orchestration_outcome`](../tools/orchestration_outcome.py).
 Canonical schema: [`orchestration-outcome.schema.json`](../contracts/orchestration-outcome.schema.json).
 Trusted enrollment resolver: [`resolve_trusted_enrollment`](../tools/orchestration_outcome.py).
-Queue consumer: [`queue_notifications`](../tools/review_conductor_userland.py).
-`run_service_tick` must resolve trusted enrollment from the
-registry/admission result and pass that pair into `run_tick` before
-review stages and the queue. The v2 registry may carry an optional
+Inert registry helper: [`trusted_enrollment_from_registry`](../tools/service_runtime.py).
+Live queue, delivery, `run_tick` route suppression, and
+`run_service_tick` enrollment wiring are stacked adapter work; this
+core does not change those runtime entry functions. The v2 registry may carry an optional
 exact-profile `legacy_xapi` marker; omitted means legacy absent.
 `trusted_enrollment_from_registry` snapshots and revalidates exact
 base Registry dataclass fields and each nested Enrollment and optional

@@ -65,21 +65,21 @@ source.
 ## Completed for issue #687 slice 1 (source-only; not deployed)
 
 Deterministic terminal notification eligibility now lives in Review Conductor
-as `review-conductor.orchestration-outcome.v1`. The existing userland
-notification queue consumes
-[`decide_orchestration_outcome`](../tools/orchestration_outcome.py); there is
-no second notification system and no x-api runtime dependency. Silent first
+as `review-conductor.orchestration-outcome.v1`. This core does not change
+the live userland queue, delivery, GitHub dispatch, or notifier path;
+[`decide_orchestration_outcome`](../tools/orchestration_outcome.py) is the
+inert eligibility contract only. There is no second notification system and
+no x-api runtime dependency. Silent first
 and second automatic repair rounds, third-set adjudication without a human
 gate, rail suppression, merge-ready, blocked/human-gate, unenrolled-none, and
 fail-closed broken/unknown outcomes are source-qualified. Representable
 fail-closed enrollment, unknown state/result, and equivalent invalid
 orchestration states keep dispatch suppressed (`legacy_dispatch` remains
-false) and use the blocked notification path; the queue delivers that
-concise blocked message instead of raising or passing. `run_tick` resolves
-trusted/service-owned enrollment at tick start so Review Conductor,
-legacy-only, dual, unenrolled, and broken semantics are runtime behavior.
-Hydration, action draining, result collection, and review stages run only
-on the Review Conductor route. Caller payloads cannot grant enrollment,
+false) and stay eligible for a later blocked notification. Live
+`run_tick` route suppression, queue/message/identity/delivery logic,
+`run_service_tick` enrollment wiring, and
+`service_entrypoint.registry_provider` document-only loading are stacked
+adapter work. Caller payloads cannot grant enrollment,
 and fail-closed copy prefers the canonical reason over stale persisted
 blocker text. Notification delivery, send leases, reserved claim/send
 fencing, and route-freshness guards used only for delivery are stacked
@@ -89,8 +89,6 @@ exact builtin strings and raise `OrchestrationError` instead of
 `0`/`1` and otherwise fail closed through unknown rail results. Current
 eligibility decisions stay deduped by route, reason, and eligibility. `closed` and `closed_merged`
 stay silent and non-dispatchable even when trusted enrollment is broken.
-`run_service_tick` wires registry-owned enrollment into `run_tick` and
-does not infer legacy/none/dual/broken from userland activation flags.
 The v2 registry document may name one exact-profile `legacy_xapi`
 marker; existing documents that omit it stay Conductor-only (legacy
 absent). `load_registry` rejects malformed or ambiguous marker forms.
@@ -102,11 +100,7 @@ strings and IDs must be exact builtins; reconstruction compares those
 exact base values so a str subclass cannot synthesize repository, ID,
 or legacy authority. The service-profile repository
 must be an exact admitted-scope string before omitted-marker absence
-is treated as legitimate none. `service_entrypoint.registry_provider`
-loads and validates the external registry document without applying
-`require_profile_enrolled`; webhook ingress remains strict while the
-production worker can represent Conductor, legacy-only, none, dual,
-and broken routes.
+is treated as legitimate none.
 Impossible state/rail/result tuples, including mismatched rails,
 fail closed before enrollment-route short-circuits, dispatch, or
 notification eligibility. Unknown/result/tuple coherence is validated

@@ -454,23 +454,25 @@ def read_service_registry(path: Path, forbidden_roots: Iterable[Path]) -> admiss
         registry = admission.load_registry(raw)
     except admission.AdmissionError as exc:
         raise service.ServiceError("service enrollment registry failed validation") from exc
+    if not registry.enrollments:
+        raise service.ServiceError("service enrollment registry enrolls no repository")
     return registry
 
 
 def registry_provider(path: Path, config: dict):
-    """Re-read and re-validate the service-owned registry document on every use.
+    """Re-read and re-validate the service-owned registry on every use.
 
-    Document validation is separate from strict Conductor ingress admission.
     Promotion or revocation written to the registry is observed by the next
     delivery or worker tick; a registry that stops validating fails closed.
-    Worker ticks consume this loaded registry so legacy-only, unenrolled,
-    dual, and broken routes remain representable. Webhook ingress still
-    requires the running profile to be enrolled.
     """
     roots = forbidden_registry_roots(config)
 
     def provide() -> admission.Registry:
-        return read_service_registry(path, roots)
+        registry = read_service_registry(path, roots)
+        # App/installation/repository and the reviewer actors must all be the
+        # registry's enrollment; the profile cannot supply any of them.
+        service.require_profile_enrolled(config, registry)
+        return registry
 
     return provide
 

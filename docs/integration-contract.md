@@ -48,11 +48,11 @@ exact base values so a str subclass cannot synthesize repository, ID,
 or legacy authority. `Registry.lookup` also requires those exact
 builtin types at the lookup boundary. The service-profile repository
 must be an exact admitted-scope string before omitted-marker absence
-is treated as legitimate none. External registry document
-validation/loading is separate from strict Conductor ingress
-admission, so the production worker can represent Conductor,
-legacy-only, none, dual, and broken routes while webhook ingress
-remains enrolled-only. Notification send leases, reserved claim/send
+is treated as legitimate none. Inert registry document
+validation/loading stays available here; live
+`registry_provider` document-only worker ticks, `run_service_tick`
+enrollment wiring, and queue/delivery consumption are stacked adapter
+work. Notification send leases, reserved claim/send
 fencing, and route-freshness guards used only for delivery are stacked
 adapter work, not this routing/admission core.
 See [trusted admission](trusted-admission.md).

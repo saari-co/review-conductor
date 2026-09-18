@@ -16,7 +16,6 @@ from typing import Any, Callable, Union
 
 import review_conductor as core
 import review_conductor_runtime as runtime
-import orchestration_outcome as orchestration
 import trusted_admission as admission
 from target_manifest import unique_object, validate_manifest
 
@@ -924,20 +923,11 @@ def run_service_tick(
     (check creation/update, ClawSweeper dispatch) through the client's authority
     guard, so a registry revocation or profile edit after the gate stops the
     remainder of the tick instead of letting it publish under stale authority.
-    Trusted enrollment comes from the registry/admission result and is passed
-    into ``run_tick``; userland activation flags do not select the route.
-    Exact binding checks remain Conductor-only. Notification send leases,
-    reserved claim/send fencing, and non-Conductor route-freshness guards are
-    adapter work, not this routing/admission core.
     """
-    resolved = resolve_registry(registry)
-    trusted_enrollment = trusted_enrollment_from_registry(config, resolved)
-    route, _reason = orchestration.enrollment_route(trusted_enrollment)
-    if route == "review_conductor":
-        require_current_bindings(config, resolved)
+    require_current_bindings(config, registry)
     import review_conductor_userland as userland
 
-    if route == "review_conductor" and not dry_run:
+    if not dry_run:
         install = getattr(client, "set_authority_guard", None)
         assertion = getattr(client, "assert_authority", None)
         if not callable(install) or not callable(assertion):
@@ -952,21 +942,11 @@ def run_service_tick(
             # Explicit stale-check cleanup and unbound operator alerts are
             # repository-level maintenance. Every current review/check action
             # supplies an exact tuple and must still own that tuple here.
-            current_registry = resolve_registry(registry)
-            current = trusted_enrollment_from_registry(config, current_registry)
-            if current != trusted_enrollment:
-                raise ServiceError("trusted enrollment changed before side effect")
             if authority is None:
-                require_current_bindings(config, current_registry)
+                require_current_bindings(config, registry)
             else:
-                require_current_bindings(config, current_registry)
-                require_exact_current_binding(config, current_registry, authority)
+                require_current_bindings(config, registry)
+                require_exact_current_binding(config, registry, authority)
 
         install(authority_guard)
-    return userland.run_tick(
-        config,
-        client,
-        notifier,
-        dry_run=dry_run,
-        enrollment=trusted_enrollment,
-    )
+    return userland.run_tick(config, client, notifier, dry_run=dry_run)

@@ -49,12 +49,15 @@ Conductor does not import, encode, or dispatch the x-api conveyor
 (`legacy_dispatch` stays false). Dual enrollment selects Review
 Conductor and forbids duplicate legacy dispatch. Neither enrollment ends the
 process with no review and no notification. Ambiguous or broken enrollment
-fails closed and is never treated as unenrolled. `run_service_tick`
-resolves that pair from the authoritative registry/admission result and
-passes it into `run_tick`. `service_entrypoint.registry_provider` loads
-the external registry document without applying Conductor enrollment
-admission, so the production worker can represent every trusted route
-while webhook ingress remains enrolled-only. The v2 service-owned registry may carry an
+fails closed and is never treated as unenrolled. This routing/admission
+core publishes that pair through
+[`trusted_enrollment_from_registry`](../tools/service_runtime.py) and
+[`decide_orchestration_outcome`](../tools/orchestration_outcome.py). It
+does not change live `run_service_tick`, `run_tick`,
+`queue_notifications`, `deliver_notifications`, or
+`service_entrypoint.registry_provider`. Live queue, delivery, GitHub
+dispatch, and notifier behavior stay on the approved-base path until the
+stacked adapter. The v2 service-owned registry may carry an
 optional exact-profile `legacy_xapi` marker; omitted documents remain
 legacy absent. `trusted_enrollment_from_registry` snapshots and
 revalidates the exact base Registry dataclass fields and each nested
@@ -69,19 +72,15 @@ broken routing. The service-profile `github_app.repository` must be
 an exact admitted-scope string before omitted-marker absence is treated
 as legitimate none. Userland activation flags (`enabled` /
 `blockers`) do not select legacy, none, dual, or broken routes.
-Hydration, action draining, result collection, and review stages run
-only when the trusted route is `review_conductor`. Dual enrollment
-selects Review Conductor; legacy-only, unenrolled, and broken routes
-stay real runtime behavior and never dispatch x-api. An explicit
+An explicit
 `human_gate=true` takes precedence over merge-ready and silent
 nonterminal progression: no structurally valid gated input may become
-`merge_ready` or continue review dispatch silently. The existing
-notification queue consumes the current-head decision for eligibility
-only: silent/none outcomes are not queued, and merge-ready or
-genuinely blocked/fail-closed outcomes remain eligible. Send leases,
-reserved claim/send fencing, route-freshness guards used only for
-delivery, and complete current-event revalidation are stacked adapter
-work, not this routing/admission core.
+`merge_ready` or continue review dispatch silently. Outcome eligibility
+is `silent`/`none` for internal progression and `merge_ready` or
+`blocked` for notify-eligible terminals. Live queue consumption, send
+leases, reserved claim/send fencing, route-freshness guards used only for
+delivery, route-suppressed review stages, and complete current-event
+revalidation are stacked adapter work, not this routing/admission core.
 Public enum-like inputs require exact builtin strings before
 membership checks and raise `OrchestrationError` for unhashable or
 subclass tokens; persisted readiness/quality flags accept only stored
@@ -96,8 +95,9 @@ Unknown state, unknown rail results, and state/rail/result
 incoherence are validated after that closed exception and before any
 unenrolled, legacy, or broken enrollment short-circuit.
 
-The existing notification queue consumes that outcome. It does not invent a
-second sender. `repair_required` and `awaiting_adjudication` without a genuine
+The existing notification queue remains the later consumer of that
+outcome. This core does not invent a second sender and does not change
+the live queue. `repair_required` and `awaiting_adjudication` without a genuine
 human gate are silent internal progression, including the first two automatic
 repair rounds. At ledger cycle 2, `required_fix` may still create a scoped
 repair route, change the head, and rerun exact-head rails while preserving
