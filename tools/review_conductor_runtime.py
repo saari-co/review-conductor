@@ -70,7 +70,7 @@ DENIED_PERMISSIONS = {
     "workflows",
 }
 STANDALONE_DENIED_PERMISSIONS = DENIED_PERMISSIONS - {"contents"}
-APP_EVENTS = ["pull_request", "workflow_run"]
+APP_EVENTS = ["pull_request", "workflow_run", "issue_comment"]
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 API_VERSION = "2022-11-28"
 # GitHub statuses that describe a transient upstream condition rather than a
@@ -2132,6 +2132,9 @@ def recover_abandoned_actions(config: dict[str, Any]) -> list[dict[str, Any]]:
             elif row["kind"] == "clawsweeper.dispatch":
                 next_status = "reconcile_required"
                 reason = "abandoned non-idempotent dispatch requires workflow-run reconciliation"
+            elif row["kind"] == "rereview.acknowledge":
+                next_status = "reconcile_required"
+                reason = "abandoned non-idempotent acknowledgement requires comment reconciliation"
             else:
                 next_status = "pending"
                 reason = "abandoned local handoff claim returned to pending"
@@ -2422,6 +2425,93 @@ def service_transport_environment(config: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def dispatch_rereview_acknowledge(
+    config: dict[str, Any], action_id: str, client: GitHubAppClient | Any
+) -> dict[str, Any]:
+    core.require_enabled({"review_policy": config.get("review_policy", {})})
+    connection = core.open_database(Path(config["paths"]["state_root"]), config["github_app"]["repository"])
+    try:
+        action = connection.execute(
+            "SELECT * FROM actions WHERE action_id = ?", (action_id,)
+        ).fetchone()
+        if action is None or action["kind"] != "rereview.acknowledge":
+            raise RuntimeError("rereview acknowledgement action was not found")
+        if action["status"] == "dispatched":
+            return {"action_id": action_id, "result": "already_dispatched", "merge_dispatched": False}
+        if action["status"] != "pending":
+            raise RuntimeError("rereview acknowledgement is not safely claimable")
+        current = core.exact_current_head(
+            connection,
+            action["repository"],
+            action["pr_number"],
+            action["base_sha"],
+            action["head_sha"],
+        )
+        if current is None or int(current["review_epoch"]) != int(action["review_epoch"]):
+            connection.execute(
+                """
+                UPDATE actions SET status = 'obsolete', last_error = ?, updated_at = ?
+                WHERE action_id = ? AND status = 'pending'
+                """,
+                ("exact tuple is no longer current", core.utc_now(), action_id),
+            )
+            connection.commit()
+            return {"action_id": action_id, "result": "obsolete", "merge_dispatched": False}
+        claimed = connection.execute(
+            """
+            UPDATE actions SET status = 'dispatching', attempts = attempts + 1,
+              claim_owner = ?, claimed_at = ?, updated_at = ?
+            WHERE action_id = ? AND status = 'pending'
+            """,
+            ("cp1-worker", core.utc_now(), core.utc_now(), action_id),
+        )
+        if claimed.rowcount != 1:
+            connection.commit()
+            return {"action_id": action_id, "result": "not_claimed", "merge_dispatched": False}
+        connection.commit()
+        payload = json.loads(action["payload_json"])
+        authority_kwargs = guarded_client_kwargs(client, action)
+        try:
+            comment_id = client.create_issue_comment(
+                payload["pr_number"], payload["body"], **authority_kwargs
+            )
+        except Exception:
+            connection.execute(
+                """
+                UPDATE actions SET status = 'reconcile_required', last_error = ?,
+                    lease_expires_at = NULL, updated_at = ?
+                WHERE action_id = ? AND status = 'dispatching'
+                """,
+                (
+                    "rereview acknowledgement outcome is uncertain; do not resend",
+                    core.utc_now(),
+                    action_id,
+                ),
+            )
+            connection.commit()
+            raise
+        connection.execute(
+            """
+            UPDATE actions SET status = 'dispatched', receipt_json = ?, updated_at = ?
+            WHERE action_id = ? AND status = 'dispatching'
+            """,
+            (
+                core.canonical_json({"comment_id": comment_id, "result": "dispatched"}),
+                core.utc_now(),
+                action_id,
+            ),
+        )
+        connection.commit()
+        return {
+            "action_id": action_id,
+            "result": "dispatched",
+            "comment_id": comment_id,
+            "merge_dispatched": False,
+        }
+    finally:
+        connection.close()
+
+
 def drain_actions(
     config: dict[str, Any], client: GitHubAppClient | Any | None, *, dry_run: bool = False
 ) -> dict[str, Any]:
@@ -2439,12 +2529,14 @@ def drain_actions(
              AND heads.head_sha = actions.head_sha
              AND heads.review_epoch = actions.review_epoch
              AND heads.is_current = 1
-            WHERE actions.kind IN ('openclaw.enqueue', 'clawsweeper.dispatch')
+            WHERE actions.kind IN ('openclaw.enqueue', 'clawsweeper.dispatch', 'rereview.acknowledge')
               AND actions.status = 'pending'
               AND (
                 (actions.kind = 'openclaw.enqueue' AND heads.state = 'openclaw_queued')
                 OR
                 (actions.kind = 'clawsweeper.dispatch' AND heads.state = 'clawsweeper_queued')
+                OR
+                actions.kind = 'rereview.acknowledge'
               )
             ORDER BY actions.created_at, actions.action_id LIMIT ?
             """,
@@ -2459,7 +2551,11 @@ def drain_actions(
                 {"action_id": action["action_id"], "kind": action["kind"], "result": "planned"}
             )
             continue
-        if action["kind"] == "openclaw.enqueue":
+        if action["kind"] == "rereview.acknowledge":
+            if client is None:
+                raise RuntimeError("GitHub installation client is required for rereview acknowledgement")
+            outcomes.append(dispatch_rereview_acknowledge(config, action["action_id"], client))
+        elif action["kind"] == "openclaw.enqueue":
             authority = tuple_authority(action)
 
             def before_external_command(

@@ -35,7 +35,12 @@ installation / numeric repository tuples, retrieves only the approved manifest
 path at the pinned commit, requires the admitted manifest to agree with the
 engine profile, and persists the policy binding in the same SQLite transaction
 as the accepted `pull_request` delivery that established the head. `workflow_run`
-deliveries never create bindings. Worker/check projection is blocked if a
+and `issue_comment` deliveries never create bindings. Authenticated maintainer
+`@ClawSweeper rereview` / `@clawsweeper re-review` comments may refresh
+ClawSweeper on the current exact tuple after valid CI and comprehensive OpenClaw;
+they do not promote policy, grant merge, or accept `@clawsweeper review` as an
+alias. `pull_request.edited` remains unsupported. See
+[ClawSweeper rereview](clawsweeper-rereview.md). Worker/check projection is blocked if a
 current head lacks a current binding; the registry is re-read on every delivery
 and tick. See [trusted admission](trusted-admission.md).
 No live registry, credential, HTTPS edge or deployment exists, so this is

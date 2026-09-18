@@ -55,7 +55,8 @@
     ],
     "events": [
       "pull_request",
-      "workflow_run"
+      "workflow_run",
+      "issue_comment"
     ]
   },
   "projection": {
