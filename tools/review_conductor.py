@@ -27,6 +27,7 @@ GENERATION_FD_ENV = "REVIEW_CONDUCTOR_GENERATION_FD"
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 OPENCLAW_EXACT_TUPLE_CONTRACT = "review-conductor-openclaw-v1"
 OPENCLAW_REPORT_MAX_BYTES = 24 * 1024
+WORKFLOW_READBACK_MAX_BYTES = 1024 * 1024
 OPENCLAW_REPORT_UNAVAILABLE = {"missing", "oversized", "invalid_text"}
 GITHUB_EVENT_TYPES = ("pull_request", "workflow_run", "issue_comment")
 REREVIEW_COMMAND_RE = re.compile(
@@ -487,6 +488,21 @@ def open_database(state_root: Path, repository: str | None = None) -> sqlite3.Co
           proof_ref TEXT,
           PRIMARY KEY (rail, workflow_run_id)
         );
+        CREATE TABLE IF NOT EXISTS ci_run_identities (
+          repository TEXT NOT NULL,
+          workflow_run_id TEXT NOT NULL,
+          pr_number INTEGER NOT NULL,
+          base_sha TEXT NOT NULL,
+          head_sha TEXT NOT NULL,
+          conclusion TEXT NOT NULL,
+          source_created_at TEXT NOT NULL,
+          disposition TEXT NOT NULL,
+          PRIMARY KEY (repository, workflow_run_id)
+        );
+        CREATE TABLE IF NOT EXISTS ci_run_identity_migrations (
+          singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+          backfilled_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS projections (
           repository TEXT NOT NULL,
           pr_number INTEGER NOT NULL,
@@ -598,6 +614,57 @@ def open_database(state_root: Path, repository: str | None = None) -> sqlite3.Co
             )
     if "is_draft" not in {row[1] for row in connection.execute("PRAGMA table_info(heads)")}:
         connection.execute("ALTER TABLE heads ADD COLUMN is_draft INTEGER NOT NULL DEFAULT 0")
+    if connection.execute(
+        "SELECT 1 FROM ci_run_identity_migrations WHERE singleton = 1"
+    ).fetchone() is None:
+        for event_row in connection.execute(
+            """
+            SELECT repository, pr_number, base_sha, head_sha, stale, payload_json
+            FROM events
+            WHERE kind = 'ci.completed'
+            """
+        ):
+            payload = json.loads(event_row["payload_json"])
+            workflow_run = payload.get("workflow_run")
+            if not isinstance(workflow_run, dict):
+                continue
+            try:
+                workflow_run_id = str(require_positive_int(workflow_run.get("id"), "workflow_run id"))
+                source_created_at = require_github_timestamp(
+                    workflow_run.get("created_at"), "workflow_run created_at"
+                )
+                conclusion = require_text(
+                    workflow_run.get("conclusion"), "workflow_run conclusion", 50
+                )
+            except ContractError:
+                continue
+            identity = (
+                event_row["repository"], workflow_run_id, event_row["pr_number"],
+                event_row["base_sha"], event_row["head_sha"], conclusion, source_created_at,
+            )
+            prior = connection.execute(
+                """
+                SELECT pr_number, base_sha, head_sha, conclusion, source_created_at
+                FROM ci_run_identities
+                WHERE repository = ? AND workflow_run_id = ?
+                """,
+                identity[:2],
+            ).fetchone()
+            if prior is not None and tuple(prior) != identity[2:]:
+                raise ContractError("legacy CI workflow_run identities conflict")
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO ci_run_identities(
+                  repository, workflow_run_id, pr_number, base_sha, head_sha,
+                  conclusion, source_created_at, disposition
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (*identity, "stale" if event_row["stale"] else "legacy_event"),
+            )
+        connection.execute(
+            "INSERT OR IGNORE INTO ci_run_identity_migrations(singleton, backfilled_at) VALUES (1, ?)",
+            (utc_now(),),
+        )
     connection.commit()
     return connection
 
@@ -1215,13 +1282,16 @@ def parse_workflow_run_event(config: dict[str, Any], payload: dict[str, Any]) ->
         workflow.get("name") == config["clawsweeper"]["workflow_name"]
         and workflow.get("path") == config["clawsweeper"]["workflow_path"]
     ):
+        workflow_run_id = require_positive_int(run.get("id"), "ClawSweeper workflow_run id")
         if run.get("event") != "workflow_dispatch" or run.get("status") != "completed":
-            return {"ignored": "ClawSweeper workflow_run is not terminal workflow_dispatch"}
+            return {
+                "ignored": "ClawSweeper workflow_run is not terminal workflow_dispatch",
+                "rail": "clawsweeper",
+                "workflow_run_id": workflow_run_id,
+            }
         return {
             "rail": "clawsweeper",
-            "workflow_run_id": str(
-                require_positive_int(run.get("id"), "ClawSweeper workflow_run id")
-            ),
+            "workflow_run_id": str(workflow_run_id),
             "workflow_name": config["clawsweeper"]["workflow_name"],
             "workflow_path": config["clawsweeper"]["workflow_path"],
             "workflow_head_sha": require_sha(
@@ -1245,23 +1315,119 @@ def parse_workflow_run_event(config: dict[str, Any], payload: dict[str, Any]) ->
     base = require_object(pull.get("base"), "workflow_run pull request base")
     head = require_object(pull.get("head"), "workflow_run pull request head")
     base_ref = require_text(base.get("ref"), "workflow_run pull request base ref", 200)
-    if base_ref != config["default_branch"]:
-        return {"ignored": f"workflow_run base ref {base_ref} is outside the configured pilot"}
     head_sha = require_sha(head.get("sha"), "workflow_run pull request head sha")
     if require_sha(run.get("head_sha"), "workflow_run head_sha") != head_sha:
         raise ContractError("workflow_run head_sha does not match pull request head sha")
+    run_id = require_positive_int(run.get("id"), "workflow_run id")
     conclusion = require_text(run.get("conclusion"), "workflow_run conclusion", 50)
+    source_created_at = require_github_timestamp(
+        run.get("created_at"), "workflow_run created_at"
+    )
+    if base_ref != config["default_branch"]:
+        return {
+            "ignored": f"workflow_run base ref {base_ref} is outside the configured pilot",
+            "repository": config["repository"],
+            "workflow_run_id": run_id,
+            "pr_number": require_positive_int(
+                pull.get("number"), "workflow_run pull request number"
+            ),
+            "base_sha": require_sha(base.get("sha"), "workflow_run pull request base sha"),
+            "head_sha": head_sha,
+            "conclusion": conclusion,
+            "source_created_at": source_created_at,
+        }
     return {
         "repository": config["repository"],
         "pr_number": require_positive_int(pull.get("number"), "workflow_run pull request number"),
         "base_sha": require_sha(base.get("sha"), "workflow_run pull request base sha"),
         "head_sha": head_sha,
         "conclusion": conclusion,
-        "run_id": require_positive_int(run.get("id"), "workflow_run id"),
-        "source_created_at": require_github_timestamp(
-            run.get("created_at"), "workflow_run created_at"
-        ),
+        "run_id": run_id,
+        "source_created_at": source_created_at,
     }
+
+
+def _ci_run_identity(event: dict[str, Any]) -> tuple[str, str, int, str, str, str, str] | None:
+    workflow_run_id = event.get("run_id", event.get("workflow_run_id"))
+    fields = (
+        event.get("repository"),
+        workflow_run_id,
+        event.get("pr_number"),
+        event.get("base_sha"),
+        event.get("head_sha"),
+        event.get("conclusion"),
+        event.get("source_created_at"),
+    )
+    if any(value is None for value in fields):
+        return None
+    return (
+        str(fields[0]),
+        str(workflow_run_id),
+        int(fields[2]),
+        str(fields[3]),
+        str(fields[4]),
+        str(fields[5]),
+        str(fields[6]),
+    )
+
+
+def _remember_ci_run_identity(
+    connection: sqlite3.Connection,
+    event: dict[str, Any],
+    disposition: str,
+) -> None:
+    identity = _ci_run_identity(event)
+    if identity is None:
+        return
+    repository, workflow_run_id, pr_number, base_sha, head_sha, conclusion, source_created_at = identity
+    prior = connection.execute(
+        """
+        SELECT pr_number, base_sha, head_sha, conclusion, source_created_at
+        FROM ci_run_identities
+        WHERE repository = ? AND workflow_run_id = ?
+        """,
+        (repository, workflow_run_id),
+    ).fetchone()
+    if prior is not None and (
+        prior["pr_number"] != pr_number
+        or prior["base_sha"] != base_sha
+        or prior["head_sha"] != head_sha
+        or prior["conclusion"] != conclusion
+        or prior["source_created_at"] != source_created_at
+    ):
+        raise ContractError("CI workflow_run identity was reused with conflicting terminal facts")
+    connection.execute(
+        """
+        INSERT INTO ci_run_identities(
+          repository, workflow_run_id, pr_number, base_sha, head_sha,
+          conclusion, source_created_at, disposition
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(repository, workflow_run_id) DO UPDATE SET
+            disposition = CASE
+                WHEN ci_run_identities.disposition = 'stale' THEN excluded.disposition
+                ELSE ci_run_identities.disposition
+            END
+        """,
+        (*identity, disposition),
+    )
+
+
+def _set_ci_run_disposition(
+    connection: sqlite3.Connection,
+    event: dict[str, Any],
+    disposition: str,
+) -> None:
+    identity = _ci_run_identity(event)
+    if identity is None:
+        return
+    connection.execute(
+        """
+        UPDATE ci_run_identities
+        SET disposition = ?
+        WHERE repository = ? AND workflow_run_id = ? AND disposition = 'seen'
+        """,
+        (disposition, identity[0], identity[1]),
+    )
 
 
 def parse_issue_comment_event(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
@@ -1720,8 +1886,23 @@ def process_workflow_run(
     event: dict[str, Any],
     payload: dict[str, Any],
 ) -> dict[str, Any]:
+    if event.get("rail") != "clawsweeper":
+        _remember_ci_run_identity(connection, event, "seen")
     if "ignored" in event:
-        return {"result": "ignored", "reason": event["ignored"]}
+        outcome = {"result": "ignored", "reason": event["ignored"]}
+        for key in (
+            "rail",
+            "workflow_run_id",
+            "pr_number",
+            "base_sha",
+            "head_sha",
+            "conclusion",
+            "source_created_at",
+        ):
+            if key in event:
+                outcome[key] = event[key]
+        _set_ci_run_disposition(connection, event, "ignored_scope")
+        return outcome
     if event.get("rail") == "clawsweeper":
         prior_run = connection.execute(
             "SELECT * FROM rail_workflow_runs WHERE rail = ? AND workflow_run_id = ?",
@@ -1771,6 +1952,7 @@ def process_workflow_run(
     row = exact_current_head(connection, **identity)
     if row is None:
         insert_event(connection, event_id=event_id, kind="ci.completed", stale=True, payload=payload, **identity)
+        _set_ci_run_disposition(connection, event, "stale")
         return {"result": "stale", "reason": "CI tuple is not the current PR head", "merge_dispatched": False}
     if row["state"] in {"closed", "closed_merged"}:
         insert_event(
@@ -1781,6 +1963,7 @@ def process_workflow_run(
             payload=payload,
             **identity,
         )
+        _set_ci_run_disposition(connection, event, "ignored_terminal")
         return {
             "result": "ignored",
             "state": row["state"],
@@ -1797,6 +1980,7 @@ def process_workflow_run(
             payload=payload,
             **identity,
         )
+        _set_ci_run_disposition(connection, event, "ignored_old")
         return {
             "result": "ignored",
             "state": row["state"],
@@ -1838,6 +2022,7 @@ def process_workflow_run(
                 (conclusion, f"CI concluded {conclusion}; Review Rails were not invoked", utc_now(), *identity.values()),
             )
     insert_event(connection, event_id=event_id, kind="ci.completed", stale=False, payload=payload, **identity)
+    _set_ci_run_disposition(connection, event, "accepted")
     return {
         "result": "accepted",
         "state": "openclaw_queued" if conclusion == "success" else "ci_failed",
@@ -1846,6 +2031,233 @@ def process_workflow_run(
         "review_invoked": conclusion == "success",
         "merge_dispatched": False,
     }
+
+
+def _recorded_ci_run(
+    connection: sqlite3.Connection,
+    event: dict[str, Any],
+) -> bool:
+    """Return whether this exact CI run was already admitted.
+
+    Reconciliation may be invoked after GitHub delivered the original event but
+    before the operator could observe the local receipt.  The run id is the
+    authoritative operation identity; conflicting facts for that id fail
+    closed instead of creating a second event.
+    """
+    row = connection.execute(
+        """
+        SELECT pr_number, base_sha, head_sha, conclusion, source_created_at, disposition
+        FROM ci_run_identities
+        WHERE repository = ? AND workflow_run_id = ?
+        """,
+        (event["repository"], str(event["run_id"])),
+    ).fetchone()
+    if row is None:
+        return False
+    if (
+        row["pr_number"] != event["pr_number"]
+        or row["base_sha"] != event["base_sha"]
+        or row["head_sha"] != event["head_sha"]
+        or row["conclusion"] != event["conclusion"]
+        or row["source_created_at"] != event["source_created_at"]
+    ):
+        raise ContractError("CI workflow_run identity was reused with conflicting terminal facts")
+    if row["disposition"] == "ignored_scope":
+        raise ContractError("workflow_run identity was previously recorded as ignored")
+    # A run may arrive before its PR head is admitted. Revisit that exact
+    # identity later, while accepted and ignored terminal identities remain
+    # durable idempotency fences.
+    if row["disposition"] == "stale":
+        return False
+    return True
+
+
+def reconcile_workflow_run(
+    *,
+    config_path: Path,
+    state_root: Path,
+    payload: dict[str, Any],
+    expected_pr_number: int,
+    expected_base_sha: str,
+    expected_head_sha: str,
+    expected_run_id: int,
+    admission_hook: Callable[[sqlite3.Connection, dict[str, Any], str, dict[str, Any], dict[str, Any]], dict[str, Any] | None] | None = None,
+) -> dict[str, Any]:
+    """Admit one authoritative read-back of a completed CI workflow run.
+
+    This is an operator recovery boundary for a missing or unobservable
+    webhook delivery.  It never polls, reruns CI, dispatches either review
+    rail, or trusts a caller-provided tuple: the GitHub payload is parsed and
+    the supplied identity is compared to the parsed exact values.
+    """
+    config = load_config(config_path)
+    require_enabled(config)
+    if not isinstance(payload, dict):
+        raise ContractError("workflow_run read-back must be an object")
+    try:
+        canonical_payload = canonical_json(payload).encode("utf-8")
+    except (RecursionError, TypeError, UnicodeError, ValueError) as exc:
+        raise ContractError("workflow_run read-back is not safely canonicalizable") from exc
+    if len(canonical_payload) > WORKFLOW_READBACK_MAX_BYTES:
+        raise ContractError("workflow_run read-back is oversized")
+    if config.get("review_policy") and admission_hook is None:
+        raise ContractError("strict workflow_run reconciliation requires service admission")
+    event = parse_workflow_run_event(config, payload)
+    if "ignored" in event:
+        raise ContractError(f"workflow_run read-back is ignored: {event['ignored']}")
+    if event.get("rail") == "clawsweeper":
+        raise ContractError("workflow_run reconciliation accepts CI only")
+    if (
+        event["pr_number"] != require_positive_int(expected_pr_number, "expected PR number")
+        or event["base_sha"] != require_sha(expected_base_sha, "expected base sha")
+        or event["head_sha"] != require_sha(expected_head_sha, "expected head sha")
+        or event["run_id"] != require_positive_int(expected_run_id, "expected workflow_run id")
+    ):
+        raise ContractError("workflow_run read-back does not match the requested exact tuple")
+    delivery_id = f"github-reconcile-workflow-run:{event['run_id']}"
+    payload_sha = hashlib.sha256(canonical_payload).hexdigest()
+    connection = open_database(state_root, config["repository"])
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        # Revalidate service authority before consulting an existing receipt.
+        # Duplicate read-backs must not become a bypass around current
+        # enrollment or binding revocation.
+        if admission_hook is not None:
+            admission_hook(
+                connection,
+                config,
+                "workflow_run",
+                payload,
+                {"result": "preflight", "merge_dispatched": False},
+            )
+        prior = connection.execute(
+            "SELECT * FROM deliveries WHERE delivery_id = ?", (delivery_id,)
+        ).fetchone()
+        prior_stale = False
+        if prior is not None:
+            if prior["source"] != "github-readback" or prior["event_type"] != "workflow_run":
+                raise ContractError("workflow_run reconciliation id collided with another delivery")
+            if prior["payload_sha256"] != payload_sha:
+                raise ContractError("workflow_run reconciliation id was reused with different content")
+            outcome = json.loads(prior["outcome_json"])
+            if outcome.get("result") != "stale":
+                connection.rollback()
+                outcome.update(
+                    {
+                        "repository": event["repository"],
+                        "pr_number": event["pr_number"],
+                        "base_sha": event["base_sha"],
+                        "head_sha": event["head_sha"],
+                        "run_id": event["run_id"],
+                    }
+                )
+                outcome["result"] = "duplicate_reconciliation"
+                return outcome
+            prior_stale = True
+        if _recorded_ci_run(connection, event):
+            outcome = {
+                "result": "already_processed",
+                "repository": event["repository"],
+                "pr_number": event["pr_number"],
+                "base_sha": event["base_sha"],
+                "head_sha": event["head_sha"],
+                "run_id": event["run_id"],
+                "review_invoked": False,
+                "merge_dispatched": False,
+            }
+        else:
+            event_id = event_id_from_delivery(delivery_id)
+            if prior_stale:
+                retry_count = connection.execute(
+                    "SELECT COUNT(*) FROM events WHERE event_id = ? OR event_id LIKE ?",
+                    (event_id, event_id + ":retry:%"),
+                ).fetchone()[0]
+                event_id = f"{event_id}:retry:{retry_count}"
+            outcome = process_workflow_run(
+                connection,
+                config,
+                event_id,
+                event,
+                payload,
+            )
+        outcome.update(
+            {
+                "repository": event["repository"],
+                "pr_number": event["pr_number"],
+                "base_sha": event["base_sha"],
+                "head_sha": event["head_sha"],
+                "run_id": event["run_id"],
+            }
+        )
+        binding = None
+        if admission_hook is not None:
+            binding = admission_hook(connection, config, "workflow_run", payload, outcome)
+        if config.get("review_policy"):
+            if binding is None:
+                raise ContractError(
+                    "strict workflow_run reconciliation requires an exact current binding"
+                )
+            binding = require_object(binding, "workflow_run reconciliation admission binding")
+            for key in ("repository", "pr_number", "base_sha", "head_sha"):
+                if binding.get(key) != event[key]:
+                    raise ContractError(
+                        "workflow_run reconciliation admission binding does not match the exact tuple"
+                    )
+        if binding is not None:
+            binding = require_object(binding, "workflow_run reconciliation admission binding")
+            outcome["admission_binding_id"] = require_text(
+                binding.get("binding_id"), "admission binding id", 64
+            )
+        outcome.update(
+            {
+                "schema": "smoky.review-conductor.reconciliation-receipt.v1",
+                "delivery_id": delivery_id,
+                "event_type": "workflow_run",
+                "source": "github-readback",
+                "payload_sha256": payload_sha,
+            }
+        )
+        if prior_stale:
+            connection.execute(
+                "UPDATE deliveries SET payload_sha256 = ?, received_at = ?, outcome_json = ? WHERE delivery_id = ?",
+                (payload_sha, utc_now(), canonical_json(outcome), delivery_id),
+            )
+        else:
+            connection.execute(
+                "INSERT INTO deliveries(delivery_id, source, event_type, payload_sha256, received_at, outcome_json) VALUES (?, 'github-readback', 'workflow_run', ?, ?, ?)",
+                (delivery_id, payload_sha, utc_now(), canonical_json(outcome)),
+            )
+        connection.commit()
+        return outcome
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def reconcile_workflow_run_command(args: argparse.Namespace) -> dict[str, Any]:
+    try:
+        with args.body_file.open("rb") as body_file:
+            body = body_file.read(WORKFLOW_READBACK_MAX_BYTES + 1)
+    except OSError as exc:
+        raise ContractError("cannot read workflow_run read-back JSON") from exc
+    if len(body) > WORKFLOW_READBACK_MAX_BYTES:
+        raise ContractError("workflow_run read-back is oversized")
+    verify_github_signature(body, args.signature, os.environ.get(args.secret_env, ""))
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, RecursionError, ValueError) as exc:
+        raise ContractError("cannot read workflow_run read-back JSON") from exc
+    return reconcile_workflow_run(
+        config_path=args.config,
+        state_root=args.state_root,
+        payload=payload,
+        expected_pr_number=args.pr_number,
+        expected_base_sha=args.base_sha,
+        expected_head_sha=args.head_sha,
+        expected_run_id=args.run_id,
+    )
 
 
 def verify_github_signature(body: bytes, signature: str, secret: str) -> None:
@@ -1900,7 +2312,20 @@ def ingest_github_delivery(
             outcome = process_pull_request(connection, config, event_id, event, payload)
         elif event_type == "workflow_run":
             event = parse_workflow_run_event(config, payload)
-            outcome = process_workflow_run(connection, config, event_id, event, payload)
+            if "ignored" in event or event.get("rail") == "clawsweeper":
+                outcome = process_workflow_run(connection, config, event_id, event, payload)
+            elif _recorded_ci_run(connection, event):
+                outcome = {
+                    "result": "duplicate",
+                    "repository": event["repository"],
+                    "pr_number": event["pr_number"],
+                    "base_sha": event["base_sha"],
+                    "head_sha": event["head_sha"],
+                    "run_id": event["run_id"],
+                    "merge_dispatched": False,
+                }
+            else:
+                outcome = process_workflow_run(connection, config, event_id, event, payload)
         else:
             event = parse_issue_comment_event(config, payload)
             outcome = process_issue_comment(connection, config, event_id, event, payload)
@@ -2974,6 +3399,21 @@ def build_parser() -> argparse.ArgumentParser:
     github.add_argument("--secret-env", default="SMOKY_REVIEW_CONDUCTOR_WEBHOOK_SECRET")
     github.add_argument("--body-file", type=Path, required=True)
     github.set_defaults(func=github_delivery)
+
+    reconcile = sub.add_parser(
+        "reconcile-workflow-run",
+        help="admit one exact completed CI workflow_run read-back without dispatching reviews",
+    )
+    reconcile.add_argument("--config", type=Path, required=True)
+    reconcile.add_argument("--state-root", type=Path, required=True)
+    reconcile.add_argument("--signature", required=True)
+    reconcile.add_argument("--secret-env", default="SMOKY_REVIEW_CONDUCTOR_WEBHOOK_SECRET")
+    reconcile.add_argument("--body-file", type=Path, required=True)
+    reconcile.add_argument("--pr-number", type=int, required=True)
+    reconcile.add_argument("--base-sha", required=True)
+    reconcile.add_argument("--head-sha", required=True)
+    reconcile.add_argument("--run-id", type=int, required=True)
+    reconcile.set_defaults(func=reconcile_workflow_run_command)
 
     internal = sub.add_parser("internal-event", help="ingest one typed review/adjudication event")
     internal.add_argument("--config", type=Path, required=True)

@@ -1,0 +1,19 @@
+{
+  "schema": "review-conductor.candidate-manifest.v1",
+  "base_sha": "b16e0c8bc3f32e997db31caa173b846b0e9041ce",
+  "starting_head_sha": "009279c80314886f0bee6f314024e6e6e9a14769",
+  "captured_date": "2026-09-18",
+  "binding_scheme": "A commit cannot contain its own SHA. base_sha is the frozen origin/main integration base. starting_head_sha is the verified PR #18 core head this ordinary post-cap ready-tuple repair starts from. Per-file sha256 values are of this repaired-core candidate source. The branch head after commit is the exact candidate SHA for hosted CI. The first post-cap packet remains the explanation of 009279c; the merge-forward packet remains the explanation of integrating exact main b16e0c8. This packet does not embed a receipt commit's own SHA. Live notification/delivery/runtime entry functions remain deferred to the stacked adapter. The 2/2 ledger is not reset. No Copilot, OpenClaw, or ClawSweeper review is requested from this packet.",
+  "files": {
+    "docs/architecture.md": "96b04f0e59de3bc6a4e6876d31dda00a8898a7e350489333384c7b3c85cbd132",
+    "docs/migration.md": "205558c601da08db10a2520b4cf22c41f2538e0a35e847f4430b0832c7ca40ef",
+    "docs/orchestration-decision-map.md": "5d92c2561462858ace78510504e009a9c246d36987c7a3596b3a3ec4134b0ee6",
+    "proof/issue-687-routing-core-merge-forward-20260918/PROOF.md": "86022aec88b6cb4231dbb7d9ecb3e916407452a2f37e41b386b03a55edcb8d7d",
+    "proof/issue-687-routing-core-merge-forward-20260918/candidate-manifest.json": "2d95fe3b896bd6dba4845ee3a703a6ab7069c3abc3ec4569a15a3d1963b1ea12",
+    "proof/issue-687-routing-core-post-cap-repair-20260918/PROOF.md": "33dfb0d8303f2e253d4f878a1e0e8e0ef19425870b804cd4de32ed5b54fcc27a",
+    "proof/issue-687-routing-core-post-cap-repair-20260918/candidate-manifest.json": "e4a520f184a58f12c129aba3bb81a6c0954113c3850dd06430361e583f790c26",
+    "proof/issue-687-routing-core-post-cap-repair-2-20260918/PROOF.md": "09614bb4bf443ca6239b2451f0790da61803d6b2c9ba3fdf1424e28508395650",
+    "tests/test_orchestration_outcome.py": "ff187599d8db8679933453ff00cc47ce0daca704a474e90b31a06aa9193831f6",
+    "tools/orchestration_outcome.py": "48269c7c05e7ae35bd1781207e0237847944c57731e6857cc500a9edd639f273"
+  }
+}

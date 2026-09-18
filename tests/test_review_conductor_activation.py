@@ -1135,7 +1135,7 @@ def test_full_event_driven_replay_projection(root: Path) -> None:
     duplicate = ingress(config, "workflow_run", "e2e-ci-success", success_payload)[1]
     second_delivery = ingress(config, "workflow_run", "e2e-ci-success-2", success_payload)[1]
     assert first["result"] == "accepted" and duplicate["result"] == "duplicate_delivery"
-    assert second_delivery["result"] == "accepted"
+    assert second_delivery["result"] == "duplicate"
     open_actions = actions(config, pr, "openclaw.enqueue")
     assert len(open_actions) == 1
 

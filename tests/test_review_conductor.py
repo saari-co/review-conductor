@@ -22,6 +22,7 @@ CORE = ROOT / "tools" / "review_conductor.py"
 CONFIG = ROOT / "contracts" / "review-conductor" / "dinkuskit-blocks.json"
 SECRET = "review-conductor-fixture-secret"
 BASE = "1" * 40
+REPOSITORY = "dinkuskit/blocks"
 
 
 def run(*args: str, env: dict[str, str] | None = None, expected: int = 0) -> dict:
@@ -29,8 +30,13 @@ def run(*args: str, env: dict[str, str] | None = None, expected: int = 0) -> dic
     command_env["SMOKY_REVIEW_CONDUCTOR_WEBHOOK_SECRET"] = SECRET
     if env:
         command_env.update(env)
+    command_args = list(args)
+    if command_args and command_args[0] == "reconcile-workflow-run":
+        body_index = command_args.index("--body-file") + 1
+        body_path = Path(command_args[body_index])
+        command_args.extend(("--signature", signature(body_path)))
     result = subprocess.run(
-        [sys.executable, str(CORE), *args],
+        [sys.executable, str(CORE), *command_args],
         cwd=ROOT,
         env=command_env,
         text=True,
@@ -689,6 +695,269 @@ def test_ci_gate_dedupe_and_openclaw_dispatch(temp: Path) -> None:
     assert len(calls) == 2
     queue_call = json.loads(calls[1])
     assert "--queue-request-id" in queue_call
+
+
+def test_ci_readback_reconciliation_is_exact_and_idempotent(temp: Path) -> None:
+    head = "b" * 40
+    state = temp / "state-readback"
+    github_event(temp, state, "pull_request", "delivery-readback-pr", pr_payload(107, head))
+    payload = workflow_payload(107, head, "success", 5101)
+    body = write_json(temp, "readback.json", payload)
+    reconciled = run(
+        "reconcile-workflow-run",
+        "--config", str(CONFIG),
+        "--state-root", str(state),
+        "--body-file", str(body),
+        "--pr-number", "107",
+        "--base-sha", BASE,
+        "--head-sha", head,
+        "--run-id", "5101",
+    )
+    assert reconciled["result"] == "accepted"
+    assert reconciled["source"] == "github-readback"
+    assert reconciled["repository"] == REPOSITORY
+    assert reconciled["pr_number"] == 107
+    assert reconciled["base_sha"] == BASE
+    assert reconciled["head_sha"] == head
+    assert reconciled["run_id"] == 5101
+    assert status(state, 107)["head"]["state"] == "openclaw_queued"
+    duplicate = run(
+        "reconcile-workflow-run",
+        "--config", str(CONFIG),
+        "--state-root", str(state),
+        "--body-file", str(body),
+        "--pr-number", "107",
+        "--base-sha", BASE,
+        "--head-sha", head,
+        "--run-id", "5101",
+    )
+    assert duplicate["result"] == "duplicate_reconciliation"
+    assert duplicate["run_id"] == 5101
+    assert duplicate["head_sha"] == head
+    assert len(status(state, 107)["actions"]) == 1
+
+    conflicting_head = "c" * 40
+    github_event(temp, state, "pull_request", "delivery-readback-conflict-pr", pr_payload(109, conflicting_head))
+    conflicting_body = write_json(
+        temp,
+        "readback-conflict.json",
+        workflow_payload(109, conflicting_head, "success", 5101),
+    )
+    conflict = run(
+        "reconcile-workflow-run",
+        "--config", str(CONFIG),
+        "--state-root", str(state),
+        "--body-file", str(conflicting_body),
+        "--pr-number", "109",
+        "--base-sha", BASE,
+        "--head-sha", conflicting_head,
+        "--run-id", "5101",
+        expected=2,
+    )
+    assert "reconciliation id was reused with different content" in conflict["stderr"]
+
+    collision_state = temp / "state-readback-delivery-collision"
+    collision_head = "f" * 40
+    github_event(temp, collision_state, "pull_request", "github-reconcile-workflow-run:5401", pr_payload(112, collision_head))
+    collision_body = write_json(
+        temp,
+        "readback-delivery-collision.json",
+        workflow_payload(112, collision_head, "success", 5401),
+    )
+    collision = run(
+        "reconcile-workflow-run",
+        "--config", str(CONFIG),
+        "--state-root", str(collision_state),
+        "--body-file", str(collision_body),
+        "--pr-number", "112",
+        "--base-sha", BASE,
+        "--head-sha", collision_head,
+        "--run-id", "5401",
+        expected=2,
+    )
+    assert "collided with another delivery" in collision["stderr"]
+
+    ignored_state = temp / "state-readback-ignored-reuse"
+    ignored_head = "d" * 40
+    github_event(temp, ignored_state, "pull_request", "delivery-ignored-reuse-pr", pr_payload(110, ignored_head))
+    ignored_delivery = github_event(
+        temp,
+        ignored_state,
+        "workflow_run",
+        "delivery-ignored-reuse-ci",
+        workflow_payload(110, ignored_head, "success", 5201, base_ref="release"),
+    )
+    assert ignored_delivery["result"] == "ignored"
+    ignored_replay_body = write_json(
+        temp,
+        "readback-ignored-reuse.json",
+        workflow_payload(110, ignored_head, "success", 5201),
+    )
+    ignored_replay = run(
+        "reconcile-workflow-run",
+        "--config", str(CONFIG),
+        "--state-root", str(ignored_state),
+        "--body-file", str(ignored_replay_body),
+        "--pr-number", "110",
+        "--base-sha", BASE,
+        "--head-sha", ignored_head,
+        "--run-id", "5201",
+        expected=2,
+    )
+    assert "previously recorded as ignored" in ignored_replay["stderr"]
+
+    delivered_state = temp / "state-readback-already-delivered"
+    github_event(temp, delivered_state, "pull_request", "delivery-original-pr", pr_payload(108, head))
+    github_event(
+        temp,
+        delivered_state,
+        "workflow_run",
+        "delivery-original-ci",
+        workflow_payload(108, head, "success", 5102),
+    )
+    delivered_body = write_json(temp, "readback-already-delivered.json", workflow_payload(108, head, "success", 5102))
+    already = run(
+        "reconcile-workflow-run",
+        "--config", str(CONFIG),
+        "--state-root", str(delivered_state),
+        "--body-file", str(delivered_body),
+        "--pr-number", "108",
+        "--base-sha", BASE,
+        "--head-sha", head,
+        "--run-id", "5102",
+    )
+    assert already["result"] == "already_processed"
+    assert len(status(delivered_state, 108)["actions"]) == 1
+
+    late_state = temp / "state-readback-late-original"
+    late_head = "e" * 40
+    github_event(temp, late_state, "pull_request", "delivery-late-original-pr", pr_payload(111, late_head))
+    late_body = write_json(
+        temp,
+        "readback-late-original.json",
+        workflow_payload(111, late_head, "success", 5301),
+    )
+    late = run(
+        "reconcile-workflow-run",
+        "--config", str(CONFIG),
+        "--state-root", str(late_state),
+        "--body-file", str(late_body),
+        "--pr-number", "111",
+        "--base-sha", BASE,
+        "--head-sha", late_head,
+        "--run-id", "5301",
+    )
+    assert late["result"] == "accepted"
+    late_delivery = github_event(
+        temp,
+        late_state,
+        "workflow_run",
+        "delivery-late-original-ci",
+        workflow_payload(111, late_head, "success", 5301),
+    )
+    assert late_delivery["result"] == "duplicate"
+
+    preadmission_state = temp / "state-readback-preadmission"
+    preadmission_head = "a" * 40
+    preadmission_payload = workflow_payload(113, preadmission_head, "success", 5402)
+    preadmission_delivery = github_event(
+        temp,
+        preadmission_state,
+        "workflow_run",
+        "delivery-preadmission-ci",
+        preadmission_payload,
+    )
+    assert preadmission_delivery["result"] == "stale"
+    github_event(
+        temp,
+        preadmission_state,
+        "pull_request",
+        "delivery-preadmission-pr",
+        pr_payload(113, preadmission_head),
+    )
+    preadmission_body = write_json(
+        temp, "readback-preadmission.json", preadmission_payload
+    )
+    preadmission_replay = run(
+        "reconcile-workflow-run",
+        "--config", str(CONFIG),
+        "--state-root", str(preadmission_state),
+        "--body-file", str(preadmission_body),
+        "--pr-number", "113",
+        "--base-sha", BASE,
+        "--head-sha", preadmission_head,
+        "--run-id", "5402",
+    )
+    assert preadmission_replay["result"] == "accepted"
+    assert len(status(preadmission_state, 113)["actions"]) == 1
+
+    stale_receipt_state = temp / "state-readback-stale-receipt"
+    stale_receipt_head = "b" * 40
+    stale_receipt_payload = workflow_payload(114, stale_receipt_head, "success", 5403)
+    stale_receipt_body = write_json(
+        temp, "readback-stale-receipt.json", stale_receipt_payload
+    )
+    stale_receipt = run(
+        "reconcile-workflow-run",
+        "--config", str(CONFIG),
+        "--state-root", str(stale_receipt_state),
+        "--body-file", str(stale_receipt_body),
+        "--pr-number", "114",
+        "--base-sha", BASE,
+        "--head-sha", stale_receipt_head,
+        "--run-id", "5403",
+    )
+    assert stale_receipt["result"] == "stale"
+    github_event(
+        temp,
+        stale_receipt_state,
+        "pull_request",
+        "delivery-stale-receipt-pr",
+        pr_payload(114, stale_receipt_head),
+    )
+    stale_receipt_retry = run(
+        "reconcile-workflow-run",
+        "--config", str(CONFIG),
+        "--state-root", str(stale_receipt_state),
+        "--body-file", str(stale_receipt_body),
+        "--pr-number", "114",
+        "--base-sha", BASE,
+        "--head-sha", stale_receipt_head,
+        "--run-id", "5403",
+    )
+    assert stale_receipt_retry["result"] == "accepted"
+    assert len(status(stale_receipt_state, 114)["actions"]) == 1
+
+    mismatch = run(
+        "reconcile-workflow-run",
+        "--config", str(CONFIG),
+        "--state-root", str(state),
+        "--body-file", str(body),
+        "--pr-number", "107",
+        "--base-sha", BASE,
+        "--head-sha", "c" * 40,
+        "--run-id", "5101",
+        expected=2,
+    )
+    assert "does not match the requested exact tuple" in mismatch["stderr"]
+
+    ignored_body = write_json(
+        temp,
+        "readback-ignored.json",
+        workflow_payload(107, head, "success", 5103, base_ref="release"),
+    )
+    ignored = run(
+        "reconcile-workflow-run",
+        "--config", str(CONFIG),
+        "--state-root", str(state),
+        "--body-file", str(ignored_body),
+        "--pr-number", "107",
+        "--base-sha", BASE,
+        "--head-sha", head,
+        "--run-id", "5103",
+        expected=2,
+    )
+    assert "workflow_run read-back is ignored" in ignored["stderr"]
 
 
 def test_default_branch_scope_and_atomic_dispatch_claim(temp: Path) -> None:
@@ -2024,6 +2293,7 @@ def main() -> int:
     named = {
         "test_official_hmac_vector": lambda _temp: test_official_hmac_vector(),
         "test_ci_gate_dedupe_and_openclaw_dispatch": test_ci_gate_dedupe_and_openclaw_dispatch,
+        "test_ci_readback_reconciliation_is_exact_and_idempotent": test_ci_readback_reconciliation_is_exact_and_idempotent,
         "test_default_branch_scope_and_atomic_dispatch_claim": test_default_branch_scope_and_atomic_dispatch_claim,
         "test_old_head_terminal_is_historical_only": test_old_head_terminal_is_historical_only,
         "test_closed_pr_obsoletes_pending_review_and_ignores_late_ci": test_closed_pr_obsoletes_pending_review_and_ignores_late_ci,

@@ -30,7 +30,11 @@ must be exact builtins; reconstruction compares those exact base
 values so a str subclass cannot synthesize repository, ID, or legacy
 authority.
 The service-profile repository must be an exact admitted-scope string
-before omitted-marker absence is treated as legitimate none. Userland
+before omitted-marker absence is treated as legitimate none. A matching
+enrollment still requires a valid enabled core `review_policy` and the
+exact registry reviewer mapping before Conductor present; missing or
+non-dict policy or core config is broken. Unmatched enrollment keeps
+the existing absent/legacy result. Userland
 `enabled` / `blockers` flags do not select the route. External
 registry document validation/loading is separate from strict
 Conductor ingress admission. Pending rows are revalidated before
@@ -53,12 +57,18 @@ nonterminal dispatch. `openclaw_clean_draft` keeps
 `clawsweeper_eligible` false. `ready_for_human_merge` may carry no
 `adjudication_dispositions` or only `defer` / `reject_false_positive`;
 `required_fix` or `human_gate` dispositions on that state fail closed
-to the blocked path and do not become merge-ready. Impossible
-state/rail/result tuples, including mismatched rails, fail closed
-before any enrollment-route short-circuit, review_dispatch, or
-notification eligibility is calculated. The persisted-row adapter applies the same rail-aware
-validation and maps inconsistent stored state/rail data to typed
-unknown results. `closed` / `closed_merged` are terminal, silent,
+to the blocked path before unenrolled or legacy short-circuits and do
+not become merge-ready. Impossible state/rail/result tuples, including
+mismatched rails and `ready_for_human_merge` with
+`clawsweeper_result=failed` or `human_gate`, fail closed before any
+enrollment-route short-circuit, review_dispatch, or notification
+eligibility is calculated instead of silently returning
+`merge_ready_suppressed`. The persisted-row adapter applies the same rail-aware
+validation and maps inconsistent or malformed stored state/rail
+tokens such as rail='spark' to typed unknown results and exact
+builtin state/rail values so the canonical decision can fail closed
+to blocked instead of raising. Direct public contract inputs remain
+strict. `closed` / `closed_merged` are terminal, silent,
 and non-dispatchable even when enrollment is broken; closed-state
 handling precedes enrollment short-circuits. Unknown/result/tuple
 coherence is validated after that closed exception and before
