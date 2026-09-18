@@ -1,4 +1,4 @@
-# Issue #687 bounded repair — Copilot 5243170006 — 2026-09-17
+# Issue #687 proof-only continuation — reservation-specific send lock — 2026-09-17
 
 ## Ownership
 
@@ -8,13 +8,14 @@
 - Branch: `openclaw/review-conductor-issue-687-routing-v1`
 - Required start/base: `8cc4094e88c8cd04c5b7da28e0c6a9ef054ea69c` (`origin/main`).
 - Authorized frozen starting HEAD / parent candidate:
-  `15903f321520e1e7fd263923d2580f219e0bfe83`.
-- Live retained branch/PR head this repair starts from:
-  `15903f321520e1e7fd263923d2580f219e0bfe83`.
+  `51034ad821de3f0aafd5c194b184490b23b9fd61`.
+- Live retained branch/PR head this continuation starts from:
+  `51034ad821de3f0aafd5c194b184490b23b9fd61`.
 - Sole source-changing owner: this worktree. No x-api, Suite, or other
-  repository was edited.
-- Mode: bounded repair of the three verified required findings from
-  Copilot review 5243170006. No Copilot, OpenClaw, or ClawSweeper
+  repository was edited. The prior Cursor session is settled and was not
+  resumed.
+- Mode: proof-only continuation of the already-authorized notification
+  race fix. No source design change. No Copilot, OpenClaw, or ClawSweeper
   review is requested. No merge, deploy, activation, credential,
   protection, live notification, or target-repository onboarding.
 
@@ -25,43 +26,31 @@ branch head after this commit is the exact candidate SHA for later CI.
 ## Historical evidence preserved
 
 Prior PR #18 batches remain part of the review ledger, including the
-Copilot 5242972219 nested-authority, claim/send, and worker-route
-closure at `15903f321520e1e7fd263923d2580f219e0bfe83` (hosted CI run
-35294022255).
+Copilot 5243170006 hostile-lookup, reserved revalidation, and stale-guard
+closure at `51034ad821de3f0aafd5c194b184490b23b9fd61` (hosted CI run
+35296009486).
 
-## Defects and required behavior
+## Independently identified proof gap
 
-1. `Registry.lookup` still accepted `isinstance(repository, str)`. A
-   hostile `str` subclass whose `__eq__` always returns true could
-   look up a real enrollment. Lookup now requires exact built-in
-   strings and integers on the caller and stored enrollment fields
-   and fails closed on subclasses.
+The claim/send fence already uses `BEGIN IMMEDIATE` and holds that SQLite
+write reservation through transport. Existing tests and mutants proved the
+extra reserved revalidation, but they did not independently prove that the
+reservation blocks a competing state write after the final predicate.
 
-2. The claim/send fence still had a gap after
-   `claimed_notification_still_current` returned and before
-   `notifier.send`. The already-committed `uncertain` claim is now
-   followed by a `BEGIN IMMEDIATE` write reservation that revalidates
-   the current decision and holds that reservation across transport.
-   A webhook transition after the unlocked predicate returns retires
-   the stale notification. Identical current decisions still deliver
-   exactly once.
+This continuation adds one deterministic reservation-specific negative
+regression. After the final reserved revalidation, a second writer is
+coordinated during `notifier.send`. That writer cannot take `BEGIN
+IMMEDIATE` or commit a `heads` mutation while transport holds the
+reservation. After send returns and the reservation commits/releases, the
+same mutation commits. Crash-survival, exact-once delivery of the reserved
+row, and all prior #687 contracts are unchanged.
 
-3. A long-lived `GitHubAppClient` retained its Conductor authority
-   guard after the registry moved to `fail_closed`. The broken route
-   queued its blocked alert, then `deliver_notifications` rejected it
-   with the stale guard and restored pending. The guard is now
-   installed for a live Conductor route and cleared on every other
-   route transition so a Conductor-to-broken tick delivers the
-   fail-closed alert exactly once.
+A precise disposable-copy mutant weakens only
+`connection.execute("BEGIN IMMEDIATE")` to `BEGIN` while retaining the extra
+`claimed_notification_still_current` revalidation. That exact regression
+fails because the competing writer can reserve and commit during send.
 
-Preserved: versioned `review-conductor.orchestration-outcome.v1`, silent
-first/second automatic rounds, saturating `repair_cycle=2`, no Conductor
-legacy dispatch, human-only merge, closed-first silence, pending
-revalidation, human_gate precedence, notification identity, producer-only
-schema combinations, Conductor-wins dual, legacy-only handoff,
-unenrolled-none silence, broken fail-closed, omitted-marker backward
-compatibility, load_registry-driven route coverage, and x-api runtime
-independence. No second notification system and no live adapters.
+Source was not changed. The fence already had the required reservation.
 
 ## Bounded refusals
 
@@ -80,16 +69,15 @@ is not a deployed review PASS.
 
 | Command | Result |
 | --- | --- |
-| focused hostile-subclass lookup | PASS; `str`/`int` subclasses cannot synthesize `Registry.lookup` authority; exact builtins still resolve |
-| focused notification after-predicate race | PASS; webhook `ci_failed` → `openclaw_queued` after the unlocked predicate retires the stale row; identical current decisions deliver once and then dedupe |
-| focused same-client Conductor-to-broken transition | PASS; the retained client clears its Conductor guard and delivers the fail-closed blocked alert exactly once |
-| precise mutants | PASS; lookup `isinstance`, skipped reserved claim/send revalidation, skipped full claim/send fence, and retained stale Conductor guard are killed |
+| focused reservation-specific race | PASS; competing `BEGIN IMMEDIATE` / `heads` mutation cannot commit after the final reserved revalidation until transport returns and the reservation releases; the reserved row still sends exactly once |
+| focused weaken-`BEGIN IMMEDIATE` mutant | PASS; extra revalidation retained; intended test fails because the second writer reserved or committed during send |
+| focused related race/crash regressions | PASS; after-predicate retire, between-eligibility-and-send retire, and uncertain-before-transport crash-survival remain |
 | `python3 tests/test_orchestration_outcome.py` | 32 tests OK |
 | `python3 tests/test_review_conductor_userland.py` | 38 passed |
 | `python3 tests/test_trusted_admission.py` | 23 tests OK |
-| `python3 -m unittest discover -s tests -p 'test_service_runtime.py'` | 86 tests OK |
+| `python3 -m unittest discover -s tests -p 'test_service_runtime.py'` | 87 tests OK |
 | `python3 -m compileall -q tools tests scripts` | PASS |
-| `make check` | PASS |
+| `make check` | PASS; precise mutants include the reserved-revalidation skip and the reservation-only weaken |
 | `make build` | PASS; wrote `dist/review-conductor.pyz` |
 | `python3 scripts/check_whitespace.py 8cc4094e88c8cd04c5b7da28e0c6a9ef054ea69c <new-head>` | recorded after the candidate commit |
 
@@ -99,7 +87,7 @@ script requires the checkout to equal HEAD, so it runs after the candidate
 commit.
 
 Provenance destination hashes were re-verified for the 14 recorded
-extracted files. This repair does not claim an x-api source branch or
+extracted files. This continuation does not claim an x-api source branch or
 commit beyond that existing ledger.
 
 ## Untouched boundaries

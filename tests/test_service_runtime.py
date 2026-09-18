@@ -2875,6 +2875,149 @@ class AdmissionIngressTests(unittest.TestCase):
             )
             self.assertEqual(duplicate.sent, [])
 
+    def test_reserved_send_blocks_competing_state_write_until_reservation_releases(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = legacy.config_fixture(Path(temporary))
+            pr = 223
+            legacy.ingress(config, "pull_request", "reserve-pr", legacy.pr_payload(pr))
+            legacy.ingress(
+                config,
+                "workflow_run",
+                "reserve-ci",
+                legacy.ci_payload(pr, 2223, conclusion="failure"),
+            )
+            first = userland.deliver_notifications(
+                config, legacy.UnavailableNotifier(), dry_run=False
+            )
+            self.assertEqual(
+                [item["result"] for item in first["deliveries"]],
+                ["not_ready", "not_ready", "not_ready"],
+            )
+            self.assertEqual(legacy.current(config, pr)["state"], "ci_failed")
+            # One pending row keeps the waiting second writer from interleaving
+            # between per-channel reservations after queue_notifications.
+            connection = core.open_database(Path(config["paths"]["state_root"]))
+            try:
+                connection.execute(
+                    "DELETE FROM notification_deliveries WHERE channel != 'openclaw_context'"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            database = Path(config["paths"]["state_root"]) / "review-conductor.sqlite3"
+            original = userland.claimed_notification_still_current
+            reserved_checks = {"count": 0}
+            writer_blocked = threading.Event()
+            writer_committed = threading.Event()
+            writer = {"immediate_locked": False, "committed": False, "error": None}
+            thread_holder = {"thread": None}
+            sent = []
+
+            def count_reserved(connection, row, trusted_enrollment):
+                still = original(connection, row, trusted_enrollment)
+                reserved_checks["count"] += 1
+                return still
+
+            def compete():
+                probe = sqlite3.connect(database, timeout=0)
+                try:
+                    probe.execute("BEGIN IMMEDIATE")
+                    probe.execute(
+                        """
+                        UPDATE heads
+                        SET state = ?, rail = ?, blocker = ?
+                        WHERE pr_number = ? AND is_current = 1
+                        """,
+                        ("openclaw_queued", "openclaw", None, pr),
+                    )
+                    probe.commit()
+                    writer["immediate_locked"] = False
+                except sqlite3.OperationalError as exc:
+                    writer["immediate_locked"] = "locked" in str(exc).lower()
+                    writer["immediate_error"] = str(exc)
+                    probe.rollback()
+                finally:
+                    probe.close()
+                writer_blocked.set()
+                waiter = sqlite3.connect(database, timeout=10)
+                try:
+                    waiter.execute("BEGIN IMMEDIATE")
+                    waiter.execute(
+                        """
+                        UPDATE heads
+                        SET state = ?, rail = ?, blocker = ?
+                        WHERE pr_number = ? AND is_current = 1
+                        """,
+                        ("openclaw_queued", "openclaw", None, pr),
+                    )
+                    waiter.commit()
+                    writer["committed"] = True
+                except Exception as exc:
+                    writer["error"] = str(exc)
+                    waiter.rollback()
+                finally:
+                    waiter.close()
+                    writer_committed.set()
+
+            def current_state_readonly():
+                # open_database writes migrations and cannot run under the reservation.
+                reader = sqlite3.connect(
+                    f"file:{database.as_posix()}?mode=ro", uri=True, timeout=10
+                )
+                reader.row_factory = sqlite3.Row
+                try:
+                    row = reader.execute(
+                        "SELECT state FROM heads WHERE pr_number = ? AND is_current = 1",
+                        (pr,),
+                    ).fetchone()
+                    self.assertIsNotNone(row)
+                    return row["state"]
+                finally:
+                    reader.close()
+
+            class HoldingNotifier:
+                def send(_self, channel, message):
+                    self.assertGreaterEqual(reserved_checks["count"], 2)
+                    thread = threading.Thread(target=compete)
+                    thread_holder["thread"] = thread
+                    thread.start()
+                    self.assertTrue(
+                        writer_blocked.wait(2),
+                        "second writer never attempted the reserved state mutation",
+                    )
+                    self.assertTrue(
+                        writer["immediate_locked"],
+                        "second writer reserved or committed during send",
+                    )
+                    self.assertFalse(writer_committed.is_set())
+                    self.assertEqual(current_state_readonly(), "ci_failed")
+                    sent.append((channel, message))
+
+            with patch.object(
+                userland, "queue_notifications", lambda _config, enrollment=None, authoritative=False: 0
+            ), patch.object(
+                userland, "claimed_notification_still_current", count_reserved
+            ):
+                delivered = userland.deliver_notifications(
+                    config, HoldingNotifier(), dry_run=False
+                )
+            self.assertTrue(
+                writer_committed.wait(2),
+                "second writer never committed after the reservation released",
+            )
+            thread_holder["thread"].join(2)
+            self.assertFalse(thread_holder["thread"].is_alive())
+            self.assertTrue(writer["committed"])
+            self.assertIsNone(writer["error"])
+            self.assertEqual(
+                [item["result"] for item in delivered["deliveries"]],
+                ["sent"],
+            )
+            self.assertEqual([channel for channel, _message in sent], ["openclaw_context"])
+            self.assertEqual(legacy.current(config, pr)["state"], "openclaw_queued")
+            self.assertGreaterEqual(reserved_checks["count"], 2)
+
     def test_notification_is_uncertain_before_transport_and_survives_crash(self):
         with tempfile.TemporaryDirectory() as temporary:
             config = legacy.config_fixture(Path(temporary))
@@ -4560,6 +4703,13 @@ MUTANTS = [
         "            connection.commit()\n            connection.execute(\"BEGIN IMMEDIATE\")\n            if not claimed_notification_still_current(\n                connection, row, trusted_enrollment\n            ):\n",
         "            if False and not claimed_notification_still_current(\n                connection, row, trusted_enrollment\n            ):\n",
         "AdmissionIngressTests.test_webhook_state_change_after_final_predicate_retires_stale_notification",
+    ),
+    (
+        "weaken the reserved claim/send write reservation",
+        "tools/review_conductor_userland.py",
+        "            connection.commit()\n            connection.execute(\"BEGIN IMMEDIATE\")\n            if not claimed_notification_still_current(\n                connection, row, trusted_enrollment\n            ):\n",
+        "            connection.commit()\n            connection.execute(\"BEGIN\")\n            if not claimed_notification_still_current(\n                connection, row, trusted_enrollment\n            ):\n",
+        "AdmissionIngressTests.test_reserved_send_blocks_competing_state_write_until_reservation_releases",
     ),
     (
         "retain a stale Conductor authority guard after a fail-closed route transition",
