@@ -35,9 +35,12 @@ before omitted-marker absence is treated as legitimate none. Userland
 registry document validation/loading is separate from strict
 Conductor ingress admission. Pending rows are revalidated before
 claim, and the claim/send fence binds the expected current state and
-complete canonical decision immediately before transport; event
+complete canonical decision immediately before transport under a write
+reservation that serializes the last current-decision check with send;
+event
 identity includes route, reason, and
-eligibility. Missing, partial, or legacy decision identities retire
+eligibility. A long-lived GitHub App client resets or replaces its
+admission authority guard on every route transition. Missing, partial, or legacy decision identities retire
 fail-closed; only an exact current schema, route, reason, and
 notification may deliver, and identical current decisions stay
 deduped. `human_gate=true` precedes merge-ready and silent

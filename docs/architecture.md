@@ -62,7 +62,8 @@ Enrollment and optional LegacyXapiMarker from its own stored
 base-dataclass fields; nested authority-bearing strings and IDs must
 be exact builtins, and reconstruction compares those exact base
 values. A str subclass with attacker-controlled equality cannot
-synthesize repository, ID, or legacy authority. Subclass methods or
+synthesize repository, ID, or legacy authority, including at
+`Registry.lookup`. Subclass methods or
 mutated nested values cannot synthesize Conductor, legacy, dual, or
 broken routing. The service-profile `github_app.repository` must be
 an exact admitted-scope string before omitted-marker absence is treated
@@ -81,8 +82,14 @@ pending row can retire while the current blocked decision enqueues and
 delivers once. Pending rows are revalidated against the current head
 and trusted enrollment before claim, and the claim/send fence is bound
 to the expected current state and complete canonical decision
-immediately before transport. A webhook that advances the same tuple
-between eligibility and send retires the stale row. Missing, partial, or
+immediately before transport. A write reservation serializes that
+final current-decision check with send. A webhook that advances the
+same tuple between eligibility and send, or after the unlocked
+predicate returns, retires the stale row. A long-lived GitHub App
+client resets or replaces its admission authority guard on every
+route transition so a Conductor-to-broken tick delivers the
+fail-closed alert instead of restoring it with a stale Conductor
+guard. Missing, partial, or
 legacy decision identities retire fail-closed; only an exact current
 schema, route, reason, and notification may remain eligible, and
 identical current decisions stay deduped. Caller payloads cannot grant

@@ -932,8 +932,8 @@ def run_service_tick(
         require_current_bindings(config, resolved)
     import review_conductor_userland as userland
 
+    install = getattr(client, "set_authority_guard", None)
     if route == "review_conductor" and not dry_run:
-        install = getattr(client, "set_authority_guard", None)
         assertion = getattr(client, "assert_authority", None)
         if not callable(install) or not callable(assertion):
             raise ServiceError(
@@ -954,6 +954,8 @@ def run_service_tick(
                 require_exact_current_binding(config, registry, authority)
 
         install(authority_guard)
+    elif callable(install):
+        install(None)
     return userland.run_tick(
         config, client, notifier, dry_run=dry_run, enrollment=trusted_enrollment
     )

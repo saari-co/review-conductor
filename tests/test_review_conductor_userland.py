@@ -1511,6 +1511,85 @@ def test_webhook_state_change_between_claim_and_send_retires_stale_notification(
         assert {status for _channel, status in notification_statuses(config)} == {"sent"}
 
 
+def test_webhook_state_change_after_final_predicate_retires_stale_notification() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        config = config_fixture(Path(temporary))
+        pr = 119
+        ingress(config, "pull_request", "after-predicate-pr", pr_payload(pr))
+        ingress(
+            config,
+            "workflow_run",
+            "after-predicate-ci",
+            ci_payload(pr, 2119, conclusion="failure"),
+        )
+        first = userland.deliver_notifications(config, UnavailableNotifier(), dry_run=False)
+        assert [item["result"] for item in first["deliveries"]] == [
+            "not_ready",
+            "not_ready",
+            "not_ready",
+        ]
+        original = userland.claimed_notification_still_current
+        seen = {"count": 0}
+
+        def after_predicate(connection, row, trusted_enrollment):
+            still = original(connection, row, trusted_enrollment)
+            seen["count"] += 1
+            if still and seen["count"] == 1:
+                set_head(
+                    config,
+                    pr,
+                    state="openclaw_queued",
+                    rail="openclaw",
+                    blocker=None,
+                )
+            return still
+
+        notifier = FakeNotifier()
+        userland.claimed_notification_still_current = after_predicate  # type: ignore[method-assign]
+        try:
+            raced = userland.deliver_notifications(config, notifier, dry_run=False)
+        finally:
+            userland.claimed_notification_still_current = original
+        assert seen["count"] >= 2
+        assert [item["result"] for item in raced["deliveries"]] == [
+            "retired",
+            "retired",
+            "retired",
+        ]
+        assert notifier.sent == []
+        assert notification_statuses(config) == [
+            ("discord", "retired"),
+            ("openclaw_context", "retired"),
+            ("signal", "retired"),
+        ]
+        assert current(config, pr)["state"] == "openclaw_queued"
+
+    with tempfile.TemporaryDirectory() as temporary:
+        config = config_fixture(Path(temporary))
+        pr = 120
+        ingress(config, "pull_request", "same-after-pr", pr_payload(pr))
+        ingress(
+            config,
+            "workflow_run",
+            "same-after-ci",
+            ci_payload(pr, 2120, conclusion="failure"),
+        )
+        userland.deliver_notifications(config, UnavailableNotifier(), dry_run=False)
+        notifier = FakeNotifier()
+        delivered = userland.deliver_notifications(config, notifier, dry_run=False)
+        assert [item["result"] for item in delivered["deliveries"]] == [
+            "sent",
+            "sent",
+            "sent",
+        ]
+        assert_exact_terminal_messages(notifier, concise_blocked(pr, current(config, pr)["blocker"]))
+        second = FakeNotifier()
+        again = userland.deliver_notifications(config, second, dry_run=False)
+        assert again["deliveries"] == []
+        assert second.sent == []
+        assert {status for _channel, status in notification_statuses(config)} == {"sent"}
+
+
 def test_legacy_pending_rows_without_decision_identity_do_not_duplicate_delivery() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         config = config_fixture(Path(temporary))
@@ -2518,6 +2597,7 @@ def main() -> None:
         test_pending_notifications_are_revalidated_before_send,
         test_stale_decision_identity_retires_and_new_blocked_delivers_once,
         test_webhook_state_change_between_claim_and_send_retires_stale_notification,
+        test_webhook_state_change_after_final_predicate_retires_stale_notification,
         test_legacy_pending_rows_without_decision_identity_do_not_duplicate_delivery,
         test_invalid_tuple_persisted_rows_fail_closed_without_review_dispatch,
         test_unenrolled_inconsistent_tuple_notifies_blocked_without_dispatch,

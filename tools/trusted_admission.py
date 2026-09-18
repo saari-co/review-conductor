@@ -167,17 +167,33 @@ class Registry:
 
     def lookup(self, repository, repository_id, app_id, installation_id):
         """Resolve one enrollment; every identity component must agree."""
-        if not isinstance(repository, str):
+        if type(repository) is not str:
             _fail("repository name is required")
-        match = [e for e in self.enrollments if e.repository == repository]
+        match = [
+            e
+            for e in self.enrollments
+            if type(e.repository) is str and e.repository == repository
+        ]
         if not match:
             _fail("repository is not enrolled")
         enrollment = match[0]
-        if type(repository_id) is not int or repository_id != enrollment.repository_id:
+        if (
+            type(repository_id) is not int
+            or type(enrollment.repository_id) is not int
+            or repository_id != enrollment.repository_id
+        ):
             _fail("repository numeric identity does not match enrollment")
-        if type(app_id) is not int or app_id != enrollment.app_id:
+        if (
+            type(app_id) is not int
+            or type(enrollment.app_id) is not int
+            or app_id != enrollment.app_id
+        ):
             _fail("GitHub App does not match enrollment")
-        if type(installation_id) is not int or installation_id != enrollment.installation_id:
+        if (
+            type(installation_id) is not int
+            or type(enrollment.installation_id) is not int
+            or installation_id != enrollment.installation_id
+        ):
             _fail("installation does not match enrollment")
         return enrollment
 

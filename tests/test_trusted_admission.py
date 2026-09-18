@@ -214,6 +214,39 @@ class RegistryTests(unittest.TestCase):
             with self.subTest(args=args), self.assertRaises(ta.AdmissionError):
                 registry.lookup(*args)
 
+    def test_lookup_rejects_hostile_str_subclass(self):
+        class AlwaysEqual(str):
+            def __eq__(self, other):
+                return True
+
+            def __hash__(self):
+                return str.__hash__(self)
+
+        class AlwaysEqualInt(int):
+            def __eq__(self, other):
+                return True
+
+            def __hash__(self):
+                return int.__hash__(self)
+
+        registry = self.fx.registry()
+        enrolled = registry.lookup(BLOCKS, 1306882611, BLOCKS_APP, BLOCKS_INSTALL)
+        self.assertIs(type(enrolled.repository), str)
+        for repository in (AlwaysEqual("attacker/unrelated"), AlwaysEqual(BLOCKS)):
+            with self.subTest(repository=str(repository)), self.assertRaises(ta.AdmissionError):
+                registry.lookup(repository, 1306882611, BLOCKS_APP, BLOCKS_INSTALL)
+        for args in [
+            (BLOCKS, AlwaysEqualInt(1306882611), BLOCKS_APP, BLOCKS_INSTALL),
+            (BLOCKS, 1306882611, AlwaysEqualInt(BLOCKS_APP), BLOCKS_INSTALL),
+            (BLOCKS, 1306882611, BLOCKS_APP, AlwaysEqualInt(BLOCKS_INSTALL)),
+        ]:
+            with self.subTest(args=args), self.assertRaises(ta.AdmissionError):
+                registry.lookup(*args)
+        self.assertEqual(
+            registry.lookup(BLOCKS, 1306882611, BLOCKS_APP, BLOCKS_INSTALL).repository,
+            BLOCKS,
+        )
+
 
 class PolicyLoadingTests(unittest.TestCase):
     def setUp(self):

@@ -1191,6 +1191,100 @@ class AdmissionIngressTests(unittest.TestCase):
             )
         self.assertIn("install and assert", str(ctx.exception))
 
+    def test_same_client_conductor_to_broken_delivers_fail_closed_alert(self):
+        self.fx.ingest("initial", self.fx.payload())
+        config = {
+            **self.fx.app_config(),
+            "enrollment": {"enabled": True, "blockers": []},
+            "paths": {
+                **self.fx.app_config()["paths"],
+                "blocks_checkout": str(self.fx.root / "checkout"),
+            },
+            "worker": {"max_actions_per_wake": 5, "claim_lease_seconds": 60},
+        }
+        (self.fx.root / "checkout").mkdir()
+        client = runtime.GitHubAppClient(
+            self.fx.app_config(),
+            "fixture-private-key",
+            transport=lambda *_: (500, b""),
+            signer=lambda *_: "fixture-jwt",
+        )
+        skipped_worker = {
+            "schema": "smoky.review-conductor.worker-wake.v1",
+            "result": "skipped",
+            "recovered": [],
+            "actions": [],
+            "failed_actions": [],
+            "github_ci_polled": False,
+            "merge_dispatched": False,
+        }
+        skipped_bridge = {
+            "schema": "smoky.review-conductor.bridge-drain.v1",
+            "result": "skipped",
+            "artifacts": [],
+        }
+        skipped_projection = {
+            "schema": "smoky.review-conductor.projection.v1",
+            "result": "skipped",
+            "projected": [],
+            "merge_authorized": False,
+        }
+        conductor = self.fx.registry()
+        broken = self._load_route_registry(app_id=APP_ID + 1)
+        first = legacy.FakeNotifier()
+        with patch.object(userland, "hydrate_pending_openclaw_heads", lambda *a, **k: []), patch.object(
+            runtime, "drain_actions", lambda *a, **k: skipped_worker
+        ), patch.object(
+            runtime, "drain_bridge_inboxes", lambda *a, **k: skipped_bridge
+        ), patch.object(
+            userland, "collect_openclaw_terminals", lambda *a, **k: []
+        ), patch.object(
+            userland, "collect_clawsweeper_terminals", lambda *a, **k: []
+        ), patch.object(
+            runtime, "reconcile_projection", lambda *a, **k: skipped_projection
+        ):
+            silent = service.run_service_tick(
+                config, conductor, client, first, dry_run=False
+            )
+        self.assertIsNotNone(client._authority_guard)
+        self.assertEqual(first.sent, [])
+        self.assertEqual(silent["notifications"]["deliveries"], [])
+        second = legacy.FakeNotifier()
+        with patch.object(userland, "hydrate_pending_openclaw_heads", lambda *a, **k: []), patch.object(
+            runtime, "drain_actions", lambda *a, **k: skipped_worker
+        ), patch.object(
+            runtime, "drain_bridge_inboxes", lambda *a, **k: skipped_bridge
+        ), patch.object(
+            userland, "collect_openclaw_terminals", lambda *a, **k: []
+        ), patch.object(
+            userland, "collect_clawsweeper_terminals", lambda *a, **k: []
+        ), patch.object(
+            runtime, "reconcile_projection", lambda *a, **k: skipped_projection
+        ):
+            blocked = service.run_service_tick(
+                config, broken, client, second, dry_run=False
+            )
+        self.assertIsNone(client._authority_guard)
+        self.assertEqual(
+            [item["result"] for item in blocked["notifications"]["deliveries"]],
+            ["sent", "sent", "sent"],
+        )
+        self.assertEqual(len(second.sent), 3)
+        self.assertTrue(
+            all("blocked" in message and "ambiguous or broken enrollment" in message for _channel, message in second.sent)
+        )
+        connection = core.open_database(self.fx.state, REPOSITORY)
+        try:
+            statuses = [
+                row["status"]
+                for row in connection.execute(
+                    "SELECT status FROM notification_deliveries ORDER BY channel"
+                )
+            ]
+        finally:
+            connection.close()
+        self.assertEqual(statuses, ["sent", "sent", "sent"])
+
     def test_tuple_guard_rejects_superseded_work_under_a_new_valid_binding(self):
         self.fx.ingest("initial", self.fx.payload())
         connection = core.open_database(self.fx.state, REPOSITORY)
@@ -2103,6 +2197,39 @@ class AdmissionIngressTests(unittest.TestCase):
             {"review_conductor": "broken", "legacy_xapi": "broken"},
         )
 
+    def test_lookup_rejects_hostile_str_subclass(self):
+        class AlwaysEqual(str):
+            def __eq__(self, other):
+                return True
+
+            def __hash__(self):
+                return str.__hash__(self)
+
+        class AlwaysEqualInt(int):
+            def __eq__(self, other):
+                return True
+
+            def __hash__(self):
+                return int.__hash__(self)
+
+        registry = self._load_route_registry()
+        enrolled = registry.lookup(REPOSITORY, REPOSITORY_ID, APP_ID, INSTALLATION_ID)
+        self.assertIs(type(enrolled.repository), str)
+        for repository in (AlwaysEqual("attacker/unrelated"), AlwaysEqual(REPOSITORY)):
+            with self.subTest(repository=str(repository)), self.assertRaises(admission.AdmissionError):
+                registry.lookup(repository, REPOSITORY_ID, APP_ID, INSTALLATION_ID)
+        for args in (
+            (REPOSITORY, AlwaysEqualInt(REPOSITORY_ID), APP_ID, INSTALLATION_ID),
+            (REPOSITORY, REPOSITORY_ID, AlwaysEqualInt(APP_ID), INSTALLATION_ID),
+            (REPOSITORY, REPOSITORY_ID, APP_ID, AlwaysEqualInt(INSTALLATION_ID)),
+        ):
+            with self.subTest(args=args), self.assertRaises(admission.AdmissionError):
+                registry.lookup(*args)
+        self.assertEqual(
+            registry.lookup(REPOSITORY, REPOSITORY_ID, APP_ID, INSTALLATION_ID).repository,
+            REPOSITORY,
+        )
+
     def test_malformed_service_profile_repository_is_broken_not_unenrolled(self):
         empty = self._load_route_registry(enroll=False)
         self.assertEqual(
@@ -2675,6 +2802,79 @@ class AdmissionIngressTests(unittest.TestCase):
             )
             self.assertEqual(duplicate.sent, [])
 
+    def test_webhook_state_change_after_final_predicate_retires_stale_notification(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = legacy.config_fixture(Path(temporary))
+            pr = 221
+            legacy.ingress(config, "pull_request", "after-pred-pr", legacy.pr_payload(pr))
+            legacy.ingress(
+                config,
+                "workflow_run",
+                "after-pred-ci",
+                legacy.ci_payload(pr, 2221, conclusion="failure"),
+            )
+            first = userland.deliver_notifications(
+                config, legacy.UnavailableNotifier(), dry_run=False
+            )
+            self.assertEqual(
+                [item["result"] for item in first["deliveries"]],
+                ["not_ready", "not_ready", "not_ready"],
+            )
+            original = userland.claimed_notification_still_current
+            seen = {"count": 0}
+
+            def after_predicate(connection, row, trusted_enrollment):
+                still = original(connection, row, trusted_enrollment)
+                seen["count"] += 1
+                if still and seen["count"] == 1:
+                    legacy.set_head(
+                        config,
+                        pr,
+                        state="openclaw_queued",
+                        rail="openclaw",
+                        blocker=None,
+                    )
+                return still
+
+            notifier = legacy.FakeNotifier()
+            with patch.object(
+                userland, "claimed_notification_still_current", after_predicate
+            ):
+                raced = userland.deliver_notifications(config, notifier, dry_run=False)
+            self.assertGreaterEqual(seen["count"], 2)
+            self.assertEqual(
+                [item["result"] for item in raced["deliveries"]],
+                ["retired", "retired", "retired"],
+            )
+            self.assertEqual(notifier.sent, [])
+            self.assertEqual(legacy.current(config, pr)["state"], "openclaw_queued")
+
+        with tempfile.TemporaryDirectory() as same_root:
+            same_config = legacy.config_fixture(Path(same_root))
+            same_pr = 222
+            legacy.ingress(same_config, "pull_request", "same-after-pr", legacy.pr_payload(same_pr))
+            legacy.ingress(
+                same_config,
+                "workflow_run",
+                "same-after-ci",
+                legacy.ci_payload(same_pr, 2222, conclusion="failure"),
+            )
+            userland.deliver_notifications(
+                same_config, legacy.UnavailableNotifier(), dry_run=False
+            )
+            sent = legacy.FakeNotifier()
+            delivered = userland.deliver_notifications(same_config, sent, dry_run=False)
+            self.assertEqual(
+                [item["result"] for item in delivered["deliveries"]],
+                ["sent", "sent", "sent"],
+            )
+            duplicate = legacy.FakeNotifier()
+            self.assertEqual(
+                userland.deliver_notifications(same_config, duplicate, dry_run=False)["deliveries"],
+                [],
+            )
+            self.assertEqual(duplicate.sent, [])
+
     def test_notification_is_uncertain_before_transport_and_survives_crash(self):
         with tempfile.TemporaryDirectory() as temporary:
             config = legacy.config_fixture(Path(temporary))
@@ -2683,7 +2883,11 @@ class AdmissionIngressTests(unittest.TestCase):
 
             class CrashingNotifier:
                 def send(_self, channel, _message):
-                    connection = core.open_database(Path(config["paths"]["state_root"]))
+                    database = Path(config["paths"]["state_root"]) / "review-conductor.sqlite3"
+                    connection = sqlite3.connect(
+                        f"file:{database.as_posix()}?mode=ro", uri=True, timeout=10
+                    )
+                    connection.row_factory = sqlite3.Row
                     try:
                         row = connection.execute(
                             """
@@ -4339,9 +4543,30 @@ MUTANTS = [
     (
         "skip the claim/send notification fence",
         "tools/review_conductor_userland.py",
-        "            if not claimed_notification_still_current(\n                connection, row, trusted_enrollment\n            ):\n",
+        "            # Bind the claim/send fence to the expected current state and\n            # complete canonical decision immediately before transport.\n            if not claimed_notification_still_current(\n                connection, row, trusted_enrollment\n            ):\n                if retire_notification(\n                    connection, row, required_status=\"uncertain\"\n                ):\n                    connection.commit()\n                    outcomes.append(\n                        {\n                            \"event_key\": row[\"event_key\"],\n                            \"channel\": row[\"channel\"],\n                            \"result\": \"retired\",\n                        }\n                    )\n                else:\n                    connection.rollback()\n                continue\n            # The uncertain claim is already committed. Reserve writes across\n            # the last current-decision check and transport so a webhook\n            # cannot commit a new state in that gap. A transition visible\n            # after the unlocked predicate retires under this reservation.\n            connection.commit()\n            connection.execute(\"BEGIN IMMEDIATE\")\n            if not claimed_notification_still_current(\n                connection, row, trusted_enrollment\n            ):\n",
         "            if False and not claimed_notification_still_current(\n                connection, row, trusted_enrollment\n            ):\n",
         "AdmissionIngressTests.test_webhook_state_change_between_eligibility_and_send_retires_stale_notification",
+    ),
+    (
+        "admit hostile str subclasses at Registry.lookup",
+        "tools/trusted_admission.py",
+        "        if type(repository) is not str:\n            _fail(\"repository name is required\")\n",
+        "        if not isinstance(repository, str):\n            _fail(\"repository name is required\")\n",
+        "AdmissionIngressTests.test_lookup_rejects_hostile_str_subclass",
+    ),
+    (
+        "skip the reserved claim/send revalidation",
+        "tools/review_conductor_userland.py",
+        "            connection.commit()\n            connection.execute(\"BEGIN IMMEDIATE\")\n            if not claimed_notification_still_current(\n                connection, row, trusted_enrollment\n            ):\n",
+        "            if False and not claimed_notification_still_current(\n                connection, row, trusted_enrollment\n            ):\n",
+        "AdmissionIngressTests.test_webhook_state_change_after_final_predicate_retires_stale_notification",
+    ),
+    (
+        "retain a stale Conductor authority guard after a fail-closed route transition",
+        "tools/service_runtime.py",
+        "    elif callable(install):\n        install(None)\n",
+        "",
+        "AdmissionIngressTests.test_same_client_conductor_to_broken_delivers_fail_closed_alert",
     ),
 ]
 

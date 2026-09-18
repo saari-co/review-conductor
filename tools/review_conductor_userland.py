@@ -2250,8 +2250,10 @@ def claimed_notification_still_current(
     """Revalidate a claimed row against the current state and complete decision.
 
     The claim/send fence binds the expected head state and canonical
-    orchestration identity immediately before transport. A webhook that
-    advances the same tuple after eligibility must retire the stale row.
+    orchestration identity immediately before transport. A write
+    reservation then serializes the last current-decision check with
+    send so a webhook that advances the same tuple after this predicate
+    retires the stale row.
     """
     return pending_review_notification_still_eligible(
         connection, row, trusted_enrollment
@@ -2505,6 +2507,29 @@ def deliver_notifications(
                 raise
             # Bind the claim/send fence to the expected current state and
             # complete canonical decision immediately before transport.
+            if not claimed_notification_still_current(
+                connection, row, trusted_enrollment
+            ):
+                if retire_notification(
+                    connection, row, required_status="uncertain"
+                ):
+                    connection.commit()
+                    outcomes.append(
+                        {
+                            "event_key": row["event_key"],
+                            "channel": row["channel"],
+                            "result": "retired",
+                        }
+                    )
+                else:
+                    connection.rollback()
+                continue
+            # The uncertain claim is already committed. Reserve writes across
+            # the last current-decision check and transport so a webhook
+            # cannot commit a new state in that gap. A transition visible
+            # after the unlocked predicate retires under this reservation.
+            connection.commit()
+            connection.execute("BEGIN IMMEDIATE")
             if not claimed_notification_still_current(
                 connection, row, trusted_enrollment
             ):

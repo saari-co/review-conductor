@@ -106,8 +106,12 @@ loads and validates the external registry document without applying
 `require_profile_enrolled`; webhook ingress remains strict while the
 production worker can represent Conductor, legacy-only, none, dual,
 and broken routes. Pending notification claim/send is bound to the
-expected current state and complete canonical decision, so a webhook
-transition between eligibility and send retires the stale row.
+expected current state and complete canonical decision under a write
+reservation, so a webhook transition between eligibility and send, or
+after the unlocked predicate returns, retires the stale row. A
+long-lived GitHub App client resets or replaces its admission
+authority guard on every route transition so a Conductor-to-broken
+tick delivers the fail-closed alert.
 Impossible state/rail/result tuples, including mismatched rails,
 fail closed before enrollment-route short-circuits, dispatch, or
 notification eligibility. Unknown/result/tuple coherence is validated

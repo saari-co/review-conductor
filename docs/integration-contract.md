@@ -45,7 +45,8 @@ fields and each nested Enrollment and optional LegacyXapiMarker from
 its own stored base-dataclass fields. Nested authority-bearing
 strings and IDs must be exact builtins; reconstruction compares those
 exact base values so a str subclass cannot synthesize repository, ID,
-or legacy authority. The service-profile repository
+or legacy authority. `Registry.lookup` also requires those exact
+builtin types at the lookup boundary. The service-profile repository
 must be an exact admitted-scope string before omitted-marker absence
 is treated as legitimate none. External registry document
 validation/loading is separate from strict Conductor ingress

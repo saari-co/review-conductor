@@ -94,7 +94,10 @@ Rules enforced by `load_registry`:
 
 `Registry.lookup(repository, repository_id, app_id, installation_id)` succeeds
 only when all four agree with one enrollment; strings, booleans or a neighbouring
-enrollment's values fail.
+enrollment's values fail. The lookup boundary requires exact built-in
+strings and integers on the caller and stored enrollment fields. A
+`str` subclass whose `__eq__` always returns true cannot look up a
+real enrollment.
 
 ## Approved base-policy loading
 
