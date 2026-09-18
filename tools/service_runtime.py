@@ -11,6 +11,7 @@ import hashlib
 import json
 import sqlite3
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Union
 
@@ -105,20 +106,78 @@ def _staged_reader(enrolled: admission.Enrollment, staged: bytes) -> PolicyReade
 
     return read
 PolicyReader = Callable[[str, str], bytes]
-RegistrySource = Union[admission.Registry, Callable[[], admission.Registry]]
 
 
 class ServiceError(core.ContractError):
     """A service-owned identity, enrollment or policy boundary failed closed."""
 
 
-def resolve_registry(source: RegistrySource) -> admission.Registry:
-    """Return the current validated registry; a provider re-reads it every time.
+class RegistryRouteLease:
+    """Versioned cooperative registry/route lease for the send boundary.
 
-    Passing a provider means promotion or revocation in the service-owned registry
-    is observed by the next delivery or worker tick without a restart, and a
-    registry that stops validating fails every delivery and tick closed.
+    Supported replacements go through ``replace`` and fail closed while any
+    send hold is active. ``current`` re-reads the wrapped source unless a
+    send hold has pinned that generation. This contract does not claim a
+    guarantee against arbitrary nonconforming OS-level registry writes.
     """
+
+    schema = "review-conductor.registry-route-lease.v1"
+
+    def __init__(self, source: "RegistrySource") -> None:
+        if isinstance(source, RegistryRouteLease):
+            raise ServiceError("registry route lease cannot wrap another lease")
+        self._lock = threading.Lock()
+        self._source = source
+        self._generation = 0
+        self._holds = 0
+        self._pinned: admission.Registry | None = None
+
+    def generation(self) -> int:
+        with self._lock:
+            return self._generation
+
+    def current(self) -> admission.Registry:
+        with self._lock:
+            if self._holds:
+                if self._pinned is None:
+                    raise ServiceError("registry send lease is missing its pinned registry")
+                return self._pinned
+            return _resolve_registry_source(self._source)
+
+    def replace(self, registry: admission.Registry) -> int:
+        if type(registry) is not admission.Registry:
+            raise ServiceError("supported registry replacement requires a validated registry")
+        with self._lock:
+            if self._holds:
+                raise ServiceError(
+                    "supported registry replacement is blocked while a send lease is held"
+                )
+            self._source = registry
+            self._generation += 1
+            return self._generation
+
+    @contextmanager
+    def hold_send(self):
+        with self._lock:
+            pinned = _resolve_registry_source(self._source)
+            self._holds += 1
+            if self._holds == 1:
+                self._pinned = pinned
+        try:
+            yield pinned
+        finally:
+            with self._lock:
+                self._holds -= 1
+                if self._holds == 0:
+                    self._pinned = None
+
+
+RegistrySource = Union[admission.Registry, Callable[[], admission.Registry], RegistryRouteLease]
+
+
+def _resolve_registry_source(source: RegistrySource) -> admission.Registry:
+    if isinstance(source, RegistryRouteLease):
+        raise ServiceError("registry route lease cannot wrap another lease")
     if isinstance(source, admission.Registry):
         return source
     if not callable(source):
@@ -127,6 +186,20 @@ def resolve_registry(source: RegistrySource) -> admission.Registry:
     if not isinstance(value, admission.Registry):
         raise ServiceError("service registry provider did not return a validated registry")
     return value
+
+
+def resolve_registry(source: RegistrySource) -> admission.Registry:
+    """Return the current validated registry; a provider re-reads it every time.
+
+    Passing a provider means promotion or revocation in the service-owned registry
+    is observed by the next delivery or worker tick without a restart, and a
+    registry that stops validating fails every delivery and tick closed. A
+    ``RegistryRouteLease`` returns its pinned generation while a send hold is
+    active and otherwise re-reads the wrapped source.
+    """
+    if isinstance(source, RegistryRouteLease):
+        return source.current()
+    return _resolve_registry_source(source)
 
 
 def _strict_payload(body: bytes) -> dict[str, Any]:
@@ -926,9 +999,11 @@ def run_service_tick(
     into ``run_tick``; userland activation flags do not select the route.
     Every live route keeps a freshness guard that re-resolves and compares
     that pair; exact binding checks remain Conductor-only. Send eligibility
-    revalidates the current pair at the reserved claim/send boundary.
+    revalidates the current pair at the reserved claim/send boundary under
+    a versioned registry/route lease held through ``notifier.send``.
     """
-    resolved = resolve_registry(registry)
+    lease = registry if isinstance(registry, RegistryRouteLease) else RegistryRouteLease(registry)
+    resolved = lease.current()
     trusted_enrollment = trusted_enrollment_from_registry(config, resolved)
     route, _reason = orchestration.enrollment_route(trusted_enrollment)
     if route == "review_conductor":
@@ -936,7 +1011,7 @@ def run_service_tick(
     import review_conductor_userland as userland
 
     def current_trusted_enrollment() -> dict[str, str]:
-        return trusted_enrollment_from_registry(config, resolve_registry(registry))
+        return trusted_enrollment_from_registry(config, lease.current())
 
     def ensure_current_trusted_enrollment() -> dict[str, str]:
         current = current_trusted_enrollment()
@@ -961,7 +1036,7 @@ def run_service_tick(
             # supplies an exact tuple and must still own that tuple here.
             # Re-resolve first so a route change is observed for every live
             # route; exact binding checks stay Conductor-only.
-            current_registry = resolve_registry(registry)
+            current_registry = lease.current()
             current = trusted_enrollment_from_registry(config, current_registry)
             if current != trusted_enrollment:
                 raise ServiceError("trusted enrollment changed before side effect")
@@ -988,4 +1063,5 @@ def run_service_tick(
         dry_run=dry_run,
         enrollment=trusted_enrollment,
         enrollment_resolver=current_trusted_enrollment,
+        registry_lease=lease,
     )

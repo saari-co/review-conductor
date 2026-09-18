@@ -87,7 +87,12 @@ an enrollment-route change, or a missing/partial/legacy decision
 identity retires them. Claim/send re-resolves the current trusted
 enrollment/route at the reserved final boundary so a registry or
 config route change after admission/snapshot retires rather than
-sending obsolete blocked/ready copy. Public enum-like inputs require
+sending obsolete blocked/ready copy. The reserved send boundary holds
+a versioned service-owned registry/route lease through `notifier.send`
+so a cooperating replacement cannot occur between final validation
+and transport; the supported replace/lease contract fail-closes while
+that hold is active and does not claim a guarantee against arbitrary
+OS-level writes. Public enum-like inputs require
 exact builtin strings and raise `OrchestrationError` instead of
 `TypeError`; persisted readiness/quality flags accept only integer
 `0`/`1` and otherwise fail closed through unknown rail results. Only
@@ -115,7 +120,10 @@ and broken routes. Pending notification claim/send is bound to the
 expected current state, live trusted enrollment/route, and complete
 canonical decision under a write reservation, so a webhook transition
 between eligibility and send, or after the unlocked predicate
-returns, retires the stale row. A long-lived GitHub App client keeps
+returns, retires the stale row. That reservation also holds the
+versioned registry/route lease through transport so a cooperating
+registry replacement cannot change the route between final validation
+and send. A long-lived GitHub App client keeps
 a route-freshness guard on every live route and adds exact binding
 checks only for Conductor, so a Conductor-to-broken tick delivers the
 fail-closed alert.

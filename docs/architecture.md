@@ -88,6 +88,12 @@ webhook that advances the same tuple between eligibility and send, or
 after the unlocked predicate returns, retires the stale row. A route
 change between service admission/snapshot and delivery retires the
 stale notification rather than sending obsolete blocked/ready copy.
+The reserved send boundary also holds a versioned service-owned
+registry/route lease through `notifier.send`, so a cooperating
+registry replacement cannot occur between final validation and
+transport. The supported replace/lease contract fail-closes while
+that hold is active. This is not a guarantee against arbitrary
+nonconforming OS-level writes.
 Public enum-like inputs require exact builtin strings before
 membership checks and raise `OrchestrationError` for unhashable or
 subclass tokens; persisted readiness/quality flags accept only stored

@@ -2255,11 +2255,28 @@ def claimed_notification_still_current(
     before transport. A write reservation then serializes the last
     current-decision check with send so a webhook that advances the
     same tuple, or a route change visible after this predicate, retires
-    the stale row.
+    the stale row. A service-owned registry/route lease, when supplied,
+    is held through ``notifier.send`` so a cooperating replacement
+    cannot change that route between this check and transport.
     """
     return pending_review_notification_still_eligible(
         connection, row, trusted_enrollment
     )
+
+
+def hold_registry_send_lease(registry_lease: Any):
+    """Hold a cooperating registry/route lease through notifier.send.
+
+    The supported versioned replacement contract fail-closes while this
+    hold is active. Absence of a lease preserves the userland path.
+    This is not a guarantee against arbitrary OS-level registry writes.
+    """
+    if registry_lease is None:
+        return contextlib.nullcontext()
+    hold = getattr(registry_lease, "hold_send", None)
+    if not callable(hold):
+        raise UserlandError("registry send lease is invalid")
+    return hold()
 
 
 def retire_notification(
@@ -2413,6 +2430,7 @@ def deliver_notifications(
     authority_client: Any | None = None,
     authoritative: bool = False,
     enrollment_resolver: Any | None = None,
+    registry_lease: Any | None = None,
 ) -> dict[str, Any]:
     trusted_enrollment = orchestration.effective_trusted_enrollment(
         config, enrollment, authoritative=authoritative
@@ -2541,61 +2559,64 @@ def deliver_notifications(
             # the last current-decision check and transport so a webhook
             # cannot commit a new state in that gap. A transition visible
             # after the unlocked predicate retires under this reservation.
+            # Hold the cooperating registry/route lease through send so a
+            # supported replacement cannot change the route in that window.
             connection.commit()
             connection.execute("BEGIN IMMEDIATE")
-            if not claimed_notification_still_current(
-                connection, row, live_trusted_enrollment()
-            ):
-                if retire_notification(
-                    connection, row, required_status="uncertain"
+            with hold_registry_send_lease(registry_lease):
+                if not claimed_notification_still_current(
+                    connection, row, live_trusted_enrollment()
                 ):
-                    connection.commit()
-                    outcomes.append(
-                        {
-                            "event_key": row["event_key"],
-                            "channel": row["channel"],
-                            "result": "retired",
-                        }
+                    if retire_notification(
+                        connection, row, required_status="uncertain"
+                    ):
+                        connection.commit()
+                        outcomes.append(
+                            {
+                                "event_key": row["event_key"],
+                                "channel": row["channel"],
+                                "result": "retired",
+                            }
+                        )
+                    else:
+                        connection.rollback()
+                    continue
+                try:
+                    notifier.send(row["channel"], payload["message"])
+                except NotificationUnavailable as exc:
+                    connection.execute(
+                        """
+                        UPDATE notification_deliveries
+                        SET status = 'pending', last_error = ?, updated_at = ?
+                        WHERE event_key = ? AND channel = ? AND status = 'uncertain'
+                        """,
+                        (str(exc)[:300], core.utc_now(), row["event_key"], row["channel"]),
                     )
-                else:
-                    connection.rollback()
-                continue
-            try:
-                notifier.send(row["channel"], payload["message"])
-            except NotificationUnavailable as exc:
+                    connection.commit()
+                    outcomes.append({"event_key": row["event_key"], "channel": row["channel"], "result": "not_ready"})
+                    continue
+                except core.ContractError as exc:
+                    connection.execute(
+                        """
+                        UPDATE notification_deliveries
+                        SET last_error = ?, updated_at = ?
+                        WHERE event_key = ? AND channel = ? AND status = 'uncertain'
+                        """,
+                        (str(exc)[:300], core.utc_now(), row["event_key"], row["channel"]),
+                    )
+                    connection.commit()
+                    outcomes.append({"event_key": row["event_key"], "channel": row["channel"], "result": "uncertain"})
+                    continue
                 connection.execute(
                     """
                     UPDATE notification_deliveries
-                    SET status = 'pending', last_error = ?, updated_at = ?
+                    SET status = 'sent', last_error = NULL, updated_at = ?
                     WHERE event_key = ? AND channel = ? AND status = 'uncertain'
                     """,
-                    (str(exc)[:300], core.utc_now(), row["event_key"], row["channel"]),
+                    (core.utc_now(), row["event_key"], row["channel"]),
                 )
                 connection.commit()
-                outcomes.append({"event_key": row["event_key"], "channel": row["channel"], "result": "not_ready"})
-                continue
-            except core.ContractError as exc:
-                connection.execute(
-                    """
-                    UPDATE notification_deliveries
-                    SET last_error = ?, updated_at = ?
-                    WHERE event_key = ? AND channel = ? AND status = 'uncertain'
-                    """,
-                    (str(exc)[:300], core.utc_now(), row["event_key"], row["channel"]),
-                )
-                connection.commit()
-                outcomes.append({"event_key": row["event_key"], "channel": row["channel"], "result": "uncertain"})
-                continue
-            connection.execute(
-                """
-                UPDATE notification_deliveries
-                SET status = 'sent', last_error = NULL, updated_at = ?
-                WHERE event_key = ? AND channel = ? AND status = 'uncertain'
-                """,
-                (core.utc_now(), row["event_key"], row["channel"]),
-            )
-            connection.commit()
-            outcomes.append({"event_key": row["event_key"], "channel": row["channel"], "result": "sent"})
+                outcomes.append({"event_key": row["event_key"], "channel": row["channel"], "result": "sent"})
         return {
             "schema": "smoky.review-conductor.notifications.v1",
             "result": "planned" if dry_run else "processed",
@@ -2614,6 +2635,7 @@ def run_tick(
     dry_run: bool,
     enrollment: Mapping[str, str] | None = None,
     enrollment_resolver: Any | None = None,
+    registry_lease: Any | None = None,
 ) -> dict[str, Any]:
     profiles.require_enabled(config)
     if enrollment is None:
@@ -2656,6 +2678,7 @@ def run_tick(
         authority_client=client,
         authoritative=True,
         enrollment_resolver=enrollment_resolver,
+        registry_lease=registry_lease,
     )
     return {
         "schema": "smoky.review-conductor.userland-tick.v1",
