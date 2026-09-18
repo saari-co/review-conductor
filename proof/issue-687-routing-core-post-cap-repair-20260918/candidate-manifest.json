@@ -1,0 +1,17 @@
+{
+  "schema": "review-conductor.candidate-manifest.v1",
+  "base_sha": "b16e0c8bc3f32e997db31caa173b846b0e9041ce",
+  "starting_head_sha": "2e40ffd1c8adb3062cb5af64f7a8ccaf5cab7ee5",
+  "captured_date": "2026-09-18",
+  "binding_scheme": "A commit cannot contain its own SHA. base_sha is the frozen origin/main integration base. starting_head_sha is the verified PR #18 core head this ordinary post-cap repair starts from. Per-file sha256 values are of this repaired-core candidate source. The branch head after commit is the exact candidate SHA for hosted CI. The merge-forward packet remains the explanation of integrating exact main b16e0c8; this packet does not embed a receipt commit's own SHA. Live notification/delivery/runtime entry functions remain deferred to the stacked adapter. The 2/2 ledger is not reset. No Copilot, OpenClaw, or ClawSweeper review is requested from this packet.",
+  "files": {
+    "docs/architecture.md": "fdea04106f007baf60a702fa24c658aba3fa4e872c5babee1931f906dd9afd2b",
+    "docs/migration.md": "86996bbfb5626f9a9cd0cb2115fe020893893bc3cf9a5495f1217f0e5b49a295",
+    "docs/orchestration-decision-map.md": "d98a40f26c32dc88a0125a8339af21c6af26fbb51bccc72b3b932298c31b2284",
+    "proof/issue-687-routing-core-merge-forward-20260918/PROOF.md": "86022aec88b6cb4231dbb7d9ecb3e916407452a2f37e41b386b03a55edcb8d7d",
+    "proof/issue-687-routing-core-merge-forward-20260918/candidate-manifest.json": "2d95fe3b896bd6dba4845ee3a703a6ab7069c3abc3ec4569a15a3d1963b1ea12",
+    "proof/issue-687-routing-core-post-cap-repair-20260918/PROOF.md": "33dfb0d8303f2e253d4f878a1e0e8e0ef19425870b804cd4de32ed5b54fcc27a",
+    "tests/test_orchestration_outcome.py": "747f511aae153ad06e09bdf03d0af444f2578bbaecc24e281cfc559c5de59920",
+    "tools/orchestration_outcome.py": "f26f42702e06dd27947aff07bbdd3c09473b264e08bbd640b1f2b3fdac1bec90"
+  }
+}

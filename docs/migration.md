@@ -110,6 +110,11 @@ validation and maps inconsistent stored rows to typed unknown results
 so a malformed current row can remain eligible as blocked. Delivering
 one concise blocked notification for every malformed persisted
 rail/state token is stacked adapter work. `human_gate=true` precedes merge-ready and silent nonterminal dispatch.
+`openclaw_clean_draft` keeps `clawsweeper_eligible` false.
+`ready_for_human_merge` accepts no dispositions or only `defer` /
+`reject_false_positive`; `required_fix` or `human_gate` dispositions on
+that state fail closed to the blocked path instead of becoming
+merge-ready.
 `repair_cycle` is the
 saturating ledger for the first two broad automatic rounds: cycle 2 still
 allows a scoped `required_fix` route, head change, and exact-head rerun
