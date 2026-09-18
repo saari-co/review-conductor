@@ -37,6 +37,7 @@ RAILS = frozenset({"openclaw", "clawsweeper"})
 DISPOSITIONS = frozenset(
     {"required_fix", "defer", "reject_false_positive", "human_gate"}
 )
+READY_COMPATIBLE_DISPOSITIONS = frozenset({"defer", "reject_false_positive"})
 KNOWN_STATES = frozenset(
     {
         "ci_running",
@@ -149,6 +150,13 @@ def _dispositions(value: Any) -> tuple[str, ...] | None:
             _fail("adjudication dispositions must be unique")
         seen.append(item)
     return tuple(seen)
+
+
+def _ready_compatible_dispositions(dispositions: tuple[str, ...] | None) -> bool:
+    """Ready state may carry no dispositions or only defer/reject_false_positive."""
+    if dispositions is None:
+        return True
+    return set(dispositions) <= READY_COMPATIBLE_DISPOSITIONS
 
 
 def enrollment_route(enrollment: Mapping[str, str]) -> tuple[str, str]:
@@ -423,9 +431,15 @@ def decide_orchestration_outcome(raw: Any) -> dict[str, Any]:
             repair=repair,
             reason="human_action_required",
         )
+    if state == "ready_for_human_merge" and not _ready_compatible_dispositions(
+        dispositions
+    ):
+        return _fail_closed_blocked(repair, "inconsistent_ready_disposition_fail_closed")
 
     clawsweeper_eligible = openclaw_result not in {"absent"}
     if openclaw_result in BLOCKING_OPENCLAW:
+        clawsweeper_eligible = False
+    if state == "openclaw_clean_draft":
         clawsweeper_eligible = False
     merge_ready_eligible = (
         clawsweeper_eligible

@@ -134,6 +134,11 @@ after closed-state handling and before unenrolled or legacy
 short-circuits. The persisted-row adapter applies the same rail-aware
 validation and maps inconsistent stored rows to typed unknown results
 so the queue can notify blocked once. `human_gate=true` precedes merge-ready and silent nonterminal dispatch.
+`openclaw_clean_draft` keeps `clawsweeper_eligible` false.
+`ready_for_human_merge` accepts no dispositions or only `defer` /
+`reject_false_positive`; `required_fix` or `human_gate` dispositions on
+that state fail closed to the blocked path instead of becoming
+merge-ready.
 Notification event identity includes complete canonical schema, kind,
 channels, and decision identity so a retired key cannot suppress the
 current notification. Retry-attempt changes revalidate that complete

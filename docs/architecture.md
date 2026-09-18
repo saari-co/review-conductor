@@ -129,10 +129,17 @@ repair rounds. At ledger cycle 2, `required_fix` may still create a scoped
 repair route, change the head, and rerun exact-head rails while preserving
 cycle 2; later findings stay in adjudication without another broad automatic
 round or ledger reset. OpenClaw findings suppress ClawSweeper eligibility.
-ClawSweeper findings suppress merge-ready eligibility. Merge-ready notification
-requires both required exact-head rails to be effectively clean, including
-authorized deferrals or rejections on an unchanged head, plus the existing
-ready-quality policy, and no explicit `human_gate`. Only merge-ready or
+`openclaw_clean_draft` keeps `clawsweeper_eligible` false so a clean draft
+cannot select ClawSweeper. ClawSweeper findings suppress merge-ready
+eligibility. Merge-ready notification requires both required exact-head
+rails to be effectively clean, including authorized deferrals or
+rejections on an unchanged head, plus the existing ready-quality policy,
+and no explicit `human_gate`. `ready_for_human_merge` is compatible with
+no `adjudication_dispositions` or only the allowed `defer` /
+`reject_false_positive` set; `required_fix` or `human_gate` dispositions
+on that state are contradictory and use canonical fail-closed blocked
+handling instead of becoming merge-ready or silently clearing the
+disposition. Only merge-ready or
 genuinely blocked/human-action-required outcomes notify. Terminal copy is
 `<repo>#<pr> ready to merge` or `<repo>#<pr> blocked — <specific reason>`,
 optionally with the PR URL, and carries no transcript, progress, cycle, tier,

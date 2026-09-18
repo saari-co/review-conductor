@@ -275,6 +275,81 @@ class NotificationEligibilityTests(unittest.TestCase):
         self.assertEqual(decision["notification"]["eligibility"], "merge_ready")
         self.assertTrue(decision["repair"]["ledger_preserved"])
         self.assertEqual(decision["repair"]["cycle"], 2)
+        for dispositions in (["defer"], ["reject_false_positive"]):
+            with self.subTest(dispositions=dispositions):
+                allowed = notify(
+                    enrolled(
+                        state="ready_for_human_merge",
+                        rail="clawsweeper",
+                        openclaw_result="clean",
+                        clawsweeper_result="effectively_clean",
+                        ready_qualified=True,
+                        adjudication_dispositions=dispositions,
+                    )
+                )
+                self.assertEqual(allowed["notification"]["eligibility"], "merge_ready")
+                self.assertTrue(allowed["merge_ready_eligible"])
+                self.assertNotEqual(allowed["route"], "fail_closed")
+
+    def test_openclaw_clean_draft_is_not_clawsweeper_eligible(self):
+        decision = notify(
+            enrolled(
+                state="openclaw_clean_draft",
+                rail="openclaw",
+                openclaw_result="clean",
+                clawsweeper_result="absent",
+            )
+        )
+        self.assertEqual(decision["route"], "review_conductor")
+        self.assertTrue(decision["review_dispatch"])
+        self.assertFalse(decision["legacy_dispatch"])
+        self.assertFalse(decision["clawsweeper_eligible"])
+        self.assertFalse(decision["merge_ready_eligible"])
+        self.assertEqual(decision["notification"]["eligibility"], "silent")
+        self.assertEqual(decision["reason"], "silent_internal_progression")
+        self.assertNotEqual(decision["clawsweeper_eligible"], True)
+        self.assertEqual(
+            outcome.derive_rail_results("openclaw_clean_draft", "openclaw"),
+            ("clean", "absent"),
+        )
+
+    def test_ready_state_rejects_required_fix_or_human_gate_dispositions(self):
+        cases = (
+            ["required_fix"],
+            ["human_gate"],
+            ["required_fix", "human_gate"],
+            ["defer", "required_fix"],
+            ["reject_false_positive", "human_gate"],
+        )
+        for dispositions in cases:
+            with self.subTest(dispositions=dispositions):
+                decision = notify(
+                    enrolled(
+                        state="ready_for_human_merge",
+                        rail="clawsweeper",
+                        openclaw_result="clean",
+                        clawsweeper_result="effectively_clean",
+                        ready_qualified=True,
+                        adjudication_dispositions=dispositions,
+                    )
+                )
+                self.assertEqual(decision["route"], "fail_closed")
+                self.assertFalse(decision["review_dispatch"])
+                self.assertFalse(decision["legacy_dispatch"])
+                self.assertFalse(decision["clawsweeper_eligible"])
+                self.assertFalse(decision["merge_ready_eligible"])
+                self.assertEqual(decision["notification"]["eligibility"], "blocked")
+                self.assertEqual(decision["notification"]["kind"], "human_action_required")
+                self.assertEqual(
+                    decision["notification"]["channels"], list(outcome.NOTIFY_CHANNELS)
+                )
+                self.assertEqual(
+                    decision["reason"], "inconsistent_ready_disposition_fail_closed"
+                )
+                self.assertNotEqual(decision["notification"]["eligibility"], "merge_ready")
+                self.assertNotEqual(decision["reason"], "both_rails_effectively_clean")
+                self.assertNotEqual(decision["reason"], "merge_ready_suppressed")
+                self.assertTrue(decision["repair"]["ledger_preserved"])
 
     def test_ready_state_without_ready_policy_stays_silent(self):
         for ready in (None, False):
@@ -927,6 +1002,18 @@ class PreciseMutantTests(unittest.TestCase):
             "    if openclaw_result in BLOCKING_OPENCLAW:\n        clawsweeper_eligible = False\n",
             "    if False and openclaw_result in BLOCKING_OPENCLAW:\n        clawsweeper_eligible = False\n",
             "test_openclaw_findings_suppress_clawsweeper",
+        ),
+        (
+            "allow clawsweeper after openclaw_clean_draft",
+            '    if state == "openclaw_clean_draft":\n        clawsweeper_eligible = False\n',
+            '    if False and state == "openclaw_clean_draft":\n        clawsweeper_eligible = False\n',
+            "test_openclaw_clean_draft_is_not_clawsweeper_eligible",
+        ),
+        (
+            "allow merge-ready with required_fix or human_gate dispositions",
+            '    if state == "ready_for_human_merge" and not _ready_compatible_dispositions(\n        dispositions\n    ):\n        return _fail_closed_blocked(repair, "inconsistent_ready_disposition_fail_closed")\n',
+            '    if False and state == "ready_for_human_merge" and not _ready_compatible_dispositions(\n        dispositions\n    ):\n        return _fail_closed_blocked(repair, "inconsistent_ready_disposition_fail_closed")\n',
+            "test_ready_state_rejects_required_fix_or_human_gate_dispositions",
         ),
         (
             "allow merge-ready after clawsweeper findings",
