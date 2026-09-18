@@ -52,12 +52,9 @@ is treated as legitimate none. External registry document
 validation/loading is separate from strict Conductor ingress
 admission, so the production worker can represent Conductor,
 legacy-only, none, dual, and broken routes while webhook ingress
-remains enrolled-only. The reserved notification send boundary holds
-a versioned service-owned registry/route lease through transport so a
-cooperating registry replacement cannot change the trusted route
-between final validation and `notifier.send`. The supported
-replace/lease contract fail-closes while that hold is active; this is
-not a guarantee against arbitrary nonconforming OS-level writes.
+remains enrolled-only. Notification send leases, reserved claim/send
+fencing, and route-freshness guards used only for delivery are stacked
+adapter work, not this routing/admission core.
 See [trusted admission](trusted-admission.md).
 No live registry, credential, HTTPS edge or deployment exists, so this is
 qualified source behavior, not live admission.

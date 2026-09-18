@@ -81,23 +81,13 @@ legacy-only, dual, unenrolled, and broken semantics are runtime behavior.
 Hydration, action draining, result collection, and review stages run only
 on the Review Conductor route. Caller payloads cannot grant enrollment,
 and fail-closed copy prefers the canonical reason over stale persisted
-blocker text. Pending notification rows are revalidated against the
-current head and trusted enrollment before send; close, supersession,
-an enrollment-route change, or a missing/partial/legacy decision
-identity retires them. Claim/send re-resolves the current trusted
-enrollment/route at the reserved final boundary so a registry or
-config route change after admission/snapshot retires rather than
-sending obsolete blocked/ready copy. The reserved send boundary holds
-a versioned service-owned registry/route lease through `notifier.send`
-so a cooperating replacement cannot occur between final validation
-and transport; the supported replace/lease contract fail-closes while
-that hold is active and does not claim a guarantee against arbitrary
-OS-level writes. Public enum-like inputs require
+blocker text. Notification delivery, send leases, reserved claim/send
+fencing, and route-freshness guards used only for delivery are stacked
+adapter work, not this routing/admission core. Public enum-like inputs require
 exact builtin strings and raise `OrchestrationError` instead of
 `TypeError`; persisted readiness/quality flags accept only integer
-`0`/`1` and otherwise fail closed through unknown rail results. Only
-an exact current schema, route, reason, and notification may remain
-eligible, and identical current decisions stay deduped. `closed` and `closed_merged`
+`0`/`1` and otherwise fail closed through unknown rail results. Current
+eligibility decisions stay deduped by route, reason, and eligibility. `closed` and `closed_merged`
 stay silent and non-dispatchable even when trusted enrollment is broken.
 `run_service_tick` wires registry-owned enrollment into `run_tick` and
 does not infer legacy/none/dual/broken from userland activation flags.
@@ -116,27 +106,17 @@ is treated as legitimate none. `service_entrypoint.registry_provider`
 loads and validates the external registry document without applying
 `require_profile_enrolled`; webhook ingress remains strict while the
 production worker can represent Conductor, legacy-only, none, dual,
-and broken routes. Pending notification claim/send is bound to the
-expected current state, live trusted enrollment/route, and complete
-canonical decision under a write reservation, so a webhook transition
-between eligibility and send, or after the unlocked predicate
-returns, retires the stale row. That reservation also holds the
-versioned registry/route lease through transport so a cooperating
-registry replacement cannot change the route between final validation
-and send. A long-lived GitHub App client keeps
-a route-freshness guard on every live route and adds exact binding
-checks only for Conductor, so a Conductor-to-broken tick delivers the
-fail-closed alert.
+and broken routes.
 Impossible state/rail/result tuples, including mismatched rails,
 fail closed before enrollment-route short-circuits, dispatch, or
 notification eligibility. Unknown/result/tuple coherence is validated
 after closed-state handling and before unenrolled or legacy
 short-circuits. The persisted-row adapter applies the same rail-aware
 validation and maps inconsistent stored rows to typed unknown results
-so the queue can notify blocked once. `human_gate=true` precedes merge-ready and silent nonterminal dispatch.
-Notification event identity includes canonical route/reason/eligibility
-so a superseded pending row retires while the current blocked decision
-delivers exactly once. `repair_cycle` is the
+so a malformed current row can remain eligible as blocked. Delivering
+one concise blocked notification for every malformed persisted
+rail/state token is stacked adapter work. `human_gate=true` precedes merge-ready and silent nonterminal dispatch.
+`repair_cycle` is the
 saturating ledger for the first two broad automatic rounds: cycle 2 still
 allows a scoped `required_fix` route, head change, and exact-head rerun
 without a third automatic round or ledger reset. Terminal messages are
