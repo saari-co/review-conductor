@@ -14,8 +14,10 @@ fail closed before any enrollment-route short-circuit, dispatch, or
 notification eligibility is calculated. Contradictory ready
 dispositions are validated on the same path. Closed-state handling stays
 first. The persisted-row adapter applies the same rail-aware
-validation and maps inconsistent stored state/rail data to typed
-unknown results; direct public contract inputs remain strict.
+validation and maps inconsistent or malformed stored state/rail tokens
+such as rail='spark' to typed unknown results and exact builtin
+state/rail values so the canonical decision can fail closed to blocked
+instead of raising; direct public contract inputs remain strict.
 """
 
 from __future__ import annotations
@@ -644,17 +646,30 @@ def outcome_from_review_row(
 ) -> dict[str, Any]:
     """Build the exact decision input from a current Review Conductor head.
 
-    Persisted-row adapter only: inconsistent stored state/rail data maps to
-    typed unknown results so the canonical decision can fail closed and
-    notify. Direct ``decide_orchestration_outcome`` / ``derive_rail_results``
-    inputs remain strict. Readiness/quality flags accept only stored integer
-    ``0`` / ``1``; any other persisted value maps to unknown rail results.
+    Persisted-row adapter only: inconsistent or malformed stored state/rail
+    tokens map to typed unknown results and exact builtin state/rail values
+    so the canonical decision can fail closed and notify. Direct
+    ``decide_orchestration_outcome`` / ``derive_rail_results`` inputs remain
+    strict. Readiness/quality flags accept only stored integer ``0`` / ``1``;
+    any other persisted value maps to unknown rail results.
     """
-    state = row["state"]
-    rail = row["rail"]
+    raw_state = row["state"]
+    raw_rail = row["rail"]
+    state = raw_state if type(raw_state) is str else "unknown_persisted_state"
+    rail = (
+        raw_rail
+        if raw_rail is None or (type(raw_rail) is str and raw_rail in RAILS)
+        else None
+    )
     try:
-        openclaw_result, clawsweeper_result = derive_rail_results(state, rail)
+        openclaw_result, clawsweeper_result = derive_rail_results(raw_state, raw_rail)
     except OrchestrationError:
+        openclaw_result, clawsweeper_result = "unknown", "unknown"
+    if (
+        type(raw_state) is not str
+        or raw_state not in KNOWN_STATES
+        or (raw_rail is not None and (type(raw_rail) is not str or raw_rail not in RAILS))
+    ):
         openclaw_result, clawsweeper_result = "unknown", "unknown"
     ready_qualified, quality_accepted = _persisted_ready_qualified(quality)
     if not quality_accepted:

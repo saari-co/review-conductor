@@ -109,10 +109,12 @@ dispatch, or notification eligibility instead of silently returning
 contradictory ready `required_fix` / `human_gate` dispositions are
 validated after closed-state handling and before unenrolled or legacy
 short-circuits. The persisted-row adapter applies the same rail-aware
-validation and maps inconsistent stored rows to typed unknown results
-so a malformed current row can remain eligible as blocked. Delivering
-one concise blocked notification for every malformed persisted
-rail/state token is stacked adapter work. `human_gate=true` precedes merge-ready and silent nonterminal dispatch.
+validation and maps inconsistent or malformed stored state/rail
+tokens such as rail='spark' to typed unknown results and exact
+builtin state/rail values so the canonical decision can fail closed
+to blocked instead of raising. Direct public contract inputs remain
+strict. Delivering one concise blocked notification for every
+malformed persisted rail/state token is stacked adapter work. `human_gate=true` precedes merge-ready and silent nonterminal dispatch.
 `openclaw_clean_draft` keeps `clawsweeper_eligible` false.
 `ready_for_human_merge` accepts no dispositions or only `defer` /
 `reject_false_positive`; `required_fix` or `human_gate` dispositions on

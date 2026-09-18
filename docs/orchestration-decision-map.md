@@ -53,8 +53,11 @@ mismatched rails and `ready_for_human_merge` with
 enrollment-route short-circuit, review_dispatch, or notification
 eligibility is calculated instead of silently returning
 `merge_ready_suppressed`. The persisted-row adapter applies the same rail-aware
-validation and maps inconsistent stored state/rail data to typed
-unknown results. `closed` / `closed_merged` are terminal, silent,
+validation and maps inconsistent or malformed stored state/rail
+tokens such as rail='spark' to typed unknown results and exact
+builtin state/rail values so the canonical decision can fail closed
+to blocked instead of raising. Direct public contract inputs remain
+strict. `closed` / `closed_merged` are terminal, silent,
 and non-dispatchable even when enrollment is broken; closed-state
 handling precedes enrollment short-circuits. Unknown/result/tuple
 coherence is validated after that closed exception and before

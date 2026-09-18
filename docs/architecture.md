@@ -132,11 +132,13 @@ fail-closed enrollment, unknown state/result, inconsistent
 state/rail/result tuples, mismatched rails, and equivalent invalid
 orchestration states keep routing and dispatch suppressed and stay
 eligible for the blocked notification path. The persisted-row adapter
-applies the same rail-aware validation and maps inconsistent stored
-state/rail data to typed unknown results. Direct public contract
-inputs remain strict. Delivering one concise blocked notification
-for every malformed persisted rail/state token is stacked adapter
-work.
+applies the same rail-aware validation and maps inconsistent or
+malformed stored state/rail tokens such as rail='spark' to typed
+unknown results and exact builtin state/rail values so the canonical
+decision can fail closed to blocked instead of raising. Direct public
+contract inputs remain strict. Delivering one concise blocked
+notification for every malformed persisted rail/state token is
+stacked adapter work.
 Impossible contradictions, including a blocked or running state with
 the wrong rail, are rejected before any review_dispatch or
 notification eligibility is calculated. Fail-closed copy uses the

@@ -815,6 +815,44 @@ class FailClosedTests(unittest.TestCase):
                 with self.assertRaises(outcome.OrchestrationError):
                     outcome.derive_rail_results(row["state"], row["rail"])
 
+    def test_persisted_row_adapter_normalizes_malformed_state_rail_tokens(self):
+        enrolled_pair = {"review_conductor": "present", "legacy_xapi": "absent"}
+        cases = (
+            {"state": "waiting_human", "rail": "spark", "repair_cycle": 0},
+            {"state": "ci_failed", "rail": "spark", "repair_cycle": 0},
+            {"state": "spark", "rail": "openclaw", "repair_cycle": 0},
+            {"state": 1, "rail": None, "repair_cycle": 0},
+        )
+        for row in cases:
+            with self.subTest(row=row):
+                mapped = outcome.outcome_from_review_row(row, enrollment=enrolled_pair)
+                self.assertEqual(mapped["openclaw_result"], "unknown")
+                self.assertEqual(mapped["clawsweeper_result"], "unknown")
+                if mapped["rail"] is not None:
+                    self.assertEqual(type(mapped["rail"]), str)
+                    self.assertIn(mapped["rail"], outcome.RAILS)
+                self.assertEqual(type(mapped["state"]), str)
+                decision = outcome.decide_orchestration_outcome(mapped)
+                self.assertEqual(decision["route"], "fail_closed")
+                self.assertFalse(decision["review_dispatch"])
+                self.assertFalse(decision["legacy_dispatch"])
+                self.assertEqual(decision["notification"]["eligibility"], "blocked")
+                self.assertEqual(
+                    decision["notification"]["kind"], "human_action_required"
+                )
+                self.assertEqual(
+                    decision["notification"]["channels"], list(outcome.NOTIFY_CHANNELS)
+                )
+                self.assertNotEqual(decision["notification"]["eligibility"], "silent")
+                self.assertNotEqual(decision["notification"]["eligibility"], "none")
+        with self.assertRaises(outcome.OrchestrationError) as ctx:
+            notify(enrolled(state="waiting_human", rail="spark"))
+        self.assertIn("rail is unknown", str(ctx.exception))
+        with self.assertRaises(outcome.OrchestrationError):
+            notify({**enrolled(), "state": 1})
+        with self.assertRaises(outcome.OrchestrationError):
+            outcome.derive_rail_results("waiting_human", "spark")
+
     def test_row_mapper_preserves_silent_repair_and_blocked_ci(self):
         enrolled_pair = {"review_conductor": "present", "legacy_xapi": "absent"}
         silent = outcome.decide_orchestration_outcome(
@@ -1193,8 +1231,8 @@ class PreciseMutantTests(unittest.TestCase):
         ),
         (
             "let the row mapper raise instead of mapping unknown results",
-            '    try:\n        openclaw_result, clawsweeper_result = derive_rail_results(state, rail)\n    except OrchestrationError:\n        openclaw_result, clawsweeper_result = "unknown", "unknown"\n',
-            "    openclaw_result, clawsweeper_result = derive_rail_results(state, rail)\n",
+            '    try:\n        openclaw_result, clawsweeper_result = derive_rail_results(raw_state, raw_rail)\n    except OrchestrationError:\n        openclaw_result, clawsweeper_result = "unknown", "unknown"\n',
+            "    openclaw_result, clawsweeper_result = derive_rail_results(raw_state, raw_rail)\n",
             "test_persisted_row_adapter_maps_inconsistent_rows_to_unknown",
         ),
         (
@@ -1250,6 +1288,18 @@ class PreciseMutantTests(unittest.TestCase):
             "    if type(raw) is int and raw in (0, 1):\n        return raw == 1, True\n    return None, False\n",
             "    return bool(raw), True\n",
             "test_persisted_quality_flags_accept_only_integer_zero_one",
+        ),
+        (
+            "pass malformed persisted rail tokens through to decide",
+            '    rail = (\n        raw_rail\n        if raw_rail is None or (type(raw_rail) is str and raw_rail in RAILS)\n        else None\n    )\n',
+            "    rail = raw_rail\n",
+            "test_persisted_row_adapter_normalizes_malformed_state_rail_tokens",
+        ),
+        (
+            "pass non-string persisted state tokens through to decide",
+            '    state = raw_state if type(raw_state) is str else "unknown_persisted_state"\n',
+            "    state = raw_state\n",
+            "test_persisted_row_adapter_normalizes_malformed_state_rail_tokens",
         ),
     )
 

@@ -1,0 +1,21 @@
+{
+  "schema": "review-conductor.candidate-manifest.v1",
+  "base_sha": "b16e0c8bc3f32e997db31caa173b846b0e9041ce",
+  "starting_head_sha": "7ee4184b5bb6cbf4082055d08cdb0105c2688fb4",
+  "captured_date": "2026-09-18",
+  "binding_scheme": "A commit cannot contain its own SHA. base_sha is the frozen origin/main integration base. starting_head_sha is the verified PR #18 core head this ordinary post-cap malformed-token repair starts from. Per-file sha256 values are of this repaired-core candidate source. The branch head after commit is the exact candidate SHA for hosted CI. The ready-tuple packet remains the explanation of 7ee4184; the first post-cap packet remains the explanation of 009279c; the merge-forward packet remains the explanation of integrating exact main b16e0c8. This packet does not embed a receipt commit's own SHA. Live notification/delivery/runtime entry functions remain deferred to the stacked adapter. The 2/2 ledger is not reset. No Copilot, OpenClaw, or ClawSweeper review is requested from this packet.",
+  "files": {
+    "docs/architecture.md": "6e2adb12e5dffbfd2a0eb82e95f1dcbb10e519ec64bbc136d0fdfeaa88f39c0d",
+    "docs/migration.md": "d07c8e799ef9c0df9b517e2b299747e13fce69d3edd41863c08dda4f04e9aa1d",
+    "docs/orchestration-decision-map.md": "d564aa1b44716d2423e0b56617ceaf2676de4160a271ce75aad3a5f334dd6d82",
+    "proof/issue-687-routing-core-merge-forward-20260918/PROOF.md": "86022aec88b6cb4231dbb7d9ecb3e916407452a2f37e41b386b03a55edcb8d7d",
+    "proof/issue-687-routing-core-merge-forward-20260918/candidate-manifest.json": "2d95fe3b896bd6dba4845ee3a703a6ab7069c3abc3ec4569a15a3d1963b1ea12",
+    "proof/issue-687-routing-core-post-cap-repair-20260918/PROOF.md": "33dfb0d8303f2e253d4f878a1e0e8e0ef19425870b804cd4de32ed5b54fcc27a",
+    "proof/issue-687-routing-core-post-cap-repair-20260918/candidate-manifest.json": "e4a520f184a58f12c129aba3bb81a6c0954113c3850dd06430361e583f790c26",
+    "proof/issue-687-routing-core-post-cap-repair-2-20260918/PROOF.md": "09614bb4bf443ca6239b2451f0790da61803d6b2c9ba3fdf1424e28508395650",
+    "proof/issue-687-routing-core-post-cap-repair-2-20260918/candidate-manifest.json": "9d2027ec49ad4e1919651439f463682656c696bf5d9d48a8511b63acf8feb91b",
+    "proof/issue-687-routing-core-post-cap-repair-3-20260918/PROOF.md": "1fe66e1857cd34058128e31977184501c0f93ca012853f1a499650fda70013ce",
+    "tests/test_orchestration_outcome.py": "3ea6590a79235305ea3d28a31839579d5b73c9677e2580aa7ea320c6fbde4e52",
+    "tools/orchestration_outcome.py": "e60c85179bc366f5084c00429c053cde80348781f7f78fe92b41d5a8d22cfbc6"
+  }
+}
