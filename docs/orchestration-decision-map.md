@@ -46,10 +46,13 @@ nonterminal dispatch. `openclaw_clean_draft` keeps
 `clawsweeper_eligible` false. `ready_for_human_merge` may carry no
 `adjudication_dispositions` or only `defer` / `reject_false_positive`;
 `required_fix` or `human_gate` dispositions on that state fail closed
-to the blocked path and do not become merge-ready. Impossible
-state/rail/result tuples, including mismatched rails, fail closed
-before any enrollment-route short-circuit, review_dispatch, or
-notification eligibility is calculated. The persisted-row adapter applies the same rail-aware
+to the blocked path before unenrolled or legacy short-circuits and do
+not become merge-ready. Impossible state/rail/result tuples, including
+mismatched rails and `ready_for_human_merge` with
+`clawsweeper_result=failed` or `human_gate`, fail closed before any
+enrollment-route short-circuit, review_dispatch, or notification
+eligibility is calculated instead of silently returning
+`merge_ready_suppressed`. The persisted-row adapter applies the same rail-aware
 validation and maps inconsistent stored state/rail data to typed
 unknown results. `closed` / `closed_merged` are terminal, silent,
 and non-dispatchable even when enrollment is broken; closed-state

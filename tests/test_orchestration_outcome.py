@@ -351,6 +351,59 @@ class NotificationEligibilityTests(unittest.TestCase):
                 self.assertNotEqual(decision["reason"], "merge_ready_suppressed")
                 self.assertTrue(decision["repair"]["ledger_preserved"])
 
+    def test_ready_state_rejects_failed_or_human_gate_clawsweeper_results(self):
+        cases = (
+            ("failed", False),
+            ("human_gate", False),
+            ("human_gate", True),
+        )
+        enrollments = (
+            {"review_conductor": "present", "legacy_xapi": "absent"},
+            {"review_conductor": "absent", "legacy_xapi": "absent"},
+            {"review_conductor": "absent", "legacy_xapi": "present"},
+        )
+        for clawsweeper_result, human_gate in cases:
+            for enrollment in enrollments:
+                with self.subTest(
+                    clawsweeper_result=clawsweeper_result,
+                    human_gate=human_gate,
+                    enrollment=enrollment,
+                ):
+                    decision = notify(
+                        enrolled(
+                            enrollment=enrollment,
+                            state="ready_for_human_merge",
+                            rail="clawsweeper",
+                            openclaw_result="clean",
+                            clawsweeper_result=clawsweeper_result,
+                            ready_qualified=True,
+                            human_gate=human_gate,
+                        )
+                    )
+                    self.assertEqual(decision["route"], "fail_closed")
+                    self.assertFalse(decision["review_dispatch"])
+                    self.assertFalse(decision["legacy_dispatch"])
+                    self.assertFalse(decision["clawsweeper_eligible"])
+                    self.assertFalse(decision["merge_ready_eligible"])
+                    self.assertEqual(decision["notification"]["eligibility"], "blocked")
+                    self.assertEqual(
+                        decision["notification"]["kind"], "human_action_required"
+                    )
+                    self.assertEqual(
+                        decision["notification"]["channels"],
+                        list(outcome.NOTIFY_CHANNELS),
+                    )
+                    self.assertEqual(
+                        decision["reason"], "inconsistent_state_rail_result_fail_closed"
+                    )
+                    self.assertNotEqual(decision["reason"], "merge_ready_suppressed")
+                    self.assertNotEqual(decision["notification"]["eligibility"], "silent")
+                    self.assertNotEqual(decision["notification"]["eligibility"], "none")
+                    self.assertNotEqual(
+                        decision["notification"]["eligibility"], "merge_ready"
+                    )
+                    self.assertTrue(decision["repair"]["ledger_preserved"])
+
     def test_ready_state_without_ready_policy_stays_silent(self):
         for ready in (None, False):
             with self.subTest(ready_qualified=ready):
@@ -639,6 +692,55 @@ class FailClosedTests(unittest.TestCase):
                     decision["reason"], "inconsistent_state_rail_result_fail_closed"
                 )
                 self.assertNotEqual(decision["notification"]["eligibility"], "none")
+
+    def test_ready_blocking_dispositions_fail_closed_before_unenrolled_or_legacy_short_circuit(self):
+        enrollments = (
+            {"review_conductor": "absent", "legacy_xapi": "absent"},
+            {"review_conductor": "absent", "legacy_xapi": "present"},
+        )
+        dispositions_cases = (
+            ["required_fix"],
+            ["human_gate"],
+            ["required_fix", "human_gate"],
+            ["defer", "required_fix"],
+        )
+        for enrollment in enrollments:
+            for dispositions in dispositions_cases:
+                with self.subTest(enrollment=enrollment, dispositions=dispositions):
+                    decision = notify(
+                        enrolled(
+                            enrollment=enrollment,
+                            state="ready_for_human_merge",
+                            rail="clawsweeper",
+                            openclaw_result="clean",
+                            clawsweeper_result="effectively_clean",
+                            ready_qualified=True,
+                            adjudication_dispositions=dispositions,
+                        )
+                    )
+                    self.assertEqual(decision["route"], "fail_closed")
+                    self.assertFalse(decision["review_dispatch"])
+                    self.assertFalse(decision["legacy_dispatch"])
+                    self.assertFalse(decision["clawsweeper_eligible"])
+                    self.assertFalse(decision["merge_ready_eligible"])
+                    self.assertEqual(decision["notification"]["eligibility"], "blocked")
+                    self.assertEqual(
+                        decision["notification"]["kind"], "human_action_required"
+                    )
+                    self.assertEqual(
+                        decision["notification"]["channels"],
+                        list(outcome.NOTIFY_CHANNELS),
+                    )
+                    self.assertEqual(
+                        decision["reason"], "inconsistent_ready_disposition_fail_closed"
+                    )
+                    self.assertNotEqual(decision["notification"]["eligibility"], "none")
+                    self.assertNotEqual(
+                        decision["reason"], "unenrolled_no_review_no_notification"
+                    )
+                    self.assertNotEqual(decision["reason"], "legacy_xapi_handoff_required")
+                    self.assertNotEqual(decision["reason"], "merge_ready_suppressed")
+                    self.assertTrue(decision["repair"]["ledger_preserved"])
 
     def test_mismatched_rails_fail_closed_without_review_dispatch(self):
         cases = (
@@ -982,6 +1084,12 @@ class PreciseMutantTests(unittest.TestCase):
             "test_ready_state_rejects_required_fix_or_human_gate_dispositions",
         ),
         (
+            "treat ready failed or human_gate clawsweeper as coherent",
+            '        return clawsweeper_result in {\n            "clean",\n            "effectively_clean",\n            "findings",\n        }\n',
+            '        return clawsweeper_result in {\n            "clean",\n            "effectively_clean",\n            "findings",\n            "human_gate",\n            "failed",\n        }\n',
+            "test_ready_state_rejects_failed_or_human_gate_clawsweeper_results",
+        ),
+        (
             "allow merge-ready after clawsweeper findings",
             "    if clawsweeper_result in BLOCKING_CLAWSWEEPER:\n        merge_ready_eligible = False\n",
             "    if False and clawsweeper_result in BLOCKING_CLAWSWEEPER:\n        merge_ready_eligible = False\n",
@@ -1091,9 +1199,15 @@ class PreciseMutantTests(unittest.TestCase):
         ),
         (
             "short-circuit unenrolled before tuple validation",
-            '    if not _consistent_state_rail_results(state, rail, openclaw_result, clawsweeper_result):\n        return _fail_closed_blocked(repair, "inconsistent_state_rail_result_fail_closed")\n    if route == "fail_closed":\n        return _fail_closed_blocked(repair, route_reason)\n    if route == "none":\n',
-            '    if route == "none":\n        return _outcome(\n            route=route,\n            review_dispatch=False,\n            legacy_dispatch=False,\n            clawsweeper_eligible=False,\n            merge_ready_eligible=False,\n            notification=_notification("none", None),\n            repair=repair,\n            reason=route_reason,\n        )\n    if not _consistent_state_rail_results(state, rail, openclaw_result, clawsweeper_result):\n        return _fail_closed_blocked(repair, "inconsistent_state_rail_result_fail_closed")\n    if route == "fail_closed":\n        return _fail_closed_blocked(repair, route_reason)\n    if route == "none":\n',
+            '    if not _consistent_state_rail_results(state, rail, openclaw_result, clawsweeper_result):\n        return _fail_closed_blocked(repair, "inconsistent_state_rail_result_fail_closed")\n    if state == "ready_for_human_merge" and not _ready_compatible_dispositions(\n        dispositions\n    ):\n        return _fail_closed_blocked(repair, "inconsistent_ready_disposition_fail_closed")\n    if route == "fail_closed":\n        return _fail_closed_blocked(repair, route_reason)\n    if route == "none":\n',
+            '    if route == "none":\n        return _outcome(\n            route=route,\n            review_dispatch=False,\n            legacy_dispatch=False,\n            clawsweeper_eligible=False,\n            merge_ready_eligible=False,\n            notification=_notification("none", None),\n            repair=repair,\n            reason=route_reason,\n        )\n    if not _consistent_state_rail_results(state, rail, openclaw_result, clawsweeper_result):\n        return _fail_closed_blocked(repair, "inconsistent_state_rail_result_fail_closed")\n    if state == "ready_for_human_merge" and not _ready_compatible_dispositions(\n        dispositions\n    ):\n        return _fail_closed_blocked(repair, "inconsistent_ready_disposition_fail_closed")\n    if route == "fail_closed":\n        return _fail_closed_blocked(repair, route_reason)\n    if route == "none":\n',
             "test_unenrolled_and_legacy_inconsistent_tuples_fail_closed_before_short_circuit",
+        ),
+        (
+            "short-circuit unenrolled before ready disposition validation",
+            '    if state == "ready_for_human_merge" and not _ready_compatible_dispositions(\n        dispositions\n    ):\n        return _fail_closed_blocked(repair, "inconsistent_ready_disposition_fail_closed")\n    if route == "fail_closed":\n        return _fail_closed_blocked(repair, route_reason)\n    if route == "none":\n',
+            '    if route == "none":\n        return _outcome(\n            route=route,\n            review_dispatch=False,\n            legacy_dispatch=False,\n            clawsweeper_eligible=False,\n            merge_ready_eligible=False,\n            notification=_notification("none", None),\n            repair=repair,\n            reason=route_reason,\n        )\n    if state == "ready_for_human_merge" and not _ready_compatible_dispositions(\n        dispositions\n    ):\n        return _fail_closed_blocked(repair, "inconsistent_ready_disposition_fail_closed")\n    if route == "fail_closed":\n        return _fail_closed_blocked(repair, route_reason)\n    if route == "none":\n',
+            "test_ready_blocking_dispositions_fail_closed_before_unenrolled_or_legacy_short_circuit",
         ),
         (
             "accept mismatched rails in the complete-tuple predicate",

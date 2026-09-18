@@ -94,9 +94,11 @@ deduped by route, reason, and eligibility. `closed` and
 `closed_merged` are terminal silent non-dispatchable states on every
 direct and service-loop path, including when trusted enrollment is
 broken; closed-state handling precedes enrollment short-circuits.
-Unknown state, unknown rail results, and state/rail/result
-incoherence are validated after that closed exception and before any
-unenrolled, legacy, or broken enrollment short-circuit.
+Unknown state, unknown rail results, state/rail/result
+incoherence, and contradictory `ready_for_human_merge`
+`required_fix` / `human_gate` dispositions are validated after that
+closed exception and before any unenrolled, legacy, or broken
+enrollment short-circuit.
 
 The existing notification queue remains the later consumer of that
 outcome. This core does not invent a second sender and does not change
@@ -115,8 +117,13 @@ and no explicit `human_gate`. `ready_for_human_merge` is compatible with
 no `adjudication_dispositions` or only the allowed `defer` /
 `reject_false_positive` set; `required_fix` or `human_gate` dispositions
 on that state are contradictory and use canonical fail-closed blocked
-handling instead of becoming merge-ready or silently clearing the
-disposition. Only merge-ready or
+handling instead of becoming merge-ready, silently clearing the
+disposition, or taking an unenrolled/legacy `none` short-circuit.
+`ready_for_human_merge` with `clawsweeper_result=failed` or
+`human_gate` is an impossible terminal tuple: the engine would have
+moved to `clawsweeper_failed` or `waiting_human`, so the outcome
+fail-closes to the blocked path instead of silently returning
+`merge_ready_suppressed`. Only merge-ready or
 genuinely blocked/human-action-required outcomes notify. Terminal copy is
 `<repo>#<pr> ready to merge` or `<repo>#<pr> blocked — <specific reason>`,
 optionally with the PR URL, and carries no transcript, progress, cycle, tier,

@@ -101,10 +101,13 @@ exact base values so a str subclass cannot synthesize repository, ID,
 or legacy authority. The service-profile repository
 must be an exact admitted-scope string before omitted-marker absence
 is treated as legitimate none.
-Impossible state/rail/result tuples, including mismatched rails,
-fail closed before enrollment-route short-circuits, dispatch, or
-notification eligibility. Unknown/result/tuple coherence is validated
-after closed-state handling and before unenrolled or legacy
+Impossible state/rail/result tuples, including mismatched rails and
+`ready_for_human_merge` with `clawsweeper_result=failed` or
+`human_gate`, fail closed before enrollment-route short-circuits,
+dispatch, or notification eligibility instead of silently returning
+`merge_ready_suppressed`. Unknown/result/tuple coherence and
+contradictory ready `required_fix` / `human_gate` dispositions are
+validated after closed-state handling and before unenrolled or legacy
 short-circuits. The persisted-row adapter applies the same rail-aware
 validation and maps inconsistent stored rows to typed unknown results
 so a malformed current row can remain eligible as blocked. Delivering
