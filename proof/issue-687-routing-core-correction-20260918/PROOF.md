@@ -23,8 +23,10 @@
 
 A commit cannot contain its own SHA. `candidate-manifest.json` records the
 required start SHA, the preserved parent candidate SHA, the published
-incomplete-split head, and per-file source hashes. The branch head after this
-commit is the exact reduced-core SHA for later CI.
+incomplete-split head, and per-file source hashes. The published corrected
+core SHA is `04b2f583c7cf9a6a62dd0428b2497fb55087c754`. Hosted CI
+[35307282569](https://github.com/saari-co/review-conductor/actions/runs/35307282569)
+passed on that exact head.
 
 ## Why this correction exists
 
@@ -103,6 +105,7 @@ Fixture PASS is not a deployed review PASS.
 | `make check` | passed |
 | `make build` | passed; wrote `dist/review-conductor.pyz` (untracked, not committed) |
 | `python3 scripts/check_whitespace.py 8cc4094e88c8cd04c5b7da28e0c6a9ef054ea69c <new-head>` | recorded after the candidate commit |
+| Hosted CI `35307282569` on `04b2f583c7cf9a6a62dd0428b2497fb55087c754` | passed; https://github.com/saari-co/review-conductor/actions/runs/35307282569 |
 
 Exact-head whitespace is `scripts/check_whitespace.py` against
 `8cc4094e88c8cd04c5b7da28e0c6a9ef054ea69c` and the post-commit HEAD. That
@@ -119,13 +122,17 @@ existing ledger.
   Git-only packet.
 - No x-api, spark-dgx, ClawSweeper, OpenClaw, or target-repository source.
 - No Copilot, OpenClaw, or ClawSweeper review is requested from this
-  packet. Hosted CI remains later exact-head work. This PR stays
-  draft/open and does not merge or activate. Review threads are not
+  packet. Hosted CI
+  [35307282569](https://github.com/saari-co/review-conductor/actions/runs/35307282569)
+  passed on exact head `04b2f583c7cf9a6a62dd0428b2497fb55087c754`. This PR
+  stays draft/open and does not merge or activate. Review threads are not
   resolved.
 
 ## Remaining issue
 
-Exact-head hosted CI for the new reduced SHA. CI green is not external
-review clearance. The stacked notification adapter remains a separate draft
-PR and must merge this corrected tip. No merge, deploy, live notification,
-or additional review request is made from this packet.
+The stacked notification adapter remains a separate draft PR and must merge
+this corrected tip. Hosted CI
+[35307282569](https://github.com/saari-co/review-conductor/actions/runs/35307282569)
+already passed on `04b2f583c7cf9a6a62dd0428b2497fb55087c754`; CI green is
+not external review clearance. No merge, deploy, live notification, or
+additional review request is made from this packet.
