@@ -814,7 +814,7 @@ def current_clawsweeper_dispatch(
         WHERE repository = ? AND pr_number = ? AND base_sha = ? AND head_sha = ?
           AND kind = 'clawsweeper.dispatch' AND review_epoch = ?
           AND status IN ('pending', 'preparing', 'dispatching', 'dispatched')
-        ORDER BY created_at DESC, action_id DESC
+        ORDER BY created_at DESC, rowid DESC
         LIMIT 1
         """,
         (*identity.values(), review_epoch),
@@ -996,7 +996,7 @@ def queue_clawsweeper_rereview(
             claim_owner = NULL, claimed_at = NULL, lease_expires_at = NULL, updated_at = ?
         WHERE repository = ? AND pr_number = ? AND base_sha = ? AND head_sha = ?
           AND review_epoch = ? AND kind = 'clawsweeper.dispatch'
-          AND status IN ('pending', 'failed', 'dispatching', 'preparing')
+          AND status IN ('pending', 'failed', 'dispatching', 'preparing', 'dispatched')
         """,
         (utc_now(), *identity.values(), review_epoch),
     )

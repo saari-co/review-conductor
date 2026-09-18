@@ -131,6 +131,11 @@ def test_same_head_proof_refresh_and_stale_completion(temp: Path) -> None:
     assert current["head"]["review_epoch"] == accepted["review_epoch"]
     assert current["projection"]["checks"]["ClawSweeper Review Rail"] == "queued"
     assert current["projection"]["merge_authorized"] is False
+    dispatches = [item for item in current["actions"] if item["kind"] == "clawsweeper.dispatch"]
+    assert {item["status"] for item in dispatches} == {"obsolete", "pending"}
+    superseded = next(item for item in dispatches if item["status"] == "obsolete")
+    assert superseded["payload"].get("rereview_attempt") is None
+    assert superseded["last_error"] == "superseded by maintainer rereview"
 
     stale = legacy.internal_event(
         temp,

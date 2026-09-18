@@ -38,8 +38,9 @@ comprehensive CI plus OpenClaw are still clean, a valid command:
 
 1. Refreshes the PR-body evidence digest observed on the comment.
 2. Creates a new `clawsweeper.dispatch` attempt for that same epoch.
-3. Clears the previous ClawSweeper request id so a cached proof-deficient
-   terminal cannot be replayed as the new verdict.
+3. Clears the previous ClawSweeper request id and marks the prior
+   `clawsweeper.dispatch`, including an already-dispatched findings attempt,
+   obsolete so a cached proof-deficient terminal cannot be replayed.
 4. Leaves repair cycle, mutation owner, original reviewer context, and
    human-only merge unchanged.
 
