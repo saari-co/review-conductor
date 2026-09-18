@@ -2680,6 +2680,47 @@ class AdmissionIngressTests(unittest.TestCase):
         self.assertEqual(self.fx.binding_rows(), first)
         service.require_current_bindings(self.fx.app_config(), promoted_registry)
 
+    def test_issue_comment_deliveries_never_create_bindings(self):
+        self.fx.ingest("pr", self.fx.payload())
+        first = self.fx.binding_rows()
+        self.assertEqual(len(first), 1)
+        reads = len(self.fx.reads)
+        payload = {
+            "action": "created",
+            "repository": {"full_name": REPOSITORY, "id": REPOSITORY_ID},
+            "installation": {"id": INSTALLATION_ID},
+            "issue": {
+                "number": 7,
+                "body": "fresh proof",
+                "updated_at": "2026-08-29T21:00:00Z",
+                "pull_request": {"url": "https://example.invalid/pr"},
+            },
+            "comment": {
+                "id": 9911,
+                "body": "@ClawSweeper rereview",
+                "user": {"login": "maintainer", "type": "User"},
+                "author_association": "OWNER",
+                "created_at": "2026-08-29T21:00:00Z",
+            },
+            "sender": {"login": "maintainer", "type": "User"},
+        }
+        body, signature = self.fx.signed(payload)
+        outcome = service.ingest_service_delivery(
+            config_path=self.fx.config_path,
+            state_root=self.fx.state,
+            event_type="issue_comment",
+            delivery_id="rereview-no-bind",
+            signature=signature,
+            body=body,
+            secret=SECRET,
+            registry=self.fx.registry(),
+            read_policy=self.fx.read,
+            service_config=self.fx.app_config(),
+        )
+        self.assertIn(outcome["result"], {"accepted", "waiting", "refused", "ignored"})
+        self.assertEqual(self.fx.binding_rows(), first)
+        self.assertEqual(len(self.fx.reads), reads)
+
     def test_admitted_policy_must_match_the_engine_profile(self):
         manifest = json.loads(self.fx.policy)
         variants = {

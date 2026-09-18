@@ -28,6 +28,23 @@ REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 OPENCLAW_EXACT_TUPLE_CONTRACT = "review-conductor-openclaw-v1"
 OPENCLAW_REPORT_MAX_BYTES = 24 * 1024
 OPENCLAW_REPORT_UNAVAILABLE = {"missing", "oversized", "invalid_text"}
+GITHUB_EVENT_TYPES = ("pull_request", "workflow_run", "issue_comment")
+REREVIEW_COMMAND_RE = re.compile(
+    r"(?i)(?:^|[\s])@clawsweeper(?:\[bot\])?\s+(rereview|re-review)(?=$|[\s.,!;:])"
+)
+MAINTAINER_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+REREVIEW_IN_FLIGHT_STATES = frozenset({"clawsweeper_queued", "clawsweeper_running"})
+REREVIEW_CLOSED_STATES = frozenset({"closed", "closed_merged"})
+REREVIEW_PREREQUISITE_STATES = frozenset(
+    {
+        "ci_running",
+        "ci_failed",
+        "openclaw_queued",
+        "openclaw_running",
+        "openclaw_failed",
+        "openclaw_clean_draft",
+    }
+)
 CLASSIFICATIONS = {
     "required_fix",
     "reject_false_positive",
@@ -556,12 +573,7 @@ def open_database(state_root: Path, repository: str | None = None) -> sqlite3.Co
                 "UPDATE actions SET payload_json = ? WHERE action_id = ?",
                 (canonical_json(payload), action["action_id"]),
             )
-        identity_suffix = ""
-        if action["kind"] == "repair.route":
-            identity_suffix = (
-                f"{payload.get('source_rail', '')}:"
-                f"{payload.get('review_request_id', '')}"
-            )
+        identity_suffix = action_identity_suffix(action["kind"], payload)
         expected_action_id, _expected_key = action_identity(
             action["kind"],
             action["repository"],
@@ -660,6 +672,16 @@ def review_action_suffix(review_epoch: int, suffix: str = "") -> str:
     if suffix:
         parts.append(suffix)
     return "|".join(parts)
+
+
+def action_identity_suffix(kind: str, payload: dict[str, Any]) -> str:
+    if kind == "repair.route":
+        return f"{payload.get('source_rail', '')}:{payload.get('review_request_id', '')}"
+    if kind == "clawsweeper.dispatch" and payload.get("rereview_attempt"):
+        return f"rereview:{payload['rereview_attempt']}"
+    if kind == "rereview.acknowledge" and payload.get("trigger_comment_id"):
+        return f"comment:{payload['trigger_comment_id']}"
+    return ""
 
 
 def insert_action(
@@ -772,6 +794,258 @@ def clawsweeper_action_payload(
         "publish": True,
         "merge_authorized": False,
     }
+
+
+def parse_rereview_command(body: str) -> str | None:
+    match = REREVIEW_COMMAND_RE.search(body)
+    if match is None:
+        return None
+    return match.group(1).lower()
+
+
+def current_clawsweeper_dispatch(
+    connection: sqlite3.Connection,
+    identity: dict[str, Any],
+    review_epoch: int,
+) -> sqlite3.Row | None:
+    return connection.execute(
+        """
+        SELECT * FROM actions
+        WHERE repository = ? AND pr_number = ? AND base_sha = ? AND head_sha = ?
+          AND kind = 'clawsweeper.dispatch' AND review_epoch = ?
+          AND status IN ('pending', 'preparing', 'dispatching', 'dispatched')
+        ORDER BY created_at DESC, rowid DESC
+        LIMIT 1
+        """,
+        (*identity.values(), review_epoch),
+    ).fetchone()
+
+
+def next_rereview_attempt(
+    connection: sqlite3.Connection,
+    identity: dict[str, Any],
+    review_epoch: int,
+) -> int:
+    count = connection.execute(
+        """
+        SELECT COUNT(*) FROM actions
+        WHERE repository = ? AND pr_number = ? AND base_sha = ? AND head_sha = ?
+          AND kind = 'clawsweeper.dispatch' AND review_epoch = ?
+        """,
+        (*identity.values(), review_epoch),
+    ).fetchone()[0]
+    return int(count) + 1
+
+
+def comment_already_processed(
+    connection: sqlite3.Connection,
+    repository: str,
+    pr_number: int,
+    comment_id: int,
+) -> bool:
+    for row in connection.execute(
+        """
+        SELECT payload_json FROM events
+        WHERE kind = 'issue_comment.created' AND repository = ? AND pr_number = ?
+        """,
+        (repository, pr_number),
+    ).fetchall():
+        payload = json.loads(row["payload_json"])
+        if int(payload.get("comment_id") or 0) == comment_id:
+            return True
+    return False
+
+
+def same_head_prerequisites_reason(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row,
+    identity: dict[str, Any],
+) -> str | None:
+    if row["ci_conclusion"] != "success":
+        return "current-tuple CI is not a successful comprehensive gate"
+    for event in connection.execute(
+        """
+        SELECT payload_json FROM events
+        WHERE kind = 'openclaw.terminal' AND stale = 0
+          AND repository = ? AND pr_number = ? AND base_sha = ? AND head_sha = ?
+        ORDER BY sequence DESC
+        """,
+        (*identity.values(),),
+    ).fetchall():
+        payload = json.loads(event["payload_json"])
+        if payload.get("result") != "clean":
+            continue
+        epoch = payload.get("review_epoch")
+        if epoch is not None and int(epoch) != int(row["review_epoch"]):
+            continue
+        return None
+    return "current-tuple comprehensive OpenClaw is not clean"
+
+
+def rereview_sender_refusal(config: dict[str, Any], event: dict[str, Any]) -> str | None:
+    login = event["sender"]
+    if event["sender_type"] != "User":
+        return "requester is not a human user"
+    if login.lower().endswith("[bot]"):
+        return "requester is a reviewer or bot"
+    reviewers = (config.get("review_policy") or {}).get("reviewers") or {}
+    blocked = {str(actor).lower() for actor in reviewers.values() if actor}
+    if login.lower() in blocked:
+        return "requester is a reviewer or bot"
+    if event["author_association"] not in MAINTAINER_ASSOCIATIONS:
+        return "requester is not an authoritative maintainer"
+    return None
+
+
+def rereview_state_refusal(config: dict[str, Any], row: sqlite3.Row) -> tuple[str, str] | None:
+    state = row["state"]
+    if state in REREVIEW_CLOSED_STATES:
+        return "refused", f"pull request is {state}"
+    if state in REREVIEW_IN_FLIGHT_STATES:
+        return "waiting", "ClawSweeper review is already in flight for this exact tuple"
+    if config.get("review_policy") and bool(row["is_draft"]):
+        return "waiting", "ClawSweeper waits for ready-for-review state"
+    if (
+        state == "waiting_human"
+        and row["blocker"] == "two automatic repair cycles exhausted"
+    ) or (
+        state == "waiting_human"
+        and int(row["repair_cycle"]) >= int(config["max_repair_cycles"])
+    ):
+        return "refused", "two automatic repair cycles exhausted"
+    if state in REREVIEW_PREREQUISITE_STATES:
+        return "waiting", "current-tuple CI and comprehensive OpenClaw must clear before ClawSweeper"
+    return None
+
+
+def acknowledgement_body(
+    *,
+    decision: str,
+    repository: str,
+    pr_number: int,
+    head_sha: str,
+    review_epoch: int,
+    attempt: int | None,
+    reason: str | None,
+    command: str,
+) -> str:
+    target = f"{repository}#{pr_number} head {head_sha[:12]} epoch {review_epoch}"
+    if attempt is not None:
+        target = f"{target} attempt {attempt}"
+    if decision == "accepted":
+        return (
+            f"Review Conductor accepted @{command} for {target}. "
+            "Fresh ClawSweeper evidence will be collected for this exact tuple. "
+            "Merge remains human-only."
+        )
+    if decision == "waiting":
+        return f"Review Conductor is waiting to start @{command} for {target}: {reason}."
+    return f"Review Conductor refused @{command} for {target}: {reason}."
+
+
+def insert_rereview_acknowledgement(
+    connection: sqlite3.Connection,
+    *,
+    identity: dict[str, Any],
+    review_epoch: int,
+    comment_id: int,
+    decision: str,
+    body: str,
+    attempt: int | None,
+    command: str,
+) -> tuple[str, bool]:
+    payload = {
+        "schema": "smoky.review-conductor.action.v1",
+        "kind": "rereview.acknowledge",
+        **identity,
+        "review_epoch": review_epoch,
+        "trigger_comment_id": comment_id,
+        "decision": decision,
+        "command": command,
+        "body": body,
+        "rereview_attempt": attempt,
+        "merge_authorized": False,
+    }
+    return insert_action(
+        connection,
+        kind="rereview.acknowledge",
+        payload=payload,
+        suffix=f"comment:{comment_id}",
+        review_epoch=review_epoch,
+        **identity,
+    )
+
+
+def queue_clawsweeper_rereview(
+    connection: sqlite3.Connection,
+    config: dict[str, Any],
+    row: sqlite3.Row,
+    identity: dict[str, Any],
+    event: dict[str, Any],
+) -> tuple[str, int, bool]:
+    review_epoch = int(row["review_epoch"])
+    previous = current_clawsweeper_dispatch(connection, identity, review_epoch)
+    previous_run = row["review_request_id"]
+    if previous is not None and previous["receipt_json"]:
+        receipt = json.loads(previous["receipt_json"])
+        previous_run = previous_run or receipt.get("workflow_run_id")
+    connection.execute(
+        """
+        UPDATE actions
+        SET status = 'obsolete', last_error = 'superseded by maintainer rereview',
+            claim_owner = NULL, claimed_at = NULL, lease_expires_at = NULL, updated_at = ?
+        WHERE repository = ? AND pr_number = ? AND base_sha = ? AND head_sha = ?
+          AND review_epoch = ? AND kind = 'clawsweeper.dispatch'
+          AND status IN ('pending', 'failed', 'dispatching', 'preparing', 'dispatched')
+        """,
+        (utc_now(), *identity.values(), review_epoch),
+    )
+    attempt = next_rereview_attempt(connection, identity, review_epoch)
+    payload = clawsweeper_action_payload(
+        config,
+        identity["pr_number"],
+        identity["base_sha"],
+        identity["head_sha"],
+        review_epoch,
+    )
+    payload.update(
+        {
+            "trigger": "maintainer_rereview",
+            "rereview_attempt": attempt,
+            "trigger_comment_id": event["comment_id"],
+            "evidence_refreshed": True,
+            "evidence_input_sha256": event["evidence_input_sha256"],
+            "previous_workflow_run_id": str(previous_run) if previous_run else None,
+        }
+    )
+    action_id, created = insert_action(
+        connection,
+        kind="clawsweeper.dispatch",
+        payload=payload,
+        suffix=f"rereview:{attempt}",
+        review_epoch=review_epoch,
+        **identity,
+    )
+    update_exact_head(
+        connection,
+        identity,
+        state="clawsweeper_queued",
+        rail="clawsweeper",
+        review_request_id=None,
+        blocker=None,
+    )
+    return action_id, attempt, created
+
+
+def clawsweeper_attempt_mismatch(
+    dispatch: sqlite3.Row,
+    workflow_run_id: str,
+) -> str | None:
+    payload = json.loads(dispatch["payload_json"])
+    previous = payload.get("previous_workflow_run_id")
+    if previous is not None and str(previous) == workflow_run_id:
+        return "ClawSweeper completion is not the current attempt"
+    return None
 
 
 def begin_new_head(
@@ -987,6 +1261,188 @@ def parse_workflow_run_event(config: dict[str, Any], payload: dict[str, Any]) ->
         "source_created_at": require_github_timestamp(
             run.get("created_at"), "workflow_run created_at"
         ),
+    }
+
+
+def parse_issue_comment_event(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    repository = require_object(payload.get("repository"), "payload repository")
+    if repository.get("full_name") != config["repository"] or repository.get("id") != config["repository_id"]:
+        raise ContractError("GitHub repository identity does not match config")
+    action = require_text(payload.get("action"), "issue_comment action", 50)
+    issue = require_object(payload.get("issue"), "payload issue")
+    if not isinstance(issue.get("pull_request"), dict):
+        return {"ignored": "issue_comment is not on a pull request"}
+    if action != "created":
+        return {"ignored": f"issue_comment action {action} is not a supported rereview trigger"}
+    comment = require_object(payload.get("comment"), "payload comment")
+    user = require_object(comment.get("user"), "issue_comment user")
+    sender = payload.get("sender")
+    sender_login = require_text(user.get("login"), "issue_comment user login", 200)
+    sender_type = require_text(user.get("type"), "issue_comment user type", 50)
+    if isinstance(sender, dict):
+        if require_text(sender.get("login"), "issue_comment sender login", 200) != sender_login:
+            raise ContractError("issue_comment sender does not match comment author")
+        if require_text(sender.get("type"), "issue_comment sender type", 50) != sender_type:
+            raise ContractError("issue_comment sender type does not match comment author")
+    body = comment.get("body")
+    if type(body) is not str:
+        raise ContractError("issue_comment body must be a string")
+    issue_body = issue.get("body") if type(issue.get("body")) is str else ""
+    return {
+        "action": action,
+        "repository": config["repository"],
+        "pr_number": require_positive_int(issue.get("number"), "issue_comment pull request number"),
+        "comment_id": require_positive_int(comment.get("id"), "issue_comment id"),
+        "sender": sender_login,
+        "sender_type": sender_type,
+        "author_association": require_text(
+            comment.get("author_association"), "issue_comment author_association", 50
+        ),
+        "command": parse_rereview_command(body),
+        "source_updated_at": require_github_timestamp(
+            comment.get("created_at"), "issue_comment created_at"
+        ),
+        "evidence_input_sha256": hashlib.sha256(issue_body.encode("utf-8")).hexdigest(),
+    }
+
+
+def process_issue_comment(
+    connection: sqlite3.Connection,
+    config: dict[str, Any],
+    event_id: str,
+    event: dict[str, Any],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    require_enabled(config)
+    if "ignored" in event:
+        return {
+            "result": "ignored",
+            "reason": event["ignored"],
+            "review_invoked": False,
+            "merge_dispatched": False,
+        }
+    row = current_head(connection, event["repository"], event["pr_number"])
+    if row is None:
+        return {
+            "result": "ignored",
+            "reason": "pull request has no current exact review tuple",
+            "review_invoked": False,
+            "merge_dispatched": False,
+        }
+    identity = {
+        "repository": row["repository"],
+        "pr_number": int(row["pr_number"]),
+        "base_sha": row["base_sha"],
+        "head_sha": row["head_sha"],
+    }
+    if comment_already_processed(connection, identity["repository"], identity["pr_number"], event["comment_id"]):
+        insert_event(
+            connection,
+            event_id=event_id,
+            kind="issue_comment.created",
+            stale=True,
+            payload={**event, "duplicate_comment": True},
+            **identity,
+        )
+        return {
+            "result": "duplicate",
+            "reason": "issue_comment id was already consumed",
+            "state": row["state"],
+            "review_epoch": row["review_epoch"],
+            "merge_dispatched": False,
+        }
+    if event["command"] is None:
+        insert_event(
+            connection,
+            event_id=event_id,
+            kind="issue_comment.created",
+            stale=False,
+            payload=event,
+            **identity,
+        )
+        return {
+            "result": "ignored",
+            "reason": "issue_comment is not a documented ClawSweeper rereview command",
+            "state": row["state"],
+            "review_epoch": row["review_epoch"],
+            "merge_dispatched": False,
+        }
+    command = f"ClawSweeper {event['command']}"
+    sender_reason = rereview_sender_refusal(config, event)
+    if sender_reason is not None:
+        insert_event(
+            connection,
+            event_id=event_id,
+            kind="issue_comment.created",
+            stale=False,
+            payload=event,
+            **identity,
+        )
+        return {
+            "result": "refused",
+            "reason": sender_reason,
+            "state": row["state"],
+            "review_epoch": row["review_epoch"],
+            "merge_dispatched": False,
+        }
+    decision_reason = rereview_state_refusal(config, row)
+    action_id = None
+    created = False
+    attempt = None
+    if decision_reason is None:
+        prerequisite = same_head_prerequisites_reason(connection, row, identity)
+        if prerequisite is not None:
+            decision_reason = ("waiting", prerequisite)
+    if decision_reason is None:
+        action_id, attempt, created = queue_clawsweeper_rereview(
+            connection, config, row, identity, event
+        )
+        decision = "accepted"
+        reason = None
+        next_state = "clawsweeper_queued"
+    else:
+        decision, reason = decision_reason
+        next_state = row["state"]
+    ack_body = acknowledgement_body(
+        decision=decision,
+        repository=identity["repository"],
+        pr_number=identity["pr_number"],
+        head_sha=identity["head_sha"],
+        review_epoch=int(row["review_epoch"]),
+        attempt=attempt,
+        reason=reason,
+        command=command,
+    )
+    ack_id, ack_created = insert_rereview_acknowledgement(
+        connection,
+        identity=identity,
+        review_epoch=int(row["review_epoch"]),
+        comment_id=event["comment_id"],
+        decision=decision,
+        body=ack_body,
+        attempt=attempt,
+        command=command,
+    )
+    insert_event(
+        connection,
+        event_id=event_id,
+        kind="issue_comment.created",
+        stale=False,
+        payload=event,
+        **identity,
+    )
+    return {
+        "result": decision,
+        "reason": reason,
+        "state": next_state,
+        "review_epoch": row["review_epoch"],
+        "rereview_attempt": attempt,
+        "action_id": action_id,
+        "action_created": created,
+        "acknowledgement_action_id": ack_id,
+        "acknowledgement_created": ack_created,
+        "acknowledgement": ack_body,
+        "merge_dispatched": False,
     }
 
 
@@ -1415,8 +1871,8 @@ def ingest_github_delivery(
 ) -> dict[str, Any]:
     if not SAFE_ID_RE.fullmatch(delivery_id):
         raise ContractError("delivery id is unsafe")
-    if event_type not in {"pull_request", "workflow_run"}:
-        raise ContractError("GitHub event type must be pull_request or workflow_run")
+    if event_type not in GITHUB_EVENT_TYPES:
+        raise ContractError("GitHub event type must be pull_request, workflow_run, or issue_comment")
     verify_github_signature(body, signature, secret)
     config = load_config(config_path)
     try:
@@ -1442,9 +1898,12 @@ def ingest_github_delivery(
         if event_type == "pull_request":
             event = parse_pull_request_event(config, payload)
             outcome = process_pull_request(connection, config, event_id, event, payload)
-        else:
+        elif event_type == "workflow_run":
             event = parse_workflow_run_event(config, payload)
             outcome = process_workflow_run(connection, config, event_id, event, payload)
+        else:
+            event = parse_issue_comment_event(config, payload)
+            outcome = process_issue_comment(connection, config, event_id, event, payload)
         if admission_hook is not None:
             binding = admission_hook(connection, config, event_type, payload, outcome)
             if binding is not None:
@@ -1817,14 +2276,21 @@ def process_internal_event(connection: sqlite3.Connection, config: dict[str, Any
     elif event_type == "clawsweeper.started":
         if row["state"] != "clawsweeper_queued":
             raise ContractError(f"ClawSweeper start is invalid from state {row['state']}")
-        dispatch = tuple_action(
-            connection, identity, "clawsweeper.dispatch", int(row["review_epoch"])
+        dispatch = current_clawsweeper_dispatch(
+            connection, identity, int(row["review_epoch"])
         )
-        if dispatch is None or dispatch["status"] != "dispatched":
+        run_id = str(event["workflow_run_id"])
+        if dispatch is None:
+            raise ContractError("ClawSweeper start does not match a dispatched exact-tuple action")
+        mismatch = clawsweeper_attempt_mismatch(dispatch, run_id)
+        if mismatch is not None:
+            insert_event(connection, event_id=event["event_id"], kind=event_type, stale=True, payload=event, **identity)
+            return {"schema": "smoky.review-conductor.receipt.v1", "event_id": event["event_id"], "result": "stale", "reason": mismatch, "state": row["state"], "merge_dispatched": False}
+        if dispatch["status"] != "dispatched":
             raise ContractError("ClawSweeper start does not match a dispatched exact-tuple action")
         receipt = connection.execute(
             "SELECT status FROM rail_workflow_runs WHERE rail = 'clawsweeper' AND workflow_run_id = ?",
-            (str(event["workflow_run_id"]),),
+            (run_id,),
         ).fetchone()
         if receipt is not None and receipt["status"] in {
             "terminal_attention_required", "verdict_ingested",
@@ -1832,17 +2298,24 @@ def process_internal_event(connection: sqlite3.Connection, config: dict[str, Any
             # A delayed start cannot revive a retired receipt. Its alert/evidence
             # remains authoritative; only explicit recovery may reopen the work.
             raise ContractError("ClawSweeper start refers to a retired terminal workflow; operator recovery required")
-        update_exact_head(connection, identity, state="clawsweeper_running", rail="clawsweeper", review_request_id=str(event["workflow_run_id"]), blocker=None)
+        update_exact_head(connection, identity, state="clawsweeper_running", rail="clawsweeper", review_request_id=run_id, blocker=None)
         next_state = "clawsweeper_running"
     elif event_type == "clawsweeper.terminal":
         if row["state"] not in {"clawsweeper_queued", "clawsweeper_running"}:
             raise ContractError(f"ClawSweeper terminal event is invalid from state {row['state']}")
-        dispatch = tuple_action(
-            connection, identity, "clawsweeper.dispatch", int(row["review_epoch"])
+        dispatch = current_clawsweeper_dispatch(
+            connection, identity, int(row["review_epoch"])
         )
-        if dispatch is None or dispatch["status"] != "dispatched":
+        run_id = str(event["workflow_run_id"])
+        if dispatch is None:
             raise ContractError("ClawSweeper terminal does not match a dispatched exact-tuple action")
-        if row["review_request_id"] and row["review_request_id"] != str(event["workflow_run_id"]):
+        mismatch = clawsweeper_attempt_mismatch(dispatch, run_id)
+        if mismatch is not None:
+            insert_event(connection, event_id=event["event_id"], kind=event_type, stale=True, payload=event, **identity)
+            return {"schema": "smoky.review-conductor.receipt.v1", "event_id": event["event_id"], "result": "stale", "reason": mismatch, "state": row["state"], "merge_dispatched": False}
+        if dispatch["status"] != "dispatched":
+            raise ContractError("ClawSweeper terminal does not match a dispatched exact-tuple action")
+        if row["review_request_id"] and row["review_request_id"] != run_id:
             raise ContractError("ClawSweeper terminal workflow_run_id does not match the running request")
         if event["result"] == "clean" and bool(row["is_draft"]):
             next_state = "clawsweeper_clean_draft"

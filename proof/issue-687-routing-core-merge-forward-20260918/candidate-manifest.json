@@ -1,0 +1,32 @@
+{
+  "schema": "review-conductor.candidate-manifest.v1",
+  "base_sha": "b16e0c8bc3f32e997db31caa173b846b0e9041ce",
+  "starting_head_sha": "9b82ea60cfd25e3ae794ea910c369d1041a29c08",
+  "merge_parents": [
+    "9b82ea60cfd25e3ae794ea910c369d1041a29c08",
+    "b16e0c8bc3f32e997db31caa173b846b0e9041ce"
+  ],
+  "captured_date": "2026-09-18",
+  "binding_scheme": "A commit cannot contain its own SHA. base_sha is the frozen origin/main integration base. starting_head_sha is the verified pre-merge PR #18 core head. merge_parents are that core head then exact main. Per-file sha256 values are of this candidate source. The branch head after the merge commit is the exact candidate SHA for hosted CI. Live notification/delivery/runtime entry functions remain deferred to the stacked adapter. No Copilot, OpenClaw, or ClawSweeper review is requested from this packet.",
+  "files": {
+    "Makefile": "e9075b9317ce5ff1034fadf2abb1f9ad8de1555381804b59cfdc68b806a4ca4b",
+    "README.md": "cf8dadd57b784711230193a67e35bf8ee56a6b64abdd58fa3548c459a79cedd7",
+    "contracts/review-conductor/dinkuskit-blocks-userland.json": "eab71b25ddfa9406ed50d8f0d8da94d41644bf47807d301164563da52f559bd7",
+    "contracts/review-conductor/openclaw-smcbd-suite-userland.json": "ecb60d3ee57466b65881669e99b69f93cabe0863c437395d37856f3b4cff847c",
+    "docs/architecture.md": "46b04838755c68b4d3cc0c973f366624155387c873a76121cd7066af34d913c2",
+    "docs/clawsweeper-rereview.md": "436ed15193f150d44389eb8ff55656c2df1b962deba87570c2821e597ab7c8db",
+    "docs/integration-contract.md": "29aa5d8cb91425de309b2e4fa56a263dfae6d56c92174c7dca11675cda018601",
+    "docs/provenance.json": "740b27a3d0a19f244082d32df7665b8fae7951c820e7dc1ea5f7d232a56e2403",
+    "docs/smcbd-pilot-handoff.md": "4c15aa0ed42990e875f2f0c982e4fdd4adf3377d2fcde41266583fde53fe24f7",
+    "proof/clawsweeper-rereview-20260918/ACTIVATION.md": "0a615cfefb921db65b7fc388453dbc4a04dc9c35f2b9012b28d4267ace604624",
+    "proof/clawsweeper-rereview-20260918/PROOF.md": "4685bcd0250891f6a2b77e9429728c294e80c98654cf942918c14382cc6cf6e4",
+    "proof/clawsweeper-rereview-20260918/candidate-manifest.json": "acf445ed97c8ba766bd264f7b37014249c0c73ba7614c4d796f5d7e73f53197a",
+    "proof/issue-687-routing-core-merge-forward-20260918/PROOF.md": "86022aec88b6cb4231dbb7d9ecb3e916407452a2f37e41b386b03a55edcb8d7d",
+    "tests/test_clawsweeper_rereview.py": "a6c3c0a01a34c9713423bf22996f5e69208f4aebce86c3065e1db9e77bd22e4a",
+    "tests/test_service_runtime.py": "cb5f393ce1bdccdae266b0ef0fef40d7acacb8f60b4a892d0071d0a3dfa8771b",
+    "tools/review_conductor.py": "1afec00cd51a56ea75ea745f8028a4cdde67cad0e070f4afcdfb3af00d5ca939",
+    "tools/review_conductor_runtime.py": "9533aefc63d7b411a9db2e8abcd53224da343691d2017d479aa434fdda33bf5c",
+    "tools/review_conductor_userland.py": "82234dd200ababf8a4bd71ec4229381234ae4343e04a036713f6bca1b2554f70",
+    "tools/service_runtime.py": "1cfb255b6806e38c9584d54a99d676d284fd49358be2ea6b26e6322a5a3753b6"
+  }
+}
