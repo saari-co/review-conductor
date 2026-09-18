@@ -17,7 +17,7 @@
     "docs/trusted-admission.md": "b690426378504963f6660d1ecafefb940e70db6de92280489f98e7f087647304",
     "proof/issue-687-notification-eligibility-20260917/PROOF.md": "74d3964956d17d0ea54f5b10bdd1932d2a5c06f7aa72af11039b9c3de62e3c2a",
     "proof/issue-687-notification-eligibility-20260917/candidate-manifest.json": "e4a5df5d61a5abab8b5f9c2417fa6194804c6718935344f0c3b97f1e16e17c6d",
-    "proof/issue-687-routing-core-correction-20260918/PROOF.md": "257b1de9ec1e3a20c5e0fbae078d57e665e2f667bb8a2930fc1bb0b046879c63",
+    "proof/issue-687-routing-core-correction-20260918/PROOF.md": "7dec57012273790f54a61eb0240547a41b764d13d288c6027929e3947cccba88",
     "proof/issue-687-routing-core-split-20260918/PROOF.md": "17536c75a6c188314833332398647bb6426c2ad55c3f41a341202379a6e7d59f",
     "proof/issue-687-routing-core-split-20260918/candidate-manifest.json": "e4343919898187eed3ee466041edb4c3bcd659e314ff5494e66f3dbfbaa236d3",
     "tests/test_orchestration_outcome.py": "1432c5a39d7a5956739964889470f3b4405c2292d8ca359bce17f4771fb1eaec",
