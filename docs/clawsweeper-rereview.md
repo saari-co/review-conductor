@@ -41,8 +41,8 @@ comprehensive CI plus OpenClaw are still clean, a valid command:
 3. Clears the previous ClawSweeper request id and marks the prior
    `clawsweeper.dispatch`, including an already-dispatched findings attempt,
    obsolete so a cached proof-deficient terminal cannot be replayed.
-4. Leaves repair cycle, mutation owner, original reviewer context, and
-   human-only merge unchanged.
+4. Leaves the PR-event `source_updated_at` watermark, repair cycle,
+   mutation owner, original reviewer context, and human-only merge unchanged.
 
 A later terminal for the superseded workflow is stale.
 
@@ -68,8 +68,10 @@ first ClawSweeper dispatch remains the automatic path after those rails clear.
 Accepted, waiting, and authorized-refusal commands create a
 `rereview.acknowledge` action naming the exact tuple and attempt or the wait /
 refuse reason. Unauthorized, bot, non-PR, and non-command comments have no
-public acknowledgement. The new ClawSweeper verdict publishes only through the
-existing rail checks and presentation path. No result authorizes merge.
+public acknowledgement. An uncertain GitHub comment publish or abandoned
+acknowledgement claim stays `reconcile_required` and is not retried. The new
+ClawSweeper verdict publishes only through the existing rail checks and
+presentation path. No result authorizes merge.
 
 ## Live activation is separate
 

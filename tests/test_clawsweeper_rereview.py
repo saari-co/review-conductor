@@ -108,7 +108,9 @@ def test_same_head_proof_refresh_and_stale_completion(temp: Path) -> None:
     state = temp / "state-same-head"
     head = "a" * 40
     first = reach_clawsweeper_findings(temp, state, 301, head, run_id=1301)
-    first_projection = legacy.status(state, 301)["projection"]
+    first_status = legacy.status(state, 301)
+    first_projection = first_status["projection"]
+    first_source_updated_at = first_status["head"]["source_updated_at"]
     assert first_projection["checks"]["ClawSweeper Review Rail"] == "action_required"
     accepted = legacy.github_event(
         temp,
@@ -129,6 +131,7 @@ def test_same_head_proof_refresh_and_stale_completion(temp: Path) -> None:
     assert refreshed["payload"]["head_sha"] == head
     current = legacy.status(state, 301)
     assert current["head"]["review_epoch"] == accepted["review_epoch"]
+    assert current["head"]["source_updated_at"] == first_source_updated_at
     assert current["projection"]["checks"]["ClawSweeper Review Rail"] == "queued"
     assert current["projection"]["merge_authorized"] is False
     dispatches = [item for item in current["actions"] if item["kind"] == "clawsweeper.dispatch"]
@@ -182,6 +185,133 @@ def test_same_head_proof_refresh_and_stale_completion(temp: Path) -> None:
     final = legacy.status(state, 301)
     assert final["projection"]["checks"]["ClawSweeper Review Rail"] == "success"
     assert final["projection"]["merge_authorized"] is False
+
+
+def test_rereview_keeps_pr_source_watermark_and_uncertain_ack(temp: Path) -> None:
+    state = temp / "state-watermark"
+    head = "a" * 40
+    reach_clawsweeper_findings(temp, state, 307, head, run_id=1307)
+    before = legacy.status(state, 307)["head"]["source_updated_at"]
+    accepted = legacy.github_event(
+        temp,
+        state,
+        "issue_comment",
+        "rereview-watermark",
+        comment_payload(307, "@ClawSweeper rereview", comment_id=9401),
+    )
+    assert accepted["result"] == "accepted"
+    assert legacy.status(state, 307)["head"]["source_updated_at"] == before
+
+    root = temp / "uncertain-ack"
+    root.mkdir()
+    config = userland_tests.config_fixture(root)
+    userland_tests.ingress(config, "pull_request", "ack-pr", userland_tests.pr_payload(8, userland_tests.HEAD))
+    userland_tests.ingress(config, "workflow_run", "ack-ci", userland_tests.ci_payload(8, 1801, userland_tests.HEAD))
+    openclaw = userland_tests.action(config, 8, "openclaw.enqueue")
+    userland_tests.mark_dispatched(config, openclaw["action_id"])
+    request_id = json.loads(openclaw["payload_json"])["queue_request_id"]
+    core.ingest_internal_event(
+        config_path=Path(config["core_config"]),
+        state_root=Path(config["paths"]["state_root"]),
+        event_payload={
+            "schema": "smoky.review-conductor.event.v1",
+            "event_id": "ack-oc-clean",
+            "type": "openclaw.terminal",
+            "repository": "dinkuskit/blocks",
+            "pr_number": 8,
+            "base_sha": userland_tests.BASE,
+            "head_sha": userland_tests.HEAD,
+            "request_id": request_id,
+            "result": "clean",
+            "finding_count": 0,
+            "reviewer_actor": "openclaw-reviewer",
+            "proof_ref": "proof/openclaw/ack/PROOF.md",
+        },
+    )
+    claw = userland_tests.action(config, 8, "clawsweeper.dispatch")
+    userland_tests.mark_dispatched(config, claw["action_id"])
+    core.ingest_internal_event(
+        config_path=Path(config["core_config"]),
+        state_root=Path(config["paths"]["state_root"]),
+        event_payload={
+            "schema": "smoky.review-conductor.event.v1",
+            "event_id": "ack-cs-findings",
+            "type": "clawsweeper.terminal",
+            "repository": "dinkuskit/blocks",
+            "pr_number": 8,
+            "base_sha": userland_tests.BASE,
+            "head_sha": userland_tests.HEAD,
+            "workflow_run_id": 4343,
+            "result": "findings",
+            "finding_count": 2,
+            "reviewer_actor": "saari-clawsweeper",
+            "proof_ref": "proof/clawsweeper/ack/PROOF.md",
+        },
+    )
+    userland_tests.ingress(
+        config,
+        "issue_comment",
+        "ack-rereview",
+        comment_payload(8, "@ClawSweeper rereview", comment_id=9402),
+    )
+
+    class RaisingClient:
+        def create_issue_comment(self, pr: int, body: str, **_kwargs: Any) -> int:
+            raise RuntimeError("transport lost after accept")
+
+        def remove_ready_label(self, pr: int, **_kwargs: Any) -> None:
+            return None
+
+        def dispatch_clawsweeper(self, **kwargs: Any) -> None:
+            return None
+
+    try:
+        runtime.drain_actions(config, RaisingClient())
+    except RuntimeError as exc:
+        assert "transport lost after accept" in str(exc)
+    else:
+        raise AssertionError("uncertain acknowledgement must surface the transport error")
+    connection = core.open_database(Path(config["paths"]["state_root"]))
+    try:
+        ack = connection.execute(
+            "SELECT status, last_error FROM actions WHERE kind = 'rereview.acknowledge'"
+        ).fetchone()
+        connection.execute(
+            """
+            UPDATE actions SET status = 'dispatching',
+              lease_expires_at = '2020-01-01T00:00:00Z', updated_at = ?
+            WHERE kind = 'rereview.acknowledge'
+            """,
+            (core.utc_now(),),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    assert ack["status"] == "reconcile_required"
+    assert "do not resend" in ack["last_error"]
+    recovered = runtime.recover_abandoned_actions(config)
+    assert any(
+        item["kind"] == "rereview.acknowledge" and item["status"] == "reconcile_required"
+        for item in recovered
+    )
+
+    class RecordingClient:
+        def __init__(self) -> None:
+            self.comments: list[str] = []
+
+        def create_issue_comment(self, pr: int, body: str, **_kwargs: Any) -> int:
+            self.comments.append(body)
+            return 88
+
+        def remove_ready_label(self, pr: int, **_kwargs: Any) -> None:
+            return None
+
+        def dispatch_clawsweeper(self, **kwargs: Any) -> None:
+            return None
+
+    client = RecordingClient()
+    runtime.drain_actions(config, client)
+    assert client.comments == []
 
 
 def test_new_head_requires_current_ci_and_openclaw(temp: Path) -> None:
@@ -476,6 +606,7 @@ def main() -> int:
     named = {
         "test_command_aliases_and_legacy_review_is_not_an_alias": lambda _temp: test_command_aliases_and_legacy_review_is_not_an_alias(),
         "test_same_head_proof_refresh_and_stale_completion": test_same_head_proof_refresh_and_stale_completion,
+        "test_rereview_keeps_pr_source_watermark_and_uncertain_ack": test_rereview_keeps_pr_source_watermark_and_uncertain_ack,
         "test_new_head_requires_current_ci_and_openclaw": test_new_head_requires_current_ci_and_openclaw,
         "test_unauthorized_bot_non_pr_and_legacy_review": test_unauthorized_bot_non_pr_and_legacy_review,
         "test_duplicate_delivery_and_in_flight_wait": test_duplicate_delivery_and_in_flight_wait,

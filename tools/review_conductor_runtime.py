@@ -2132,6 +2132,9 @@ def recover_abandoned_actions(config: dict[str, Any]) -> list[dict[str, Any]]:
             elif row["kind"] == "clawsweeper.dispatch":
                 next_status = "reconcile_required"
                 reason = "abandoned non-idempotent dispatch requires workflow-run reconciliation"
+            elif row["kind"] == "rereview.acknowledge":
+                next_status = "reconcile_required"
+                reason = "abandoned non-idempotent acknowledgement requires comment reconciliation"
             else:
                 next_status = "pending"
                 reason = "abandoned local handoff claim returned to pending"
@@ -2475,10 +2478,15 @@ def dispatch_rereview_acknowledge(
         except Exception:
             connection.execute(
                 """
-                UPDATE actions SET status = 'failed', last_error = ?, updated_at = ?
+                UPDATE actions SET status = 'reconcile_required', last_error = ?,
+                    lease_expires_at = NULL, updated_at = ?
                 WHERE action_id = ? AND status = 'dispatching'
                 """,
-                ("rereview acknowledgement publication failed", core.utc_now(), action_id),
+                (
+                    "rereview acknowledgement outcome is uncertain; do not resend",
+                    core.utc_now(),
+                    action_id,
+                ),
             )
             connection.commit()
             raise

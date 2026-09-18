@@ -1026,15 +1026,6 @@ def queue_clawsweeper_rereview(
         review_epoch=review_epoch,
         **identity,
     )
-    if event["source_updated_at"] > row["source_updated_at"]:
-        connection.execute(
-            """
-            UPDATE heads SET source_updated_at = ?, updated_at = ?
-            WHERE repository = ? AND pr_number = ? AND base_sha = ? AND head_sha = ?
-              AND is_current = 1
-            """,
-            (event["source_updated_at"], utc_now(), *identity.values()),
-        )
     update_exact_head(
         connection,
         identity,

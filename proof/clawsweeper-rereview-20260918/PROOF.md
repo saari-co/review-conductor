@@ -32,6 +32,9 @@ make build
 - same-head proof refresh and stale superseded completion, including when
   the prior findings dispatch stays `dispatched` in the same `created_at`
   second as the rereview action
+- rereview does not advance the PR-event source watermark, so a later
+  same-head PR delivery remains current; uncertain acknowledgement
+  publication and abandoned acknowledgement claims stay `reconcile_required`
 - new-head prerequisite wait
 - unauthorized, bot, non-PR, and `@clawsweeper review` ignores/refusals
 - duplicate delivery, duplicate comment, and in-flight wait
