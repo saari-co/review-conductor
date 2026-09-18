@@ -30,7 +30,11 @@ must be exact builtins; reconstruction compares those exact base
 values so a str subclass cannot synthesize repository, ID, or legacy
 authority.
 The service-profile repository must be an exact admitted-scope string
-before omitted-marker absence is treated as legitimate none. Userland
+before omitted-marker absence is treated as legitimate none. A matching
+enrollment still requires a valid enabled core `review_policy` and the
+exact registry reviewer mapping before Conductor present; missing or
+non-dict policy or core config is broken. Unmatched enrollment keeps
+the existing absent/legacy result. Userland
 `enabled` / `blockers` flags do not select the route. External
 registry document validation/loading is separate from strict
 Conductor ingress admission. Public

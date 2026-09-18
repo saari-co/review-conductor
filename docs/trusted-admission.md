@@ -87,7 +87,11 @@ Rules enforced by `load_registry`:
   with attacker-controlled equality cannot synthesize repository, ID,
   or legacy authority. Userland `enabled` / `blockers` and synthetic
   subclass methods or attributes cannot grant a legacy status or
-  synthesize Conductor, dual, or broken routing. External registry
+  synthesize Conductor, dual, or broken routing. A matching
+  enrollment still requires a valid enabled core `review_policy`
+  and the exact registry reviewer mapping before Conductor present;
+  missing or non-dict policy or core config is broken. Unmatched
+  enrollment keeps the existing absent/legacy result. External registry
   document validation/loading is separate from strict Conductor
   ingress admission so worker ticks can represent every trusted
   route.

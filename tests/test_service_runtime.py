@@ -1801,6 +1801,84 @@ class AdmissionIngressTests(unittest.TestCase):
             {"review_conductor": "broken", "legacy_xapi": "broken"},
         )
 
+    def test_trusted_enrollment_requires_bound_core_review_policy(self):
+        loaded = self._load_route_registry()
+        empty = self._load_route_registry(enroll=False)
+        dual = self._load_route_registry(
+            legacy={"repository": REPOSITORY, "status": "present"}
+        )
+        config = self.fx.app_config()
+        core_ok = self.fx.core_config()
+        present = {"review_conductor": "present", "legacy_xapi": "absent"}
+        broken = {"review_conductor": "broken", "legacy_xapi": "broken"}
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(config, loaded, core_config=core_ok),
+            present,
+        )
+        reordered = copy.deepcopy(core_ok)
+        reviewers = core_ok["review_policy"]["reviewers"]
+        reordered["review_policy"]["reviewers"] = {
+            "clawsweeper": reviewers["clawsweeper"],
+            "openclaw": reviewers["openclaw"],
+        }
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(config, loaded, core_config=reordered),
+            present,
+        )
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(config, dual, core_config=core_ok),
+            {"review_conductor": "present", "legacy_xapi": "present"},
+        )
+
+        missing_policy = {key: value for key, value in core_ok.items() if key != "review_policy"}
+        no_path = {key: value for key, value in config.items() if key != "core_config"}
+        mismatched = copy.deepcopy(core_ok)
+        mismatched["review_policy"]["reviewers"] = {
+            "openclaw": "rotated-openclaw",
+            "clawsweeper": reviewers["clawsweeper"],
+        }
+        disabled = copy.deepcopy(core_ok)
+        disabled["review_policy"]["enabled"] = False
+        cases = (
+            missing_policy,
+            {**core_ok, "review_policy": "not-a-policy"},
+            {**core_ok, "review_policy": ["reviewers"]},
+            {**core_ok, "review_policy": {"enabled": True}},
+            ["not", "a", "dict"],
+            "not-a-dict",
+            mismatched,
+            disabled,
+        )
+        for core_config in cases:
+            with self.subTest(core_config=core_config):
+                self.assertEqual(
+                    service.trusted_enrollment_from_registry(
+                        config, loaded, core_config=core_config
+                    ),
+                    broken,
+                )
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(no_path, loaded, core_config=None),
+            broken,
+        )
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(
+                config, empty, core_config=missing_policy
+            ),
+            {"review_conductor": "absent", "legacy_xapi": "absent"},
+        )
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(
+                config,
+                self._load_route_registry(
+                    enroll=False,
+                    legacy={"repository": REPOSITORY, "status": "present"},
+                ),
+                core_config=missing_policy,
+            ),
+            {"review_conductor": "absent", "legacy_xapi": "present"},
+        )
+
     def test_profile_disabled_after_startup_fails_every_gate_closed(self):
         self.fx.ingest("initial", self.fx.payload())
         service.require_current_bindings(self.fx.app_config(), self.fx.registry())
@@ -3878,6 +3956,13 @@ MUTANTS = [
         "        if type(repository) is not str:\n            _fail(\"repository name is required\")\n",
         "        if not isinstance(repository, str):\n            _fail(\"repository name is required\")\n",
         "AdmissionIngressTests.test_lookup_rejects_hostile_str_subclass",
+    ),
+    (
+        "grant Conductor present without a bound core review_policy",
+        "tools/service_runtime.py",
+        "    if not isinstance(core_config, dict):\n        return dict(broken)\n    if (\n        core_config.get(\"repository\") != enrolled.repository\n        or core_config.get(\"repository_id\") != enrolled.repository_id\n    ):\n        return dict(broken)\n    review_policy = core_config.get(\"review_policy\")\n    if not isinstance(review_policy, dict):\n        return dict(broken)\n    if review_policy.get(\"enabled\") is not True:\n        return dict(broken)\n    if review_policy.get(\"reviewers\") != enrolled.reviewers:\n        return dict(broken)\n    return {\"review_conductor\": \"present\", \"legacy_xapi\": legacy}\n",
+        "    if isinstance(core_config, dict):\n        if (\n            core_config.get(\"repository\") != enrolled.repository\n            or core_config.get(\"repository_id\") != enrolled.repository_id\n        ):\n            return dict(broken)\n        review_policy = core_config.get(\"review_policy\")\n        if isinstance(review_policy, dict) and \"reviewers\" in review_policy:\n            if review_policy.get(\"reviewers\") != enrolled.reviewers:\n                return dict(broken)\n    return {\"review_conductor\": \"present\", \"legacy_xapi\": legacy}\n",
+        "AdmissionIngressTests.test_trusted_enrollment_requires_bound_core_review_policy",
     ),
 ]
 

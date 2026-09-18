@@ -75,6 +75,11 @@ broken routing. The service-profile `github_app.repository` must be
 an exact admitted-scope string before omitted-marker absence is treated
 as legitimate none. Userland activation flags (`enabled` /
 `blockers`) do not select legacy, none, dual, or broken routes.
+A matching enrollment still requires a valid enabled core
+`review_policy` and the exact registry reviewer mapping before
+Conductor present; missing or non-dict policy or core config is
+broken. Unmatched enrollment keeps the existing absent/legacy
+result.
 An explicit
 `human_gate=true` takes precedence over merge-ready and silent
 nonterminal progression: no structurally valid gated input may become

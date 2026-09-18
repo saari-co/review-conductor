@@ -53,7 +53,11 @@ exact base values so a str subclass cannot synthesize repository, ID,
 or legacy authority. `Registry.lookup` also requires those exact
 builtin types at the lookup boundary. The service-profile repository
 must be an exact admitted-scope string before omitted-marker absence
-is treated as legitimate none. Inert registry document
+is treated as legitimate none. A matching enrollment still requires
+a valid enabled core `review_policy` and the exact registry reviewer
+mapping before Conductor present; missing or non-dict policy or
+core config is broken. Unmatched enrollment keeps the existing
+absent/legacy result. Inert registry document
 validation/loading stays available here; live
 `registry_provider` document-only worker ticks, `run_service_tick`
 enrollment wiring, and queue/delivery consumption are stacked adapter

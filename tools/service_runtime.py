@@ -860,7 +860,11 @@ def trusted_enrollment_from_registry(
     grant a status. The service-profile repository must be an exact
     admitted-scope string before omitted-marker absence is treated as
     legitimate none/legacy-absent. Identity, reviewer, or core
-    contradictions fail closed. Dual is Conductor present plus that same
+    contradictions fail closed. A matching enrollment still requires a
+    valid enabled core ``review_policy`` and the exact registry reviewer
+    mapping before Conductor present; missing or non-dict policy or
+    core config is broken. Unmatched enrollment keeps the existing
+    absent/legacy result. Dual is Conductor present plus that same
     registry-owned legacy marker for this profile.
     """
     broken = {"review_conductor": "broken", "legacy_xapi": "broken"}
@@ -896,16 +900,20 @@ def trusted_enrollment_from_registry(
             core_config = core.load_config(Path(config["core_config"]))
         except (OSError, core.ContractError):
             return dict(broken)
-    if isinstance(core_config, dict):
-        if (
-            core_config.get("repository") != enrolled.repository
-            or core_config.get("repository_id") != enrolled.repository_id
-        ):
-            return dict(broken)
-        review_policy = core_config.get("review_policy")
-        if isinstance(review_policy, dict) and "reviewers" in review_policy:
-            if review_policy.get("reviewers") != enrolled.reviewers:
-                return dict(broken)
+    if not isinstance(core_config, dict):
+        return dict(broken)
+    if (
+        core_config.get("repository") != enrolled.repository
+        or core_config.get("repository_id") != enrolled.repository_id
+    ):
+        return dict(broken)
+    review_policy = core_config.get("review_policy")
+    if not isinstance(review_policy, dict):
+        return dict(broken)
+    if review_policy.get("enabled") is not True:
+        return dict(broken)
+    if review_policy.get("reviewers") != enrolled.reviewers:
+        return dict(broken)
     return {"review_conductor": "present", "legacy_xapi": legacy}
 
 
