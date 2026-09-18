@@ -2194,7 +2194,8 @@ def pending_review_notification_still_eligible(
     """Return whether a pending review-result row may still be claimed.
 
     Operator alerts stay unbound. Review-result rows must still match the
-    current head tuple and a currently eligible trusted decision.
+    current head tuple and a currently eligible trusted decision, including
+    the live enrollment/route revalidated at this boundary.
     """
     if int(row["pr_number"]) == 0:
         return True
@@ -2249,11 +2250,12 @@ def claimed_notification_still_current(
 ) -> bool:
     """Revalidate a claimed row against the current state and complete decision.
 
-    The claim/send fence binds the expected head state and canonical
-    orchestration identity immediately before transport. A write
-    reservation then serializes the last current-decision check with
-    send so a webhook that advances the same tuple after this predicate
-    retires the stale row.
+    The claim/send fence binds the expected head state, trusted
+    enrollment/route, and canonical orchestration identity immediately
+    before transport. A write reservation then serializes the last
+    current-decision check with send so a webhook that advances the
+    same tuple, or a route change visible after this predicate, retires
+    the stale row.
     """
     return pending_review_notification_still_eligible(
         connection, row, trusted_enrollment
@@ -2410,10 +2412,21 @@ def deliver_notifications(
     enrollment: Mapping[str, str] | None = None,
     authority_client: Any | None = None,
     authoritative: bool = False,
+    enrollment_resolver: Any | None = None,
 ) -> dict[str, Any]:
     trusted_enrollment = orchestration.effective_trusted_enrollment(
         config, enrollment, authoritative=authoritative
     )
+
+    def live_trusted_enrollment() -> dict[str, str]:
+        if enrollment_resolver is not None:
+            return orchestration.require_trusted_pair(enrollment_resolver())
+        if not authoritative:
+            return orchestration.effective_trusted_enrollment(
+                config, enrollment, authoritative=False
+            )
+        return trusted_enrollment
+
     routed = dict(config)
     owned = dict(routed.get("enrollment") or {})
     owned.update(trusted_enrollment)
@@ -2434,7 +2447,7 @@ def deliver_notifications(
         for row in rows:
             payload = json.loads(row["payload_json"])
             if not pending_review_notification_still_eligible(
-                connection, row, trusted_enrollment
+                connection, row, live_trusted_enrollment()
             ):
                 if dry_run:
                     outcomes.append(
@@ -2508,7 +2521,7 @@ def deliver_notifications(
             # Bind the claim/send fence to the expected current state and
             # complete canonical decision immediately before transport.
             if not claimed_notification_still_current(
-                connection, row, trusted_enrollment
+                connection, row, live_trusted_enrollment()
             ):
                 if retire_notification(
                     connection, row, required_status="uncertain"
@@ -2531,7 +2544,7 @@ def deliver_notifications(
             connection.commit()
             connection.execute("BEGIN IMMEDIATE")
             if not claimed_notification_still_current(
-                connection, row, trusted_enrollment
+                connection, row, live_trusted_enrollment()
             ):
                 if retire_notification(
                     connection, row, required_status="uncertain"
@@ -2600,6 +2613,7 @@ def run_tick(
     *,
     dry_run: bool,
     enrollment: Mapping[str, str] | None = None,
+    enrollment_resolver: Any | None = None,
 ) -> dict[str, Any]:
     profiles.require_enabled(config)
     if enrollment is None:
@@ -2641,6 +2655,7 @@ def run_tick(
         enrollment=trusted_enrollment,
         authority_client=client,
         authoritative=True,
+        enrollment_resolver=enrollment_resolver,
     )
     return {
         "schema": "smoky.review-conductor.userland-tick.v1",

@@ -369,6 +369,84 @@ class FailClosedTests(unittest.TestCase):
                 with self.assertRaises(outcome.OrchestrationError):
                     notify(raw)
 
+    def test_unhashable_enum_inputs_raise_orchestration_error(self):
+        class Token(str):
+            def __eq__(self, other):
+                return True
+
+            def __hash__(self):
+                return hash("present")
+
+        cases = [
+            {**enrolled(), "enrollment": {"review_conductor": [], "legacy_xapi": "absent"}},
+            {**enrolled(), "enrollment": {"review_conductor": {}, "legacy_xapi": "absent"}},
+            {**enrolled(), "enrollment": {"review_conductor": Token("x"), "legacy_xapi": "absent"}},
+            {**enrolled(), "state": []},
+            {**enrolled(), "state": {}},
+            {**enrolled(), "state": Token("ci_running")},
+            {**enrolled(), "rail": []},
+            {**enrolled(), "rail": {"name": "openclaw"}},
+            {**enrolled(), "openclaw_result": []},
+            {**enrolled(), "openclaw_result": {"result": "clean"}},
+            {**enrolled(), "clawsweeper_result": []},
+            {**enrolled(), "adjudication_dispositions": [["required_fix"]]},
+            {**enrolled(), "adjudication_dispositions": [{"name": "required_fix"}]},
+        ]
+        for raw in cases:
+            with self.subTest(raw=raw):
+                try:
+                    notify(raw)
+                except outcome.OrchestrationError:
+                    continue
+                except TypeError:
+                    self.fail("unhashable enum input leaked TypeError")
+                else:
+                    self.fail("unhashable enum input was accepted")
+        valid = notify(enrolled())
+        self.assertEqual(valid["route"], "review_conductor")
+        self.assertEqual(valid["notification"]["eligibility"], "silent")
+
+    def test_persisted_quality_flags_accept_only_integer_zero_one(self):
+        enrolled_pair = {"review_conductor": "present", "legacy_xapi": "absent"}
+        ready_row = {
+            "state": "ready_for_human_merge",
+            "rail": "clawsweeper",
+            "repair_cycle": 0,
+        }
+        accepted = outcome.outcome_from_review_row(
+            ready_row, {"ready_qualified": 1}, enrollment=enrolled_pair
+        )
+        self.assertEqual(accepted["ready_qualified"], True)
+        self.assertEqual(accepted["openclaw_result"], "clean")
+        self.assertEqual(accepted["clawsweeper_result"], "effectively_clean")
+        ready = outcome.decide_orchestration_outcome(accepted)
+        self.assertTrue(ready["merge_ready_eligible"])
+        self.assertEqual(ready["notification"]["eligibility"], "merge_ready")
+        unqualified = outcome.outcome_from_review_row(
+            ready_row, {"ready_qualified": 0}, enrollment=enrolled_pair
+        )
+        self.assertEqual(unqualified["ready_qualified"], False)
+        self.assertEqual(unqualified["openclaw_result"], "clean")
+        silent = outcome.decide_orchestration_outcome(unqualified)
+        self.assertFalse(silent["merge_ready_eligible"])
+        self.assertEqual(silent["notification"]["eligibility"], "silent")
+        for raw in ("false", "true", "0", "1", 2, -1, True, False, 1.0, [1], {"v": 1}):
+            with self.subTest(raw=raw):
+                mapped = outcome.outcome_from_review_row(
+                    ready_row, {"ready_qualified": raw}, enrollment=enrolled_pair
+                )
+                self.assertIsNone(mapped["ready_qualified"])
+                self.assertEqual(mapped["openclaw_result"], "unknown")
+                self.assertEqual(mapped["clawsweeper_result"], "unknown")
+                decision = outcome.decide_orchestration_outcome(mapped)
+                self.assertEqual(decision["route"], "fail_closed")
+                self.assertFalse(decision["merge_ready_eligible"])
+                self.assertEqual(decision["notification"]["eligibility"], "blocked")
+                self.assertEqual(decision["reason"], "unknown_rail_result_fail_closed")
+                self.assertNotEqual(decision["notification"]["eligibility"], "merge_ready")
+        with self.assertRaises(outcome.OrchestrationError):
+            notify(enrolled(ready_qualified="false"))
+
     def test_unknown_state_and_rail_results_are_fail_closed_not_silent(self):
         unknown_state = notify(enrolled(state="mystery_state"))
         self.assertEqual(unknown_state["route"], "fail_closed")
@@ -941,6 +1019,36 @@ class PreciseMutantTests(unittest.TestCase):
             '    if not _rail_matches_state(state, rail):\n        if state in SILENT_INTERNAL_STATES | {"waiting_human"}:\n            _fail("finding, repair, and human-gate states require an exact rail")\n        _fail("state and rail are inconsistent")\n',
             "    if False and not _rail_matches_state(state, rail):\n        _fail(\"state and rail are inconsistent\")\n",
             "test_persisted_row_adapter_maps_mismatched_rails_to_unknown",
+        ),
+        (
+            "membership-check unhashable enrollment statuses",
+            "    if type(value) is not str or value not in ENROLLMENT_STATUSES:\n",
+            "    if value not in ENROLLMENT_STATUSES:\n",
+            "test_unhashable_enum_inputs_raise_orchestration_error",
+        ),
+        (
+            "membership-check unhashable rail results",
+            "    if type(value) is not str or value not in RAIL_RESULTS:\n",
+            "    if value not in RAIL_RESULTS:\n",
+            "test_unhashable_enum_inputs_raise_orchestration_error",
+        ),
+        (
+            "membership-check unhashable dispositions",
+            "        if type(item) is not str or item not in DISPOSITIONS:\n",
+            "        if item not in DISPOSITIONS:\n",
+            "test_unhashable_enum_inputs_raise_orchestration_error",
+        ),
+        (
+            "membership-check unhashable state tokens",
+            "    state = value[\"state\"]\n    rail = value[\"rail\"]\n    if type(state) is not str:\n        _fail(\"state is unknown\")\n",
+            "    state = value[\"state\"]\n    rail = value[\"rail\"]\n    if False and type(state) is not str:\n        _fail(\"state is unknown\")\n",
+            "test_unhashable_enum_inputs_raise_orchestration_error",
+        ),
+        (
+            "coerce persisted quality flags with bool()",
+            "    if type(raw) is int and raw in (0, 1):\n        return raw == 1, True\n    return None, False\n",
+            "    return bool(raw), True\n",
+            "test_persisted_quality_flags_accept_only_integer_zero_one",
         ),
     )
 

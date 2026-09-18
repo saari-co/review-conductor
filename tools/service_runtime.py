@@ -924,6 +924,9 @@ def run_service_tick(
     remainder of the tick instead of letting it publish under stale authority.
     Trusted enrollment comes from the registry/admission result and is passed
     into ``run_tick``; userland activation flags do not select the route.
+    Every live route keeps a freshness guard that re-resolves and compares
+    that pair; exact binding checks remain Conductor-only. Send eligibility
+    revalidates the current pair at the reserved claim/send boundary.
     """
     resolved = resolve_registry(registry)
     trusted_enrollment = trusted_enrollment_from_registry(config, resolved)
@@ -931,6 +934,15 @@ def run_service_tick(
     if route == "review_conductor":
         require_current_bindings(config, resolved)
     import review_conductor_userland as userland
+
+    def current_trusted_enrollment() -> dict[str, str]:
+        return trusted_enrollment_from_registry(config, resolve_registry(registry))
+
+    def ensure_current_trusted_enrollment() -> dict[str, str]:
+        current = current_trusted_enrollment()
+        if current != trusted_enrollment:
+            raise ServiceError("trusted enrollment changed before side effect")
+        return current
 
     install = getattr(client, "set_authority_guard", None)
     if route == "review_conductor" and not dry_run:
@@ -947,15 +959,33 @@ def run_service_tick(
             # Explicit stale-check cleanup and unbound operator alerts are
             # repository-level maintenance. Every current review/check action
             # supplies an exact tuple and must still own that tuple here.
+            # Re-resolve first so a route change is observed for every live
+            # route; exact binding checks stay Conductor-only.
+            current_registry = resolve_registry(registry)
+            current = trusted_enrollment_from_registry(config, current_registry)
+            if current != trusted_enrollment:
+                raise ServiceError("trusted enrollment changed before side effect")
             if authority is None:
-                require_current_bindings(config, registry)
+                require_current_bindings(config, current_registry)
             else:
-                require_current_bindings(config, registry)
-                require_exact_current_binding(config, registry, authority)
+                require_current_bindings(config, current_registry)
+                require_exact_current_binding(config, current_registry, authority)
 
         install(authority_guard)
-    elif callable(install):
-        install(None)
+    elif not dry_run and callable(install):
+        def route_freshness_guard(
+            _method: str,
+            _path: str,
+            _authority: dict[str, Any] | None,
+        ) -> None:
+            ensure_current_trusted_enrollment()
+
+        install(route_freshness_guard)
     return userland.run_tick(
-        config, client, notifier, dry_run=dry_run, enrollment=trusted_enrollment
+        config,
+        client,
+        notifier,
+        dry_run=dry_run,
+        enrollment=trusted_enrollment,
+        enrollment_resolver=current_trusted_enrollment,
     )

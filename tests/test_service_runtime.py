@@ -1159,7 +1159,7 @@ class AdmissionIngressTests(unittest.TestCase):
             resolutions.append(len(resolutions))
             return current if len(resolutions) == 1 else revoked
 
-        def fake_tick(config, tick_client, notifier, *, dry_run, enrollment=None):
+        def fake_tick(config, tick_client, notifier, *, dry_run, enrollment=None, enrollment_resolver=None):
             tick_client.create_check("OpenClaw Review Rail", HEAD, "external", "queued")
             return {"result": "unreachable"}
 
@@ -1246,7 +1246,8 @@ class AdmissionIngressTests(unittest.TestCase):
             silent = service.run_service_tick(
                 config, conductor, client, first, dry_run=False
             )
-        self.assertIsNotNone(client._authority_guard)
+        first_guard = client._authority_guard
+        self.assertIsNotNone(first_guard)
         self.assertEqual(first.sent, [])
         self.assertEqual(silent["notifications"]["deliveries"], [])
         second = legacy.FakeNotifier()
@@ -1264,7 +1265,8 @@ class AdmissionIngressTests(unittest.TestCase):
             blocked = service.run_service_tick(
                 config, broken, client, second, dry_run=False
             )
-        self.assertIsNone(client._authority_guard)
+        self.assertIsNotNone(client._authority_guard)
+        self.assertIsNot(client._authority_guard, first_guard)
         self.assertEqual(
             [item["result"] for item in blocked["notifications"]["deliveries"]],
             ["sent", "sent", "sent"],
@@ -1284,6 +1286,134 @@ class AdmissionIngressTests(unittest.TestCase):
         finally:
             connection.close()
         self.assertEqual(statuses, ["sent", "sent", "sent"])
+
+    def test_registry_route_change_at_reserved_send_retires_stale_notification(self):
+        self.fx.ingest("initial", self.fx.payload())
+        config = {
+            **self.fx.app_config(),
+            "enrollment": {"enabled": True, "blockers": []},
+            "paths": {
+                **self.fx.app_config()["paths"],
+                "blocks_checkout": str(self.fx.root / "checkout"),
+            },
+            "worker": {"max_actions_per_wake": 5, "claim_lease_seconds": 60},
+        }
+        (self.fx.root / "checkout").mkdir()
+        client = runtime.GitHubAppClient(
+            self.fx.app_config(),
+            "fixture-private-key",
+            transport=lambda *_: (500, b""),
+            signer=lambda *_: "fixture-jwt",
+        )
+        skipped_worker = {
+            "schema": "smoky.review-conductor.worker-wake.v1",
+            "result": "skipped",
+            "recovered": [],
+            "actions": [],
+            "failed_actions": [],
+            "github_ci_polled": False,
+            "merge_dispatched": False,
+        }
+        skipped_bridge = {
+            "schema": "smoky.review-conductor.bridge-drain.v1",
+            "result": "skipped",
+            "artifacts": [],
+        }
+        skipped_projection = {
+            "schema": "smoky.review-conductor.projection.v1",
+            "result": "skipped",
+            "projected": [],
+            "merge_authorized": False,
+        }
+        conductor = self.fx.registry()
+        broken = self._load_route_registry(app_id=APP_ID + 1)
+        state = {"registry": broken}
+
+        def provider():
+            return state["registry"]
+
+        original = userland.claimed_notification_still_current
+        seen = {"count": 0}
+
+        def after_predicate(connection, row, trusted_enrollment):
+            still = original(connection, row, trusted_enrollment)
+            seen["count"] += 1
+            if still and seen["count"] == 1:
+                state["registry"] = conductor
+            return still
+
+        notifier = legacy.FakeNotifier()
+        with patch.object(userland, "hydrate_pending_openclaw_heads", lambda *a, **k: []), patch.object(
+            runtime, "drain_actions", lambda *a, **k: skipped_worker
+        ), patch.object(
+            runtime, "drain_bridge_inboxes", lambda *a, **k: skipped_bridge
+        ), patch.object(
+            userland, "collect_openclaw_terminals", lambda *a, **k: []
+        ), patch.object(
+            userland, "collect_clawsweeper_terminals", lambda *a, **k: []
+        ), patch.object(
+            runtime, "reconcile_projection", lambda *a, **k: skipped_projection
+        ), patch.object(
+            userland, "claimed_notification_still_current", after_predicate
+        ):
+            changed = service.run_service_tick(
+                config, provider, client, notifier, dry_run=False
+            )
+        self.assertGreaterEqual(seen["count"], 2)
+        self.assertEqual(
+            [item["result"] for item in changed["notifications"]["deliveries"]],
+            ["retired", "retired", "retired"],
+        )
+        self.assertEqual(notifier.sent, [])
+        connection = core.open_database(self.fx.state, REPOSITORY)
+        try:
+            statuses = [
+                row["status"]
+                for row in connection.execute(
+                    "SELECT status FROM notification_deliveries ORDER BY channel"
+                )
+            ]
+        finally:
+            connection.close()
+        self.assertEqual(statuses, ["retired", "retired", "retired"])
+
+        same = legacy.FakeNotifier()
+        with patch.object(userland, "hydrate_pending_openclaw_heads", lambda *a, **k: []), patch.object(
+            runtime, "drain_actions", lambda *a, **k: skipped_worker
+        ), patch.object(
+            runtime, "drain_bridge_inboxes", lambda *a, **k: skipped_bridge
+        ), patch.object(
+            userland, "collect_openclaw_terminals", lambda *a, **k: []
+        ), patch.object(
+            userland, "collect_clawsweeper_terminals", lambda *a, **k: []
+        ), patch.object(
+            runtime, "reconcile_projection", lambda *a, **k: skipped_projection
+        ):
+            delivered = service.run_service_tick(
+                config, conductor, client, same, dry_run=False
+            )
+        self.assertEqual(
+            [item["result"] for item in delivered["notifications"]["deliveries"]],
+            [],
+        )
+        self.assertEqual(same.sent, [])
+        again = legacy.FakeNotifier()
+        with patch.object(userland, "hydrate_pending_openclaw_heads", lambda *a, **k: []), patch.object(
+            runtime, "drain_actions", lambda *a, **k: skipped_worker
+        ), patch.object(
+            runtime, "drain_bridge_inboxes", lambda *a, **k: skipped_bridge
+        ), patch.object(
+            userland, "collect_openclaw_terminals", lambda *a, **k: []
+        ), patch.object(
+            userland, "collect_clawsweeper_terminals", lambda *a, **k: []
+        ), patch.object(
+            runtime, "reconcile_projection", lambda *a, **k: skipped_projection
+        ):
+            repeat = service.run_service_tick(
+                config, conductor, client, again, dry_run=False
+            )
+        self.assertEqual(repeat["notifications"]["deliveries"], [])
+        self.assertEqual(again.sent, [])
 
     def test_tuple_guard_rejects_superseded_work_under_a_new_valid_binding(self):
         self.fx.ingest("initial", self.fx.payload())
@@ -1322,7 +1452,7 @@ class AdmissionIngressTests(unittest.TestCase):
         )
         registry = self.fx.registry()
 
-        def fake_tick(config, tick_client, notifier, *, dry_run, enrollment=None):
+        def fake_tick(config, tick_client, notifier, *, dry_run, enrollment=None, enrollment_resolver=None):
             # Tuple B is admitted after tuple A was selected. The repository-wide
             # gate is healthy for B, but it must not authorize A's pending write.
             self.assertEqual(
@@ -1431,13 +1561,14 @@ class AdmissionIngressTests(unittest.TestCase):
             def send(self, channel, message):
                 sent.append((channel, message))
 
-        def fake_tick(config, tick_client, notifier, *, dry_run, enrollment=None):
+        def fake_tick(config, tick_client, notifier, *, dry_run, enrollment=None, enrollment_resolver=None):
             self.fx.ingest("superseding-notification", newer, registry=registry)
             return userland.deliver_notifications(
                 config,
                 notifier,
                 dry_run=False,
                 authority_client=tick_client,
+                enrollment_resolver=enrollment_resolver,
             )
 
         with patch.object(userland, "run_tick", fake_tick), patch.object(
@@ -1586,11 +1717,12 @@ class AdmissionIngressTests(unittest.TestCase):
                 captured = {}
                 real_tick = userland.run_tick
 
-                def wrapping_tick(config, client, notifier, *, dry_run, enrollment=None):
+                def wrapping_tick(config, client, notifier, *, dry_run, enrollment=None, enrollment_resolver=None):
                     captured["enrollment"] = enrollment
                     captured["inferred"] = orchestration.resolve_trusted_enrollment(config)
                     return real_tick(
-                        config, client, notifier, dry_run=True, enrollment=enrollment
+                        config, client, notifier, dry_run=True, enrollment=enrollment,
+                        enrollment_resolver=enrollment_resolver,
                     )
 
                 notifier = legacy.FakeNotifier()
@@ -1736,10 +1868,11 @@ class AdmissionIngressTests(unittest.TestCase):
                 captured = {}
                 real_tick = userland.run_tick
 
-                def wrapping_tick(config, client, notifier, *, dry_run, enrollment=None):
+                def wrapping_tick(config, client, notifier, *, dry_run, enrollment=None, enrollment_resolver=None):
                     captured["enrollment"] = enrollment
                     return real_tick(
-                        config, client, notifier, dry_run=True, enrollment=enrollment
+                        config, client, notifier, dry_run=True, enrollment=enrollment,
+                        enrollment_resolver=enrollment_resolver,
                     )
 
                 notifier = legacy.FakeNotifier()
@@ -3250,10 +3383,11 @@ class AdmissionIngressTests(unittest.TestCase):
         captured = {}
         real_tick = userland.run_tick
 
-        def wrapping_tick(config, client, notifier, *, dry_run, enrollment=None):
+        def wrapping_tick(config, client, notifier, *, dry_run, enrollment=None, enrollment_resolver=None):
             captured["enrollment"] = enrollment
             return real_tick(
-                config, client, notifier, dry_run=dry_run, enrollment=enrollment
+                config, client, notifier, dry_run=dry_run, enrollment=enrollment,
+                enrollment_resolver=enrollment_resolver,
             )
 
         with patch.object(userland, "run_tick", wrapping_tick):
@@ -4357,8 +4491,8 @@ MUTANTS = [
     (
         "skip pending notification revalidation before send",
         "tools/review_conductor_userland.py",
-        "            if not pending_review_notification_still_eligible(\n                connection, row, trusted_enrollment\n            ):\n",
-        "            if False and not pending_review_notification_still_eligible(\n                connection, row, trusted_enrollment\n            ):\n",
+        "            if not pending_review_notification_still_eligible(\n                connection, row, live_trusted_enrollment()\n            ):\n",
+        "            if False and not pending_review_notification_still_eligible(\n                connection, row, live_trusted_enrollment()\n            ):\n",
         "AdmissionIngressTests.test_superseded_review_notification_cannot_use_the_new_heads_binding",
     ),
     (
@@ -4427,8 +4561,8 @@ MUTANTS = [
     (
         "authorize superseded work under a newer valid binding",
         "tools/service_runtime.py",
-        "                require_exact_current_binding(config, registry, authority)\n",
-        "                require_current_bindings(config, registry)\n",
+        "                require_exact_current_binding(config, current_registry, authority)\n",
+        "                require_current_bindings(config, current_registry)\n",
         "AdmissionIngressTests.test_tuple_guard_rejects_superseded_work_under_a_new_valid_binding",
     ),
     (
@@ -4630,7 +4764,7 @@ MUTANTS = [
     (
         "call run_tick without the registry-owned enrollment pair",
         "tools/service_runtime.py",
-        "    return userland.run_tick(\n        config, client, notifier, dry_run=dry_run, enrollment=trusted_enrollment\n    )\n",
+        "    return userland.run_tick(\n        config,\n        client,\n        notifier,\n        dry_run=dry_run,\n        enrollment=trusted_enrollment,\n        enrollment_resolver=current_trusted_enrollment,\n    )\n",
         "    return userland.run_tick(config, client, notifier, dry_run=dry_run)\n",
         "AdmissionIngressTests.test_service_tick_wires_registry_owned_enrollment_routes",
     ),
@@ -4686,8 +4820,8 @@ MUTANTS = [
     (
         "skip the claim/send notification fence",
         "tools/review_conductor_userland.py",
-        "            # Bind the claim/send fence to the expected current state and\n            # complete canonical decision immediately before transport.\n            if not claimed_notification_still_current(\n                connection, row, trusted_enrollment\n            ):\n                if retire_notification(\n                    connection, row, required_status=\"uncertain\"\n                ):\n                    connection.commit()\n                    outcomes.append(\n                        {\n                            \"event_key\": row[\"event_key\"],\n                            \"channel\": row[\"channel\"],\n                            \"result\": \"retired\",\n                        }\n                    )\n                else:\n                    connection.rollback()\n                continue\n            # The uncertain claim is already committed. Reserve writes across\n            # the last current-decision check and transport so a webhook\n            # cannot commit a new state in that gap. A transition visible\n            # after the unlocked predicate retires under this reservation.\n            connection.commit()\n            connection.execute(\"BEGIN IMMEDIATE\")\n            if not claimed_notification_still_current(\n                connection, row, trusted_enrollment\n            ):\n",
-        "            if False and not claimed_notification_still_current(\n                connection, row, trusted_enrollment\n            ):\n",
+        "            # Bind the claim/send fence to the expected current state and\n            # complete canonical decision immediately before transport.\n            if not claimed_notification_still_current(\n                connection, row, live_trusted_enrollment()\n            ):\n                if retire_notification(\n                    connection, row, required_status=\"uncertain\"\n                ):\n                    connection.commit()\n                    outcomes.append(\n                        {\n                            \"event_key\": row[\"event_key\"],\n                            \"channel\": row[\"channel\"],\n                            \"result\": \"retired\",\n                        }\n                    )\n                else:\n                    connection.rollback()\n                continue\n            # The uncertain claim is already committed. Reserve writes across\n            # the last current-decision check and transport so a webhook\n            # cannot commit a new state in that gap. A transition visible\n            # after the unlocked predicate retires under this reservation.\n            connection.commit()\n            connection.execute(\"BEGIN IMMEDIATE\")\n            if not claimed_notification_still_current(\n                connection, row, live_trusted_enrollment()\n            ):\n",
+        "            if False and not claimed_notification_still_current(\n                connection, row, live_trusted_enrollment()\n            ):\n",
         "AdmissionIngressTests.test_webhook_state_change_between_eligibility_and_send_retires_stale_notification",
     ),
     (
@@ -4700,23 +4834,44 @@ MUTANTS = [
     (
         "skip the reserved claim/send revalidation",
         "tools/review_conductor_userland.py",
-        "            connection.commit()\n            connection.execute(\"BEGIN IMMEDIATE\")\n            if not claimed_notification_still_current(\n                connection, row, trusted_enrollment\n            ):\n",
-        "            if False and not claimed_notification_still_current(\n                connection, row, trusted_enrollment\n            ):\n",
+        "            connection.commit()\n            connection.execute(\"BEGIN IMMEDIATE\")\n            if not claimed_notification_still_current(\n                connection, row, live_trusted_enrollment()\n            ):\n",
+        "            if False and not claimed_notification_still_current(\n                connection, row, live_trusted_enrollment()\n            ):\n",
         "AdmissionIngressTests.test_webhook_state_change_after_final_predicate_retires_stale_notification",
     ),
     (
         "weaken the reserved claim/send write reservation",
         "tools/review_conductor_userland.py",
-        "            connection.commit()\n            connection.execute(\"BEGIN IMMEDIATE\")\n            if not claimed_notification_still_current(\n                connection, row, trusted_enrollment\n            ):\n",
-        "            connection.commit()\n            connection.execute(\"BEGIN\")\n            if not claimed_notification_still_current(\n                connection, row, trusted_enrollment\n            ):\n",
+        "            connection.commit()\n            connection.execute(\"BEGIN IMMEDIATE\")\n            if not claimed_notification_still_current(\n                connection, row, live_trusted_enrollment()\n            ):\n",
+        "            connection.commit()\n            connection.execute(\"BEGIN\")\n            if not claimed_notification_still_current(\n                connection, row, live_trusted_enrollment()\n            ):\n",
         "AdmissionIngressTests.test_reserved_send_blocks_competing_state_write_until_reservation_releases",
+    ),
+    (
+        "reuse the admission snapshot at the reserved claim/send boundary",
+        "tools/review_conductor_userland.py",
+        "            connection.commit()\n            connection.execute(\"BEGIN IMMEDIATE\")\n            if not claimed_notification_still_current(\n                connection, row, live_trusted_enrollment()\n            ):\n",
+        "            connection.commit()\n            connection.execute(\"BEGIN IMMEDIATE\")\n            if not claimed_notification_still_current(\n                connection, row, trusted_enrollment\n            ):\n",
+        "AdmissionIngressTests.test_registry_route_change_at_reserved_send_retires_stale_notification",
     ),
     (
         "retain a stale Conductor authority guard after a fail-closed route transition",
         "tools/service_runtime.py",
-        "    elif callable(install):\n        install(None)\n",
+        "    elif not dry_run and callable(install):\n        def route_freshness_guard(\n            _method: str,\n            _path: str,\n            _authority: dict[str, Any] | None,\n        ) -> None:\n            ensure_current_trusted_enrollment()\n\n        install(route_freshness_guard)\n",
         "",
         "AdmissionIngressTests.test_same_client_conductor_to_broken_delivers_fail_closed_alert",
+    ),
+    (
+        "clear the non-conductor route-freshness guard",
+        "tools/service_runtime.py",
+        "        install(route_freshness_guard)\n",
+        "        install(None)\n",
+        "AdmissionIngressTests.test_same_client_conductor_to_broken_delivers_fail_closed_alert",
+    ),
+    (
+        "ignore live enrollment resolvers at send",
+        "tools/review_conductor_userland.py",
+        "        if enrollment_resolver is not None:\n            return orchestration.require_trusted_pair(enrollment_resolver())\n        if not authoritative:\n            return orchestration.effective_trusted_enrollment(\n                config, enrollment, authoritative=False\n            )\n        return trusted_enrollment\n",
+        "        return trusted_enrollment\n",
+        "AdmissionIngressTests.test_registry_route_change_at_reserved_send_retires_stale_notification",
     ),
 ]
 

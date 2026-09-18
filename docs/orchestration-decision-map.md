@@ -34,10 +34,13 @@ before omitted-marker absence is treated as legitimate none. Userland
 `enabled` / `blockers` flags do not select the route. External
 registry document validation/loading is separate from strict
 Conductor ingress admission. Pending rows are revalidated before
-claim, and the claim/send fence binds the expected current state and
-complete canonical decision immediately before transport under a write
-reservation that serializes the last current-decision check with send;
-event
+claim, and the claim/send fence binds the expected current state,
+live trusted enrollment/route, and complete canonical decision
+immediately before transport under a write reservation that
+serializes the last current-decision check with send. Public
+enum-like inputs require exact builtin strings; persisted
+readiness/quality flags accept only integer `0`/`1`. The service tick
+keeps a route-freshness guard on every live route. Event
 identity includes route, reason, and
 eligibility. A long-lived GitHub App client resets or replaces its
 admission authority guard on every route transition. Missing, partial, or legacy decision identities retire

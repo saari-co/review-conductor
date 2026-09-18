@@ -81,15 +81,22 @@ identity includes canonical route, reason, and eligibility so a stale
 pending row can retire while the current blocked decision enqueues and
 delivers once. Pending rows are revalidated against the current head
 and trusted enrollment before claim, and the claim/send fence is bound
-to the expected current state and complete canonical decision
-immediately before transport. A write reservation serializes that
-final current-decision check with send. A webhook that advances the
-same tuple between eligibility and send, or after the unlocked
-predicate returns, retires the stale row. A long-lived GitHub App
-client resets or replaces its admission authority guard on every
-route transition so a Conductor-to-broken tick delivers the
-fail-closed alert instead of restoring it with a stale Conductor
-guard. Missing, partial, or
+to the expected current state, live trusted enrollment/route, and
+complete canonical decision immediately before transport. A write
+reservation serializes that final current-decision check with send. A
+webhook that advances the same tuple between eligibility and send, or
+after the unlocked predicate returns, retires the stale row. A route
+change between service admission/snapshot and delivery retires the
+stale notification rather than sending obsolete blocked/ready copy.
+Public enum-like inputs require exact builtin strings before
+membership checks and raise `OrchestrationError` for unhashable or
+subclass tokens; persisted readiness/quality flags accept only stored
+integer `0`/`1` and otherwise map to unknown rail results. A
+long-lived GitHub App client keeps a route-freshness guard on every
+live route, re-resolves and compares the trusted pair, and adds exact
+binding checks only for the Conductor route so a Conductor-to-broken
+tick delivers the fail-closed alert instead of restoring it with a
+stale Conductor guard. Missing, partial, or
 legacy decision identities retire fail-closed; only an exact current
 schema, route, reason, and notification may remain eligible, and
 identical current decisions stay deduped. Caller payloads cannot grant

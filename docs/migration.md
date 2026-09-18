@@ -84,9 +84,15 @@ and fail-closed copy prefers the canonical reason over stale persisted
 blocker text. Pending notification rows are revalidated against the
 current head and trusted enrollment before send; close, supersession,
 an enrollment-route change, or a missing/partial/legacy decision
-identity retires them. Only an exact current schema, route, reason, and
-notification may remain eligible, and identical current decisions stay
-deduped. `closed` and `closed_merged`
+identity retires them. Claim/send re-resolves the current trusted
+enrollment/route at the reserved final boundary so a registry or
+config route change after admission/snapshot retires rather than
+sending obsolete blocked/ready copy. Public enum-like inputs require
+exact builtin strings and raise `OrchestrationError` instead of
+`TypeError`; persisted readiness/quality flags accept only integer
+`0`/`1` and otherwise fail closed through unknown rail results. Only
+an exact current schema, route, reason, and notification may remain
+eligible, and identical current decisions stay deduped. `closed` and `closed_merged`
 stay silent and non-dispatchable even when trusted enrollment is broken.
 `run_service_tick` wires registry-owned enrollment into `run_tick` and
 does not infer legacy/none/dual/broken from userland activation flags.
@@ -106,12 +112,13 @@ loads and validates the external registry document without applying
 `require_profile_enrolled`; webhook ingress remains strict while the
 production worker can represent Conductor, legacy-only, none, dual,
 and broken routes. Pending notification claim/send is bound to the
-expected current state and complete canonical decision under a write
-reservation, so a webhook transition between eligibility and send, or
-after the unlocked predicate returns, retires the stale row. A
-long-lived GitHub App client resets or replaces its admission
-authority guard on every route transition so a Conductor-to-broken
-tick delivers the fail-closed alert.
+expected current state, live trusted enrollment/route, and complete
+canonical decision under a write reservation, so a webhook transition
+between eligibility and send, or after the unlocked predicate
+returns, retires the stale row. A long-lived GitHub App client keeps
+a route-freshness guard on every live route and adds exact binding
+checks only for Conductor, so a Conductor-to-broken tick delivers the
+fail-closed alert.
 Impossible state/rail/result tuples, including mismatched rails,
 fail closed before enrollment-route short-circuits, dispatch, or
 notification eligibility. Unknown/result/tuple coherence is validated

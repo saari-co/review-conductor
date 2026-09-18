@@ -125,13 +125,13 @@ def _exact(value: Any, keys: tuple[str, ...] | list[str], label: str) -> dict[st
 
 
 def _status(value: Any, label: str) -> str:
-    if value not in ENROLLMENT_STATUSES:
+    if type(value) is not str or value not in ENROLLMENT_STATUSES:
         _fail(f"{label} enrollment status is unknown")
     return value
 
 
 def _rail_result(value: Any, label: str) -> str:
-    if value not in RAIL_RESULTS:
+    if type(value) is not str or value not in RAIL_RESULTS:
         _fail(f"{label} rail result is unknown")
     return value
 
@@ -143,7 +143,7 @@ def _dispositions(value: Any) -> tuple[str, ...] | None:
         _fail("adjudication dispositions must be a non-empty list or null")
     seen: list[str] = []
     for item in value:
-        if item not in DISPOSITIONS:
+        if type(item) is not str or item not in DISPOSITIONS:
             _fail("adjudication disposition is unknown")
         if item in seen:
             _fail("adjudication dispositions must be unique")
@@ -195,7 +195,12 @@ def resolve_trusted_enrollment(config: Mapping[str, Any] | None) -> dict[str, st
             return dict(broken)
         review_conductor = raw["review_conductor"]
         legacy_xapi = raw["legacy_xapi"]
-        if review_conductor not in ENROLLMENT_STATUSES or legacy_xapi not in ENROLLMENT_STATUSES:
+        if (
+            type(review_conductor) is not str
+            or type(legacy_xapi) is not str
+            or review_conductor not in ENROLLMENT_STATUSES
+            or legacy_xapi not in ENROLLMENT_STATUSES
+        ):
             return dict(broken)
         return {"review_conductor": review_conductor, "legacy_xapi": legacy_xapi}
     if raw.get("enabled") is True and raw.get("blockers") in (None, []):
@@ -212,7 +217,12 @@ def require_trusted_pair(value: Mapping[str, str] | None) -> dict[str, str]:
         return dict(broken)
     review_conductor = value["review_conductor"]
     legacy_xapi = value["legacy_xapi"]
-    if review_conductor not in ENROLLMENT_STATUSES or legacy_xapi not in ENROLLMENT_STATUSES:
+    if (
+        type(review_conductor) is not str
+        or type(legacy_xapi) is not str
+        or review_conductor not in ENROLLMENT_STATUSES
+        or legacy_xapi not in ENROLLMENT_STATUSES
+    ):
         return dict(broken)
     return {"review_conductor": review_conductor, "legacy_xapi": legacy_xapi}
 
@@ -331,7 +341,9 @@ def decide_orchestration_outcome(raw: Any) -> dict[str, Any]:
     legacy_xapi = _status(enrollment["legacy_xapi"], "legacy_xapi")
     state = value["state"]
     rail = value["rail"]
-    if rail is not None and rail not in RAILS:
+    if type(state) is not str:
+        _fail("state is unknown")
+    if rail is not None and (type(rail) is not str or rail not in RAILS):
         _fail("rail is unknown")
     if type(value["repair_cycle"]) is not int or not 0 <= value["repair_cycle"] <= MAX_REPAIR_CYCLES:
         _fail("repair cycle must be an integer in 0..2")
@@ -565,6 +577,10 @@ def _consistent_state_rail_results(
 
 def derive_rail_results(state: str, rail: str | None) -> tuple[str, str]:
     """Map a current engine head onto typed rail results without prose parsing."""
+    if type(state) is not str:
+        _fail("state is unknown")
+    if rail is not None and type(rail) is not str:
+        _fail("state and rail are inconsistent")
     if state not in KNOWN_STATES:
         return "unknown", "unknown"
     if not _rail_matches_state(state, rail):
@@ -593,6 +609,18 @@ def derive_rail_results(state: str, rail: str | None) -> tuple[str, str]:
     raise AssertionError("unreachable")
 
 
+def _persisted_ready_qualified(
+    quality: Mapping[str, Any] | None,
+) -> tuple[bool | None, bool]:
+    """Decode a persisted ready flag. Only integer 0/1 is accepted."""
+    if quality is None:
+        return None, True
+    raw = quality["ready_qualified"]
+    if type(raw) is int and raw in (0, 1):
+        return raw == 1, True
+    return None, False
+
+
 def outcome_from_review_row(
     row: Mapping[str, Any],
     quality: Mapping[str, Any] | None = None,
@@ -605,7 +633,8 @@ def outcome_from_review_row(
     Persisted-row adapter only: inconsistent stored state/rail data maps to
     typed unknown results so the canonical decision can fail closed and
     notify. Direct ``decide_orchestration_outcome`` / ``derive_rail_results``
-    inputs remain strict.
+    inputs remain strict. Readiness/quality flags accept only stored integer
+    ``0`` / ``1``; any other persisted value maps to unknown rail results.
     """
     state = row["state"]
     rail = row["rail"]
@@ -613,9 +642,9 @@ def outcome_from_review_row(
         openclaw_result, clawsweeper_result = derive_rail_results(state, rail)
     except OrchestrationError:
         openclaw_result, clawsweeper_result = "unknown", "unknown"
-    ready_qualified = None
-    if quality is not None:
-        ready_qualified = bool(quality["ready_qualified"])
+    ready_qualified, quality_accepted = _persisted_ready_qualified(quality)
+    if not quality_accepted:
+        openclaw_result, clawsweeper_result = "unknown", "unknown"
     if enrollment is None:
         enrollment = {"review_conductor": "broken", "legacy_xapi": "broken"}
     return {
