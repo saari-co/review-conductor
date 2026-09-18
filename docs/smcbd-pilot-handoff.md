@@ -198,8 +198,12 @@ next stage.
 1. Open the App's **General** settings. Confirm it remains restricted to
    `saari-co`; do not change visibility or publish it to Marketplace.
 2. Under repository permissions, add **Contents: Read-only**. Confirm the exact
-   permission list above and no additional permissions. Keep event subscriptions
-   to `pull_request` and `workflow_run` only.
+   permission list above and no additional permissions. The source App event
+   contract is now `pull_request`, `workflow_run`, and `issue_comment`. Do **not**
+   change the live GitHub App subscription in this slice; adding `issue_comment`
+   is a later separately authorized activation step and needs no extra permission
+   beyond the existing Pull requests scope. Until that subscription is added,
+   maintainer rereview comments cannot be delivered.
 3. Confirm installation `161027021` still uses **Only select repositories** and
    lists only `saari-co/openclaw-smcbd-suite`.
 4. Generate the private key and transfer it with the 1Password procedure above.

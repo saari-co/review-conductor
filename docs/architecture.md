@@ -34,7 +34,10 @@ The canonical tuple is repository + PR + base SHA + head SHA + review epoch.
 Any base/head change invalidates evidence. Webhook authentication precedes
 parsing; replays are idempotent; conflicting deliveries fail closed. Uncertain
 non-idempotent dispatch is reconciled, not blindly retried. Two repair cycles
-exhaust automatic repair; reviewers never become mutation owners.
+exhaust automatic repair; reviewers never become mutation owners. Maintainer
+`@ClawSweeper rereview` / `@clawsweeper re-review` comments are the supported
+same-head ClawSweeper refresh entry; `pull_request.edited` is not a trigger.
+See [ClawSweeper rereview](clawsweeper-rereview.md).
 
 The Conductor is the sole writer of the authoritative `OpenClaw Review Rail`
 and `ClawSweeper Review Rail` checks after it validates reviewer-native evidence.

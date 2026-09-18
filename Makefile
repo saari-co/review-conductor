@@ -10,6 +10,7 @@ governance:
 
 test:
 	$(PYTHON) tests/test_review_conductor.py
+	$(PYTHON) tests/test_clawsweeper_rereview.py
 	$(PYTHON) tests/test_review_conductor_activation.py
 	$(PYTHON) tests/test_review_conductor_userland.py
 	$(PYTHON) tests/test_cold_hydration.py

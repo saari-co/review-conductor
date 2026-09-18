@@ -1,0 +1,8 @@
+{
+  "schema": "smoky.review-conductor.proof-manifest.v1",
+  "title": "maintainer-triggered ClawSweeper rereview",
+  "issue": "saari-co/review-conductor#19",
+  "base": "8cc4094e88c8cd04c5b7da28e0c6a9ef054ea69c",
+  "live_verification": "blocked",
+  "merge_authorized": false
+}
