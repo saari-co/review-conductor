@@ -79,10 +79,12 @@ Rules enforced by `load_registry`:
   is omitted or names another profile. The profile repository must be an
   exact admitted-scope string before that omitted-marker absence is
   treated as legitimate. `trusted_enrollment_from_registry` snapshots
-  and revalidates the exact base Registry dataclass fields and consumes
-  only those loaded values. Userland `enabled` / `blockers` and
-  synthetic subclass methods or attributes cannot grant a legacy status
-  or synthesize Conductor, dual, or broken routing.
+  and revalidates the exact base Registry dataclass fields and each
+  nested Enrollment and optional LegacyXapiMarker from its own stored
+  base-dataclass fields, then consumes only those loaded values.
+  Userland `enabled` / `blockers` and synthetic subclass methods or
+  attributes cannot grant a legacy status or synthesize Conductor,
+  dual, or broken routing.
 
 `Registry.lookup(repository, repository_id, app_id, installation_id)` succeeds
 only when all four agree with one enrollment; strings, booleans or a neighbouring

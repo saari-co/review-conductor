@@ -95,8 +95,10 @@ marker; existing documents that omit it stay Conductor-only (legacy
 absent). `load_registry` rejects malformed or ambiguous marker forms.
 `trusted_enrollment_from_registry` consumes only that loaded field
 after snapshotting and revalidating exact base Registry dataclass
-fields. The service-profile repository must be an exact admitted-scope
-string before omitted-marker absence is treated as legitimate none.
+fields and each nested Enrollment and optional LegacyXapiMarker from
+its own stored base-dataclass fields. The service-profile repository
+must be an exact admitted-scope string before omitted-marker absence
+is treated as legitimate none.
 Impossible state/rail/result tuples, including mismatched rails,
 fail closed before enrollment-route short-circuits, dispatch, or
 notification eligibility. Unknown/result/tuple coherence is validated

@@ -23,7 +23,9 @@ registry/admission result and pass that pair into `run_tick` before
 review stages and the queue. The v2 registry may carry an optional
 exact-profile `legacy_xapi` marker; omitted means legacy absent.
 `trusted_enrollment_from_registry` snapshots and revalidates exact
-base Registry dataclass fields and reads only those loaded values.
+base Registry dataclass fields and each nested Enrollment and optional
+LegacyXapiMarker from its own stored base-dataclass fields, then reads
+only those loaded values.
 The service-profile repository must be an exact admitted-scope string
 before omitted-marker absence is treated as legitimate none. Userland
 `enabled` / `blockers` flags do not select the route. Pending rows are

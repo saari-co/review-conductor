@@ -41,8 +41,10 @@ and tick. The same v2 registry may carry an optional exact-profile
 `legacy_xapi` marker; omitted documents remain legacy absent, and
 `trusted_enrollment_from_registry` consumes only that loaded field
 after snapshotting and revalidating the exact base Registry dataclass
-fields. The service-profile repository must be an exact admitted-scope
-string before omitted-marker absence is treated as legitimate none.
+fields and each nested Enrollment and optional LegacyXapiMarker from
+its own stored base-dataclass fields. The service-profile repository
+must be an exact admitted-scope string before omitted-marker absence
+is treated as legitimate none.
 See [trusted admission](trusted-admission.md).
 No live registry, credential, HTTPS edge or deployment exists, so this is
 qualified source behavior, not live admission.

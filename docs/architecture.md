@@ -52,9 +52,10 @@ resolves that pair from the authoritative registry/admission result and
 passes it into `run_tick`. The v2 service-owned registry may carry an
 optional exact-profile `legacy_xapi` marker; omitted documents remain
 legacy absent. `trusted_enrollment_from_registry` snapshots and
-revalidates the exact base Registry dataclass fields from the loaded
-document; subclass methods cannot synthesize Conductor, legacy, dual,
-or broken routing. The service-profile `github_app.repository` must be
+revalidates the exact base Registry dataclass fields and each nested
+Enrollment and optional LegacyXapiMarker from its own stored
+base-dataclass fields; subclass methods or mutated nested values
+cannot synthesize Conductor, legacy, dual, or broken routing. The service-profile `github_app.repository` must be
 an exact admitted-scope string before omitted-marker absence is treated
 as legitimate none. Userland activation flags (`enabled` /
 `blockers`) do not select legacy, none, dual, or broken routes.

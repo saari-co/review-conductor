@@ -1668,6 +1668,170 @@ class AdmissionIngressTests(unittest.TestCase):
             {"review_conductor": "absent", "legacy_xapi": "absent"},
         )
 
+    def test_nested_enrollment_virtual_authority_fails_closed(self):
+        loaded = self._load_route_registry()
+        real = loaded.enrollments[0]
+        admitted = {
+            name: object.__getattribute__(real, name)
+            for name in admission.Enrollment.__dataclass_fields__
+        }
+
+        class VirtualEnrollment(admission.Enrollment):
+            def __post_init__(self):
+                return
+
+            def __getattribute__(self, name):
+                if name in admitted:
+                    return admitted[name]
+                return object.__getattribute__(self, name)
+
+        forged = VirtualEnrollment(
+            "saari-co/x-api",
+            1,
+            1,
+            1,
+            "attacker",
+            "0" * 40,
+            "0" * 64,
+            "forged-openclaw",
+            "forged-clawsweeper",
+        )
+        self.assertEqual(forged.repository, REPOSITORY)
+        self.assertEqual(forged.repository_id, REPOSITORY_ID)
+        self.assertEqual(forged.app_id, APP_ID)
+        self.assertEqual(forged.installation_id, INSTALLATION_ID)
+        self.assertEqual(forged.reviewers, real.reviewers)
+        wrapper = admission.Registry((forged,))
+        self.assertEqual(
+            wrapper.lookup(REPOSITORY, REPOSITORY_ID, APP_ID, INSTALLATION_ID),
+            forged,
+        )
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(self.fx.app_config(), wrapper),
+            {"review_conductor": "broken", "legacy_xapi": "broken"},
+        )
+
+        class SubclassEnrollment(admission.Enrollment):
+            pass
+
+        subclassed = SubclassEnrollment(
+            *(object.__getattribute__(real, name) for name in admission.Enrollment.__dataclass_fields__)
+        )
+        self.assertEqual(subclassed.repository, REPOSITORY)
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(
+                self.fx.app_config(),
+                admission.Registry((subclassed,)),
+            ),
+            {"review_conductor": "broken", "legacy_xapi": "broken"},
+        )
+
+        extra = admission.Enrollment(
+            *(object.__getattribute__(real, name) for name in admission.Enrollment.__dataclass_fields__)
+        )
+        object.__getattribute__(extra, "__dict__")["synthetic"] = REPOSITORY
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(
+                self.fx.app_config(),
+                admission.Registry((extra,)),
+            ),
+            {"review_conductor": "broken", "legacy_xapi": "broken"},
+        )
+
+        missing = admission.Enrollment(
+            *(object.__getattribute__(real, name) for name in admission.Enrollment.__dataclass_fields__)
+        )
+        missing_wrapper = admission.Registry((missing,))
+        del object.__getattribute__(missing_wrapper.enrollments[0], "__dict__")["repository"]
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(self.fx.app_config(), missing_wrapper),
+            {"review_conductor": "broken", "legacy_xapi": "broken"},
+        )
+
+        mutated = admission.Enrollment(
+            *(object.__getattribute__(real, name) for name in admission.Enrollment.__dataclass_fields__)
+        )
+        object.__setattr__(mutated, "repository", "saari-co/x-api")
+        self.assertEqual(mutated.repository, "saari-co/x-api")
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(
+                self.fx.app_config(),
+                admission.Registry((mutated,)),
+            ),
+            {"review_conductor": "broken", "legacy_xapi": "broken"},
+        )
+
+    def test_nested_legacy_xapi_marker_virtual_authority_fails_closed(self):
+        class VirtualMarker(admission.LegacyXapiMarker):
+            def __post_init__(self):
+                return
+
+            def __getattribute__(self, name):
+                if name == "repository":
+                    return REPOSITORY
+                if name == "status":
+                    return "present"
+                return object.__getattribute__(self, name)
+
+        forged = VirtualMarker("saari-co/x-api", "broken")
+        self.assertEqual(forged.repository, REPOSITORY)
+        self.assertEqual(forged.status, "present")
+        wrapper = admission.Registry((), legacy_xapi=forged)
+        self.assertEqual(wrapper.legacy_status_for(REPOSITORY), "present")
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(self.fx.app_config(), wrapper),
+            {"review_conductor": "broken", "legacy_xapi": "broken"},
+        )
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(
+                self.fx.app_config(),
+                self._load_route_registry(enroll=False),
+            ),
+            {"review_conductor": "absent", "legacy_xapi": "absent"},
+        )
+
+        class SubclassMarker(admission.LegacyXapiMarker):
+            pass
+
+        subclassed = SubclassMarker(REPOSITORY, "present")
+        self.assertEqual(subclassed.status, "present")
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(
+                self.fx.app_config(),
+                admission.Registry((), legacy_xapi=subclassed),
+            ),
+            {"review_conductor": "broken", "legacy_xapi": "broken"},
+        )
+
+        extra = admission.LegacyXapiMarker(REPOSITORY, "present")
+        object.__getattribute__(extra, "__dict__")["synthetic"] = "present"
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(
+                self.fx.app_config(),
+                admission.Registry((), legacy_xapi=extra),
+            ),
+            {"review_conductor": "broken", "legacy_xapi": "broken"},
+        )
+
+        missing = admission.LegacyXapiMarker(REPOSITORY, "present")
+        missing_wrapper = admission.Registry((), legacy_xapi=missing)
+        del object.__getattribute__(missing_wrapper.legacy_xapi, "__dict__")["status"]
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(self.fx.app_config(), missing_wrapper),
+            {"review_conductor": "broken", "legacy_xapi": "broken"},
+        )
+
+        mutated = admission.LegacyXapiMarker(REPOSITORY, "present")
+        object.__setattr__(mutated, "status", "broken")
+        self.assertEqual(mutated.status, "broken")
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(
+                self.fx.app_config(),
+                admission.Registry((), legacy_xapi=mutated),
+            ),
+            {"review_conductor": "broken", "legacy_xapi": "broken"},
+        )
+
     def test_malformed_service_profile_repository_is_broken_not_unenrolled(self):
         empty = self._load_route_registry(enroll=False)
         self.assertEqual(
@@ -3784,6 +3948,13 @@ MUTANTS = [
         "    snapshot = _registry_from_stored_fields(registry)\n    if snapshot is None:\n        return dict(broken)\n",
         "    snapshot = registry\n    if snapshot is None:\n        return dict(broken)\n",
         "AdmissionIngressTests.test_registry_subclass_overrides_cannot_synthesize_routes",
+    ),
+    (
+        "let nested Enrollment virtual attributes grant registry authority",
+        "tools/service_runtime.py",
+        "    nested = _nested_registry_values_from_stored_fields(stored)\n    if nested is None:\n        return None\n",
+        "    nested = (stored[\"enrollments\"], stored.get(\"legacy_xapi\"))\n    if nested is None:\n        return None\n",
+        "AdmissionIngressTests.test_nested_enrollment_virtual_authority_fails_closed",
     ),
     (
         "treat an out-of-scope service profile as unenrolled",

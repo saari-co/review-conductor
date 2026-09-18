@@ -727,23 +727,86 @@ def require_exact_current_binding(
         connection.close()
 
 
+def _stored_dataclass_mapping(value: Any) -> dict[str, Any] | None:
+    try:
+        stored = object.__getattribute__(value, "__dict__")
+    except AttributeError:
+        return None
+    if type(stored) is not dict:
+        return None
+    return stored
+
+
+def _exact_dataclass_from_stored_fields(value: Any, cls: type) -> Any | None:
+    """Rebuild one exact base dataclass from stored fields only.
+
+    Subclass methods, properties, and synthetic attributes cannot grant a
+    value. Missing, extra, or mutated stored fields fail closed.
+    """
+    if type(value) is not cls:
+        return None
+    stored = _stored_dataclass_mapping(value)
+    if stored is None:
+        return None
+    fields = tuple(cls.__dataclass_fields__)
+    if set(stored) != set(fields):
+        return None
+    try:
+        concrete = cls(*(stored[name] for name in fields))
+    except (admission.AdmissionError, TypeError):
+        return None
+    if type(concrete) is not cls:
+        return None
+    rebuilt = _stored_dataclass_mapping(concrete)
+    if rebuilt is None or any(rebuilt.get(name) != stored[name] for name in fields):
+        return None
+    return concrete
+
+
+def _nested_registry_values_from_stored_fields(
+    stored: dict[str, Any],
+) -> tuple[tuple[Any, ...], Any] | None:
+    raw_enrollments = stored.get("enrollments")
+    if type(raw_enrollments) is not tuple:
+        return None
+    enrollments = []
+    for item in raw_enrollments:
+        exact = _exact_dataclass_from_stored_fields(item, admission.Enrollment)
+        if exact is None:
+            return None
+        enrollments.append(exact)
+    raw_marker = stored.get("legacy_xapi")
+    if raw_marker is None:
+        marker = None
+    else:
+        marker = _exact_dataclass_from_stored_fields(raw_marker, admission.LegacyXapiMarker)
+        if marker is None:
+            return None
+    return tuple(enrollments), marker
+
+
 def _registry_from_stored_fields(registry: Any) -> admission.Registry | None:
     """Rebuild a base Registry from stored dataclass fields only.
 
     Subclass methods, properties, and synthetic attributes cannot grant a
-    route. Only the exact base fields, revalidated by Registry construction,
-    are authoritative. ``load_registry`` remains the producer of those fields.
+    route. Nested Enrollment and optional LegacyXapiMarker values are
+    snapshotted from their own exact stored base-dataclass fields and
+    revalidated into exact base-class values. ``load_registry`` remains the
+    producer of those fields.
     """
     if not isinstance(registry, admission.Registry):
         return None
-    try:
-        stored = object.__getattribute__(registry, "__dict__")
-    except AttributeError:
+    stored = _stored_dataclass_mapping(registry)
+    if stored is None:
         return None
-    if type(stored) is not dict or "enrollments" not in stored:
+    fields = tuple(admission.Registry.__dataclass_fields__)
+    if set(stored) != set(fields):
+        return None
+    nested = _nested_registry_values_from_stored_fields(stored)
+    if nested is None:
         return None
     try:
-        concrete = admission.Registry(stored["enrollments"], stored.get("legacy_xapi"))
+        concrete = admission.Registry(*nested)
     except admission.AdmissionError:
         return None
     if type(concrete) is not admission.Registry:
@@ -762,11 +825,13 @@ def trusted_enrollment_from_registry(
     Userland activation flags (``enabled`` / ``blockers``) are never consulted.
     A matching registry enrollment is Review Conductor present. Absence of that
     enrollment is unenrolled unless the loaded registry document names this
-    exact service profile in its optional ``legacy_xapi`` marker. The marker
-    is consumed only from the validated Registry field; subclass methods and
-    attributes cannot grant a status. The service-profile repository must be
-    an exact admitted-scope string before omitted-marker absence is treated
-    as legitimate none/legacy-absent. Identity, reviewer, or core
+    exact service profile in its optional ``legacy_xapi`` marker.     The marker
+    is consumed only from the validated Registry field after each nested
+    Enrollment and optional LegacyXapiMarker is reconstructed from its own
+    stored base-dataclass fields; subclass methods and attributes cannot
+    grant a status. The service-profile repository must be an exact
+    admitted-scope string before omitted-marker absence is treated as
+    legitimate none/legacy-absent. Identity, reviewer, or core
     contradictions fail closed. Dual is Conductor present plus that same
     registry-owned legacy marker for this profile.
     """
