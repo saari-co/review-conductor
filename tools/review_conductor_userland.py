@@ -2134,6 +2134,56 @@ def queue_notifications(
 NOTIFICATION_RETIRE_REASON = (
     "no longer eligible after close, supersession, or enrollment route change"
 )
+CURRENT_DECISION_IDENTITY_KEYS = ("schema", "route", "reason", "notification")
+CURRENT_NOTIFICATION_IDENTITY_KEYS = ("eligibility", "kind", "channels")
+
+
+def current_notification_decision_identity(
+    decision: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Exact current schema/route/reason/notification identity for queue rows."""
+    notification = decision["notification"]
+    return {
+        "schema": decision["schema"],
+        "route": decision["route"],
+        "reason": decision["reason"],
+        "notification": {
+            "eligibility": notification["eligibility"],
+            "kind": notification["kind"],
+            "channels": list(notification["channels"]),
+        },
+    }
+
+
+def pending_decision_matches_current(
+    prior: Any, decision: Mapping[str, Any]
+) -> bool:
+    """Return whether a stored decision is the exact current identity.
+
+    Missing, partial, or legacy identities retire fail-closed. Only an exact
+    current schema, route, reason, and notification may remain eligible.
+    """
+    expected = current_notification_decision_identity(decision)
+    if not isinstance(prior, dict) or set(prior) != set(CURRENT_DECISION_IDENTITY_KEYS):
+        return False
+    if (
+        prior.get("schema") != expected["schema"]
+        or prior.get("route") != expected["route"]
+        or prior.get("reason") != expected["reason"]
+    ):
+        return False
+    notification = prior.get("notification")
+    expected_notification = expected["notification"]
+    if (
+        not isinstance(notification, dict)
+        or set(notification) != set(CURRENT_NOTIFICATION_IDENTITY_KEYS)
+    ):
+        return False
+    return (
+        notification.get("eligibility") == expected_notification["eligibility"]
+        and notification.get("kind") == expected_notification["kind"]
+        and notification.get("channels") == expected_notification["channels"]
+    )
 
 
 def pending_review_notification_still_eligible(
@@ -2187,17 +2237,9 @@ def pending_review_notification_still_eligible(
     if eligibility not in {"merge_ready", "blocked"}:
         return False
     payload = json.loads(row["payload_json"])
-    prior = payload.get("orchestration_outcome")
-    if isinstance(prior, dict):
-        if prior.get("route") not in {None, decision["route"]}:
-            return False
-        if prior.get("reason") not in {None, decision["reason"]}:
-            return False
-        prior_notification = prior.get("notification")
-        if isinstance(prior_notification, dict):
-            if prior_notification.get("eligibility") not in {None, eligibility}:
-                return False
-    return True
+    return pending_decision_matches_current(
+        payload.get("orchestration_outcome"), decision
+    )
 
 
 def retire_pending_notification(

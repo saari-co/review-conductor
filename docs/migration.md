@@ -82,8 +82,11 @@ Hydration, action draining, result collection, and review stages run only
 on the Review Conductor route. Caller payloads cannot grant enrollment,
 and fail-closed copy prefers the canonical reason over stale persisted
 blocker text. Pending notification rows are revalidated against the
-current head and trusted enrollment before send; close, supersession, or
-an enrollment-route change retires them. `closed` and `closed_merged`
+current head and trusted enrollment before send; close, supersession,
+an enrollment-route change, or a missing/partial/legacy decision
+identity retires them. Only an exact current schema, route, reason, and
+notification may remain eligible, and identical current decisions stay
+deduped. `closed` and `closed_merged`
 stay silent and non-dispatchable even when trusted enrollment is broken.
 `run_service_tick` wires registry-owned enrollment into `run_tick` and
 does not infer legacy/none/dual/broken from userland activation flags.
@@ -94,10 +97,13 @@ absent). `load_registry` rejects malformed or ambiguous marker forms.
 after snapshotting and revalidating exact base Registry dataclass
 fields. The service-profile repository must be an exact admitted-scope
 string before omitted-marker absence is treated as legitimate none.
-Impossible state/rail/result tuples fail closed before dispatch or
-notification eligibility. The persisted-row adapter maps inconsistent
-stored rows to typed unknown results so the queue can notify blocked
-once. `human_gate=true` precedes merge-ready and silent nonterminal dispatch.
+Impossible state/rail/result tuples, including mismatched rails,
+fail closed before enrollment-route short-circuits, dispatch, or
+notification eligibility. Unknown/result/tuple coherence is validated
+after closed-state handling and before unenrolled or legacy
+short-circuits. The persisted-row adapter applies the same rail-aware
+validation and maps inconsistent stored rows to typed unknown results
+so the queue can notify blocked once. `human_gate=true` precedes merge-ready and silent nonterminal dispatch.
 Notification event identity includes canonical route/reason/eligibility
 so a superseded pending row retires while the current blocked decision
 delivers exactly once. `repair_cycle` is the

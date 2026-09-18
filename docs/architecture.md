@@ -69,11 +69,17 @@ notification queue still consumes the current-head decision; event
 identity includes canonical route, reason, and eligibility so a stale
 pending row can retire while the current blocked decision enqueues and
 delivers once. Pending rows are revalidated against the current head
-and trusted enrollment before claim or send, and ineligible rows are
-retired. Caller payloads cannot grant Conductor authority. `closed` and
+and trusted enrollment before claim or send. Missing, partial, or
+legacy decision identities retire fail-closed; only an exact current
+schema, route, reason, and notification may remain eligible, and
+identical current decisions stay deduped. Caller payloads cannot grant
+Conductor authority. `closed` and
 `closed_merged` are terminal silent non-dispatchable states on every
 direct and service-loop path, including when trusted enrollment is
 broken; closed-state handling precedes enrollment short-circuits.
+Unknown state, unknown rail results, and state/rail/result
+incoherence are validated after that closed exception and before any
+unenrolled, legacy, or broken enrollment short-circuit.
 
 The existing notification queue consumes that outcome. It does not invent a
 second sender. `repair_required` and `awaiting_adjudication` without a genuine
@@ -91,12 +97,14 @@ genuinely blocked/human-action-required outcomes notify. Terminal copy is
 optionally with the PR URL, and carries no transcript, progress, cycle, tier,
 or proof prose. A changed head preserves the 2/2 repair ledger. Representable
 fail-closed enrollment, unknown state/result, inconsistent
-state/rail/result tuples, and equivalent invalid orchestration states
-keep routing and dispatch suppressed and stay eligible for the blocked
-notification path; the queue must not raise or silently pass them. The
-persisted-row adapter maps inconsistent stored state/rail data to typed
-unknown results so a malformed current row still notifies once.
-Impossible contradictions are rejected before any review_dispatch or
+state/rail/result tuples, mismatched rails, and equivalent invalid
+orchestration states keep routing and dispatch suppressed and stay
+eligible for the blocked notification path; the queue must not raise or
+silently pass them. The persisted-row adapter applies the same
+rail-aware validation and maps inconsistent stored state/rail data to
+typed unknown results so a malformed current row still notifies once.
+Impossible contradictions, including a blocked or running state with
+the wrong rail, are rejected before any review_dispatch or
 notification eligibility is calculated. Fail-closed copy uses the
 canonical decision reason, not stale persisted blocker text. Direct
 public contract inputs still raise. See the

@@ -28,13 +28,20 @@ The service-profile repository must be an exact admitted-scope string
 before omitted-marker absence is treated as legitimate none. Userland
 `enabled` / `blockers` flags do not select the route. Pending rows are
 revalidated before send; event identity includes route, reason, and
-eligibility. `human_gate=true` precedes merge-ready and silent
-nonterminal dispatch. Impossible state/rail/result tuples fail closed
-before any review_dispatch or notification eligibility is calculated.
-The persisted-row adapter maps inconsistent stored state/rail data to
-typed unknown results. `closed` / `closed_merged` are terminal, silent,
+eligibility. Missing, partial, or legacy decision identities retire
+fail-closed; only an exact current schema, route, reason, and
+notification may deliver, and identical current decisions stay
+deduped. `human_gate=true` precedes merge-ready and silent
+nonterminal dispatch. Impossible state/rail/result tuples, including
+mismatched rails, fail closed before any enrollment-route
+short-circuit, review_dispatch, or notification eligibility is
+calculated. The persisted-row adapter applies the same rail-aware
+validation and maps inconsistent stored state/rail data to typed
+unknown results. `closed` / `closed_merged` are terminal, silent,
 and non-dispatchable even when enrollment is broken; closed-state
-handling precedes enrollment short-circuits. `notification.eligibility`
+handling precedes enrollment short-circuits. Unknown/result/tuple
+coherence is validated after that closed exception and before
+unenrolled or legacy short-circuits. `notification.eligibility`
 has no `fail_closed` value; representable failures use `blocked`. The
 public schema accepts only producer-emittable eligibility/kind/channel
 combinations.
