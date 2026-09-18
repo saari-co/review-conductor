@@ -2019,16 +2019,56 @@ def notification_event_identity(
     *,
     failure_attempt: int = 0,
 ) -> str:
-    """Canonical queue identity: exact tuple plus decision route/reason/eligibility."""
-    eligibility = decision["notification"]["eligibility"]
+    """Canonical queue identity: exact tuple plus complete decision identity."""
+    notification = decision["notification"]
+    kind = notification["kind"] or ""
+    channels = ",".join(notification["channels"])
+    eligibility = notification["eligibility"]
     identity = (
         f"{row['repository']}|{row['pr_number']}|{row['base_sha']}|"
         f"{row['head_sha']}|{row['review_epoch']}|{row['state']}|{row['repair_cycle']}|"
-        f"{decision['route']}|{decision['reason']}|{eligibility}"
+        f"{decision['schema']}|{decision['route']}|{decision['reason']}|"
+        f"{kind}|{channels}|{eligibility}"
     )
     if row["state"] == "openclaw_failed":
         identity += f"|{failure_attempt}"
     return identity
+
+
+def notification_failure_attempt(
+    connection: sqlite3.Connection,
+    row: Mapping[str, Any],
+) -> int:
+    """Current OpenClaw failure attempt that belongs in the event key."""
+    if row["state"] != "openclaw_failed":
+        return 0
+    failed_action = core.tuple_action(
+        connection,
+        {
+            "repository": row["repository"],
+            "pr_number": row["pr_number"],
+            "base_sha": row["base_sha"],
+            "head_sha": row["head_sha"],
+        },
+        "openclaw.enqueue",
+        int(row["review_epoch"]),
+    )
+    return int(failed_action["attempts"]) if failed_action else 0
+
+
+def current_notification_event_key(
+    connection: sqlite3.Connection,
+    row: Mapping[str, Any],
+    decision: Mapping[str, Any],
+) -> str:
+    """Hash the complete current event key, including retry attempt."""
+    return hashlib.sha256(
+        notification_event_identity(
+            row,
+            decision,
+            failure_attempt=notification_failure_attempt(connection, row),
+        ).encode()
+    ).hexdigest()
 
 
 def queue_notifications(
@@ -2071,25 +2111,8 @@ def queue_notifications(
                 raise orchestration.OrchestrationError(
                     decision["reason"] or "notification eligibility is not actionable"
                 )
-            failure_attempt = 0
-            if row["state"] == "openclaw_failed":
-                failed_action = core.tuple_action(
-                    connection,
-                    {
-                        "repository": row["repository"],
-                        "pr_number": row["pr_number"],
-                        "base_sha": row["base_sha"],
-                        "head_sha": row["head_sha"],
-                    },
-                    "openclaw.enqueue",
-                    int(row["review_epoch"]),
-                )
-                failure_attempt = int(failed_action["attempts"]) if failed_action else 0
             channels = decision["notification"]["channels"]
-            event_identity = notification_event_identity(
-                row, decision, failure_attempt=failure_attempt
-            )
-            event_key = hashlib.sha256(event_identity.encode()).hexdigest()
+            event_key = current_notification_event_key(connection, row, decision)
             payload = {
                 "schema": NOTIFICATION_SCHEMA,
                 "event_key": event_key,
@@ -2129,6 +2152,185 @@ def queue_notifications(
         return created
     finally:
         connection.close()
+
+
+NOTIFICATION_RETIRE_REASON = (
+    "no longer eligible after close, supersession, or enrollment route change"
+)
+CURRENT_DECISION_IDENTITY_KEYS = ("schema", "route", "reason", "notification")
+CURRENT_NOTIFICATION_IDENTITY_KEYS = ("eligibility", "kind", "channels")
+
+
+def current_notification_decision_identity(
+    decision: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Exact current schema/route/reason/notification identity for queue rows."""
+    notification = decision["notification"]
+    return {
+        "schema": decision["schema"],
+        "route": decision["route"],
+        "reason": decision["reason"],
+        "notification": {
+            "eligibility": notification["eligibility"],
+            "kind": notification["kind"],
+            "channels": list(notification["channels"]),
+        },
+    }
+
+
+def pending_decision_matches_current(
+    prior: Any, decision: Mapping[str, Any]
+) -> bool:
+    """Return whether a stored decision is the exact current identity.
+
+    Missing, partial, or legacy identities retire fail-closed. Only an exact
+    current schema, route, reason, and notification may remain eligible.
+    """
+    expected = current_notification_decision_identity(decision)
+    if not isinstance(prior, dict) or set(prior) != set(CURRENT_DECISION_IDENTITY_KEYS):
+        return False
+    if (
+        prior.get("schema") != expected["schema"]
+        or prior.get("route") != expected["route"]
+        or prior.get("reason") != expected["reason"]
+    ):
+        return False
+    notification = prior.get("notification")
+    expected_notification = expected["notification"]
+    if (
+        not isinstance(notification, dict)
+        or set(notification) != set(CURRENT_NOTIFICATION_IDENTITY_KEYS)
+    ):
+        return False
+    return (
+        notification.get("eligibility") == expected_notification["eligibility"]
+        and notification.get("kind") == expected_notification["kind"]
+        and notification.get("channels") == expected_notification["channels"]
+    )
+
+
+def pending_review_notification_still_eligible(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row,
+    trusted_enrollment: Mapping[str, str],
+) -> bool:
+    """Return whether a pending review-result row may still be claimed.
+
+    Operator alerts stay unbound. Review-result rows must still match the
+    current head tuple and a currently eligible trusted decision, including
+    the live enrollment/route revalidated at this boundary.
+    """
+    if int(row["pr_number"]) == 0:
+        return True
+    head = connection.execute(
+        """
+        SELECT * FROM heads
+        WHERE repository = ? AND pr_number = ? AND is_current = 1
+        """,
+        (row["repository"], row["pr_number"]),
+    ).fetchone()
+    if head is None:
+        return False
+    if (
+        head["base_sha"] != row["base_sha"]
+        or head["head_sha"] != row["head_sha"]
+        or int(head["review_epoch"]) != int(row["review_epoch"])
+        or head["state"] != row["state"]
+    ):
+        return False
+    quality = connection.execute(
+        """
+        SELECT * FROM clawsweeper_quality
+        WHERE repository = ? AND pr_number = ? AND base_sha = ?
+          AND head_sha = ? AND review_epoch = ?
+        """,
+        (
+            head["repository"],
+            head["pr_number"],
+            head["base_sha"],
+            head["head_sha"],
+            head["review_epoch"],
+        ),
+    ).fetchone()
+    decision = orchestration.decide_orchestration_outcome(
+        orchestration.outcome_from_review_row(
+            head, quality, enrollment=trusted_enrollment
+        )
+    )
+    eligibility = decision["notification"]["eligibility"]
+    if eligibility not in {"merge_ready", "blocked"}:
+        return False
+    if current_notification_event_key(connection, head, decision) != row["event_key"]:
+        return False
+    payload = json.loads(row["payload_json"])
+    return pending_decision_matches_current(
+        payload.get("orchestration_outcome"), decision
+    )
+
+
+def claimed_notification_still_current(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row,
+    trusted_enrollment: Mapping[str, str],
+) -> bool:
+    """Revalidate a claimed row against the current state and complete decision.
+
+    The claim/send fence binds the expected head state, trusted
+    enrollment/route, and canonical orchestration identity immediately
+    before transport. A write reservation then serializes the last
+    current-decision check with send so a webhook that advances the
+    same tuple, or a route change visible after this predicate, retires
+    the stale row. A service-owned registry/route lease, when supplied,
+    is held through ``notifier.send`` so a cooperating replacement
+    cannot change that route between this check and transport.
+    """
+    return pending_review_notification_still_eligible(
+        connection, row, trusted_enrollment
+    )
+
+
+def hold_registry_send_lease(registry_lease: Any):
+    """Hold a cooperating registry/route lease through notifier.send.
+
+    The supported versioned replacement contract fail-closes while this
+    hold is active. Absence of a lease preserves the userland path.
+    This is not a guarantee against arbitrary OS-level registry writes.
+    """
+    if registry_lease is None:
+        return contextlib.nullcontext()
+    hold = getattr(registry_lease, "hold_send", None)
+    if not callable(hold):
+        raise UserlandError("registry send lease is invalid")
+    return hold()
+
+
+def retire_notification(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    required_status: str = "pending",
+) -> bool:
+    updated = connection.execute(
+        """
+        UPDATE notification_deliveries
+        SET status = 'retired', last_error = ?, updated_at = ?
+        WHERE event_key = ? AND channel = ? AND status = ?
+        """,
+        (
+            NOTIFICATION_RETIRE_REASON,
+            core.utc_now(),
+            row["event_key"],
+            row["channel"],
+            required_status,
+        ),
+    )
+    return updated.rowcount == 1
+
+
+def retire_pending_notification(
+    connection: sqlite3.Connection, row: sqlite3.Row
+) -> bool:
+    return retire_notification(connection, row, required_status="pending")
 
 
 def suppressed_review_stages() -> dict[str, Any]:
@@ -2252,10 +2454,22 @@ def deliver_notifications(
     enrollment: Mapping[str, str] | None = None,
     authority_client: Any | None = None,
     authoritative: bool = False,
+    enrollment_resolver: Any | None = None,
+    registry_lease: Any | None = None,
 ) -> dict[str, Any]:
     trusted_enrollment = orchestration.effective_trusted_enrollment(
         config, enrollment, authoritative=authoritative
     )
+
+    def live_trusted_enrollment() -> dict[str, str]:
+        if enrollment_resolver is not None:
+            return orchestration.require_trusted_pair(enrollment_resolver())
+        if not authoritative:
+            return orchestration.effective_trusted_enrollment(
+                config, enrollment, authoritative=False
+            )
+        return trusted_enrollment
+
     routed = dict(config)
     owned = dict(routed.get("enrollment") or {})
     owned.update(trusted_enrollment)
@@ -2275,6 +2489,30 @@ def deliver_notifications(
         ).fetchall()
         for row in rows:
             payload = json.loads(row["payload_json"])
+            if not pending_review_notification_still_eligible(
+                connection, row, live_trusted_enrollment()
+            ):
+                if dry_run:
+                    outcomes.append(
+                        {
+                            "event_key": row["event_key"],
+                            "channel": row["channel"],
+                            "result": "retired",
+                        }
+                    )
+                    continue
+                if retire_pending_notification(connection, row):
+                    connection.commit()
+                    outcomes.append(
+                        {
+                            "event_key": row["event_key"],
+                            "channel": row["channel"],
+                            "result": "retired",
+                        }
+                    )
+                else:
+                    connection.rollback()
+                continue
             if dry_run:
                 outcomes.append({"event_key": row["event_key"], "channel": row["channel"], "result": "planned"})
                 continue
@@ -2323,42 +2561,87 @@ def deliver_notifications(
                         "notification authority denial changed during recovery"
                     ) from exc
                 raise
-            try:
-                notifier.send(row["channel"], payload["message"])
-            except NotificationUnavailable as exc:
-                connection.execute(
-                    """
-                    UPDATE notification_deliveries
-                    SET status = 'pending', last_error = ?, updated_at = ?
-                    WHERE event_key = ? AND channel = ? AND status = 'uncertain'
-                    """,
-                    (str(exc)[:300], core.utc_now(), row["event_key"], row["channel"]),
-                )
-                connection.commit()
-                outcomes.append({"event_key": row["event_key"], "channel": row["channel"], "result": "not_ready"})
+            # Bind the claim/send fence to the expected current state and
+            # complete canonical decision immediately before transport.
+            if not claimed_notification_still_current(
+                connection, row, live_trusted_enrollment()
+            ):
+                if retire_notification(
+                    connection, row, required_status="uncertain"
+                ):
+                    connection.commit()
+                    outcomes.append(
+                        {
+                            "event_key": row["event_key"],
+                            "channel": row["channel"],
+                            "result": "retired",
+                        }
+                    )
+                else:
+                    connection.rollback()
                 continue
-            except core.ContractError as exc:
-                connection.execute(
-                    """
-                    UPDATE notification_deliveries
-                    SET last_error = ?, updated_at = ?
-                    WHERE event_key = ? AND channel = ? AND status = 'uncertain'
-                    """,
-                    (str(exc)[:300], core.utc_now(), row["event_key"], row["channel"]),
-                )
-                connection.commit()
-                outcomes.append({"event_key": row["event_key"], "channel": row["channel"], "result": "uncertain"})
-                continue
-            connection.execute(
-                """
-                UPDATE notification_deliveries
-                SET status = 'sent', last_error = NULL, updated_at = ?
-                WHERE event_key = ? AND channel = ? AND status = 'uncertain'
-                """,
-                (core.utc_now(), row["event_key"], row["channel"]),
-            )
+            # The uncertain claim is already committed. Reserve writes across
+            # the last current-decision check and transport so a webhook
+            # cannot commit a new state in that gap. A transition visible
+            # after the unlocked predicate retires under this reservation.
+            # Hold the cooperating registry/route lease through send so a
+            # supported replacement cannot change the route in that window.
             connection.commit()
-            outcomes.append({"event_key": row["event_key"], "channel": row["channel"], "result": "sent"})
+            connection.execute("BEGIN IMMEDIATE")
+            with hold_registry_send_lease(registry_lease):
+                if not claimed_notification_still_current(
+                    connection, row, live_trusted_enrollment()
+                ):
+                    if retire_notification(
+                        connection, row, required_status="uncertain"
+                    ):
+                        connection.commit()
+                        outcomes.append(
+                            {
+                                "event_key": row["event_key"],
+                                "channel": row["channel"],
+                                "result": "retired",
+                            }
+                        )
+                    else:
+                        connection.rollback()
+                    continue
+                try:
+                    notifier.send(row["channel"], payload["message"])
+                except NotificationUnavailable as exc:
+                    connection.execute(
+                        """
+                        UPDATE notification_deliveries
+                        SET status = 'pending', last_error = ?, updated_at = ?
+                        WHERE event_key = ? AND channel = ? AND status = 'uncertain'
+                        """,
+                        (str(exc)[:300], core.utc_now(), row["event_key"], row["channel"]),
+                    )
+                    connection.commit()
+                    outcomes.append({"event_key": row["event_key"], "channel": row["channel"], "result": "not_ready"})
+                    continue
+                except core.ContractError as exc:
+                    connection.execute(
+                        """
+                        UPDATE notification_deliveries
+                        SET last_error = ?, updated_at = ?
+                        WHERE event_key = ? AND channel = ? AND status = 'uncertain'
+                        """,
+                        (str(exc)[:300], core.utc_now(), row["event_key"], row["channel"]),
+                    )
+                    connection.commit()
+                    outcomes.append({"event_key": row["event_key"], "channel": row["channel"], "result": "uncertain"})
+                    continue
+                connection.execute(
+                    """
+                    UPDATE notification_deliveries
+                    SET status = 'sent', last_error = NULL, updated_at = ?
+                    WHERE event_key = ? AND channel = ? AND status = 'uncertain'
+                    """,
+                    (core.utc_now(), row["event_key"], row["channel"]),
+                )
+                connection.commit()
+                outcomes.append({"event_key": row["event_key"], "channel": row["channel"], "result": "sent"})
         return {
             "schema": "smoky.review-conductor.notifications.v1",
             "result": "planned" if dry_run else "processed",
@@ -2376,6 +2659,8 @@ def run_tick(
     *,
     dry_run: bool,
     enrollment: Mapping[str, str] | None = None,
+    enrollment_resolver: Any | None = None,
+    registry_lease: Any | None = None,
 ) -> dict[str, Any]:
     profiles.require_enabled(config)
     if enrollment is None:
@@ -2417,6 +2702,8 @@ def run_tick(
         enrollment=trusted_enrollment,
         authority_client=client,
         authoritative=True,
+        enrollment_resolver=enrollment_resolver,
+        registry_lease=registry_lease,
     )
     return {
         "schema": "smoky.review-conductor.userland-tick.v1",

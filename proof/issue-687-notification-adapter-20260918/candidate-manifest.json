@@ -1,0 +1,24 @@
+{
+  "schema": "review-conductor.candidate-manifest.v1",
+  "base_sha": "8cc4094e88c8cd04c5b7da28e0c6a9ef054ea69c",
+  "starting_head_sha": "8cc4094e88c8cd04c5b7da28e0c6a9ef054ea69c",
+  "parent_candidate_sha": "6497a3266feffe2d81b10d57015d736e92dd9b5a",
+  "retained_starting_head_sha": "6497a3266feffe2d81b10d57015d736e92dd9b5a",
+  "preserved_full_candidate_sha": "6eaf99ef11180ea523db3229c2e5c49c736bdd64",
+  "captured_date": "2026-09-18",
+  "binding_scheme": "A commit cannot contain its own SHA. parent_candidate_sha is the reduced PR #18 routing/admission core this stacked adapter starts from. preserved_full_candidate_sha is the pre-split full candidate used only as the restore source. Per-file sha256 values are of this adapter candidate source. The branch head after commit is the exact candidate SHA for hosted CI. This restores notification delivery/authority and repairs Copilot 5243987118. No Copilot, OpenClaw, or ClawSweeper review is requested from this packet.",
+  "files": {
+    "docs/architecture.md": "0068c74beaaf382aaa52681f1ccff5d2f5a7311dc2b9d10b1c10df5b4b603aea",
+    "docs/integration-contract.md": "376416c3e675aa5d076e3d4924ec2b307d7d46ebbd8e582754965b9caf035b77",
+    "docs/migration.md": "56316d65257b25b29e74412b3fababd95fd48be98ff95ed5dd7d8ab6c8124f28",
+    "docs/orchestration-decision-map.md": "98819f1a77035182dc46d1b9e6a2b70492e4aa893cda9663fd02f18fbcb8840e",
+    "docs/provenance.json": "52be3ef00ab4d2bfcd7a5f4bd8d2661f6a3ad85f71882b35bb95db9b1ee431d6",
+    "proof/issue-687-notification-adapter-20260918/PROOF.md": "c01f97b6feff2cd320aeed712a7e751841c1d2b06ca780e9dc9912800268bc84",
+    "tests/test_orchestration_outcome.py": "d9169ac9037dc2f355e0038b8b20f955106241a52d7cec928c8a8e7abe54a85c",
+    "tests/test_review_conductor_userland.py": "59df7131bfff9fa915ea508d4baa96fcbc18226d6e3a4f3a1398220b4ea792f2",
+    "tests/test_service_runtime.py": "4c0f766f73d446888a8df9e809c739062199d83b9b45b3751538bcd0cc29dd44",
+    "tools/orchestration_outcome.py": "a34065c6783855a83ef77e8cdbfc0aac511f94d048a2782e1b36075fe5d6ea58",
+    "tools/review_conductor_userland.py": "f4ae0d570ae53612baf477f931b58004d27659440e6b314ed87daa4667e6c0b3",
+    "tools/service_runtime.py": "112524198e93d9df7edda4420cd69384ee16262ccbc09f10759cbe2cf27ae001"
+  }
+}

@@ -76,19 +76,42 @@ stay real runtime behavior and never dispatch x-api. An explicit
 `human_gate=true` takes precedence over merge-ready and silent
 nonterminal progression: no structurally valid gated input may become
 `merge_ready` or continue review dispatch silently. The existing
-notification queue consumes the current-head decision for eligibility
-only: silent/none outcomes are not queued, and merge-ready or
-genuinely blocked/fail-closed outcomes remain eligible. Send leases,
-reserved claim/send fencing, route-freshness guards used only for
-delivery, and complete current-event revalidation are stacked adapter
-work, not this routing/admission core.
+notification queue still consumes the current-head decision; event
+identity includes canonical route, reason, and eligibility so a stale
+pending row can retire while the current blocked decision enqueues and
+delivers once. Pending rows are revalidated against the current head
+and trusted enrollment before claim, and the claim/send fence is bound
+to the expected current state, live trusted enrollment/route, and
+complete canonical decision immediately before transport. A write
+reservation serializes that final current-decision check with send. A
+webhook that advances the same tuple between eligibility and send, or
+after the unlocked predicate returns, retires the stale row. A route
+change between service admission/snapshot and delivery retires the
+stale notification rather than sending obsolete blocked/ready copy.
+The reserved send boundary also holds a versioned service-owned
+registry/route lease through `notifier.send`, so a cooperating
+registry replacement cannot occur between final validation and
+transport. The supported replace/lease contract fail-closes while
+that hold is active. This is not a guarantee against arbitrary
+nonconforming OS-level writes.
 Public enum-like inputs require exact builtin strings before
 membership checks and raise `OrchestrationError` for unhashable or
 subclass tokens; persisted readiness/quality flags accept only stored
-integer `0`/`1` and otherwise map to unknown rail results. Exact
-binding checks remain Conductor-only. Caller payloads cannot grant
-Conductor authority. Identical current eligibility decisions stay
-deduped by route, reason, and eligibility. `closed` and
+integer `0`/`1` and otherwise map to unknown rail results. A
+long-lived GitHub App client keeps a route-freshness guard on every
+live route, re-resolves and compares the trusted pair, and adds exact
+binding checks only for the Conductor route so a Conductor-to-broken
+tick delivers the fail-closed alert instead of restoring it with a
+stale Conductor guard. Missing, partial, or
+legacy decision identities retire fail-closed; only an exact current
+schema, route, reason, and notification may remain eligible, and
+identical current decisions stay deduped. Notification event identity
+includes complete canonical schema, kind, channels, and decision
+identity so a retired key cannot suppress the current notification.
+Retry-attempt changes revalidate that complete current event key so
+attempt 1 and attempt 2 cannot both send. Malformed persisted rail or
+state tokens notify blocked once instead of aborting the queue.
+Caller payloads cannot grant Conductor authority. `closed` and
 `closed_merged` are terminal silent non-dispatchable states on every
 direct and service-loop path, including when trusted enrollment is
 broken; closed-state handling precedes enrollment short-circuits.
@@ -114,12 +137,10 @@ or proof prose. A changed head preserves the 2/2 repair ledger. Representable
 fail-closed enrollment, unknown state/result, inconsistent
 state/rail/result tuples, mismatched rails, and equivalent invalid
 orchestration states keep routing and dispatch suppressed and stay
-eligible for the blocked notification path. The persisted-row adapter
-applies the same rail-aware validation and maps inconsistent stored
-state/rail data to typed unknown results. Direct public contract
-inputs remain strict. Delivering one concise blocked notification
-for every malformed persisted rail/state token is stacked adapter
-work.
+eligible for the blocked notification path; the queue must not raise or
+silently pass them. The persisted-row adapter applies the same
+rail-aware validation and maps inconsistent stored state/rail data to
+typed unknown results so a malformed current row still notifies once.
 Impossible contradictions, including a blocked or running state with
 the wrong rail, are rejected before any review_dispatch or
 notification eligibility is calculated. Fail-closed copy uses the
