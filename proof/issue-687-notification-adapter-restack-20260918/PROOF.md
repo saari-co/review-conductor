@@ -7,8 +7,9 @@
   `/Users/cp-1/.openclaw/worktrees/0dbf576623060113/review-conductor-issue-687-routing-v1`
 - Stacked branch: `openclaw/review-conductor-issue-687-notification-adapter-v1`
 - Corrected PR #18 core now merged as an ancestor:
-  `04b2f583c7cf9a6a62dd0428b2497fb55087c754`
+  `9b82ea60cfd25e3ae794ea910c369d1041a29c08`
   (`openclaw/review-conductor-issue-687-routing-v1`).
+- Previous restack head: `2e66c36cd3154c98a7e1102f6460e67a1f7f62eb`.
 - Previous adapter head whose runtime behavior is preserved:
   `65b10aff8faa78550f899881505b286b9116caae`.
 - Preservation branch, exact full pre-split candidate:
@@ -26,8 +27,11 @@
 
 A commit cannot contain its own SHA. `candidate-manifest.json` records the
 corrected-core parent SHA and per-file source hashes for the adapter slice
-relative to that core. The branch head after the proof commit is the exact
-adapter SHA for later CI.
+relative to that core. Hosted CI
+[35308052574](https://github.com/saari-co/review-conductor/actions/runs/35308052574)
+passed on exact core `9b82ea60cfd25e3ae794ea910c369d1041a29c08`. Hosted CI
+[35307529790](https://github.com/saari-co/review-conductor/actions/runs/35307529790)
+passed on previous restack head `2e66c36cd3154c98a7e1102f6460e67a1f7f62eb`.
 
 Historical packet `proof/issue-687-notification-adapter-20260918/` remains
 exact-head truthful for `65b10aff8faa78550f899881505b286b9116caae`.
@@ -83,11 +87,13 @@ Fixture PASS is not a deployed review PASS.
 | `make check` | passed |
 | `make build` | passed; wrote `dist/review-conductor.pyz` (untracked, not committed) |
 | `python3 scripts/check_whitespace.py` against `origin/main` and against the corrected core | recorded after the candidate commit |
+| Hosted CI `35308052574` on core `9b82ea60cfd25e3ae794ea910c369d1041a29c08` | passed; https://github.com/saari-co/review-conductor/actions/runs/35308052574 |
+| Hosted CI `35307529790` on restack `2e66c36cd3154c98a7e1102f6460e67a1f7f62eb` | passed; https://github.com/saari-co/review-conductor/actions/runs/35307529790 |
 
 Exact-head whitespace is `scripts/check_whitespace.py` against
 `8cc4094e88c8cd04c5b7da28e0c6a9ef054ea69c` and the post-commit HEAD. The
 same script is also run against the corrected core tip
-`04b2f583c7cf9a6a62dd0428b2497fb55087c754`.
+`9b82ea60cfd25e3ae794ea910c369d1041a29c08`.
 
 ## Untouched boundaries
 
@@ -95,11 +101,17 @@ same script is also run against the corrected core tip
   Git-only packet.
 - No x-api, spark-dgx, ClawSweeper, OpenClaw, or target-repository source.
 - No Copilot, OpenClaw, or ClawSweeper review is requested from this
-  packet. This PR stays draft/open, stacked on the corrected PR #18 branch,
-  and does not merge or activate.
+  packet. Hosted CI
+  [35308052574](https://github.com/saari-co/review-conductor/actions/runs/35308052574)
+  passed on exact core `9b82ea60cfd25e3ae794ea910c369d1041a29c08`. Hosted CI
+  [35307529790](https://github.com/saari-co/review-conductor/actions/runs/35307529790)
+  passed on previous restack head `2e66c36cd3154c98a7e1102f6460e67a1f7f62eb`.
+  This PR stays draft/open, stacked on the corrected PR #18 branch, and does
+  not merge or activate.
 
 ## Remaining issue
 
-Exact-head hosted CI for the new adapter SHA and for the corrected core SHA.
-CI green is not external review clearance. No merge, deploy, live
-notification, or additional review request is made from this packet.
+The adapter remains stacked on the corrected PR #18 tip. Hosted CI already
+passed on that core and on the previous restack head; CI green is not
+external review clearance. No merge, deploy, live notification, or
+additional review request is made from this packet.
