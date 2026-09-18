@@ -42,9 +42,16 @@ and tick. The same v2 registry may carry an optional exact-profile
 `trusted_enrollment_from_registry` consumes only that loaded field
 after snapshotting and revalidating the exact base Registry dataclass
 fields and each nested Enrollment and optional LegacyXapiMarker from
-its own stored base-dataclass fields. The service-profile repository
+its own stored base-dataclass fields. Nested authority-bearing
+strings and IDs must be exact builtins; reconstruction compares those
+exact base values so a str subclass cannot synthesize repository, ID,
+or legacy authority. The service-profile repository
 must be an exact admitted-scope string before omitted-marker absence
-is treated as legitimate none.
+is treated as legitimate none. External registry document
+validation/loading is separate from strict Conductor ingress
+admission, so the production worker can represent Conductor,
+legacy-only, none, dual, and broken routes while webhook ingress
+remains enrolled-only.
 See [trusted admission](trusted-admission.md).
 No live registry, credential, HTTPS edge or deployment exists, so this is
 qualified source behavior, not live admission.

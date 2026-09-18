@@ -2242,23 +2242,49 @@ def pending_review_notification_still_eligible(
     )
 
 
-def retire_pending_notification(
-    connection: sqlite3.Connection, row: sqlite3.Row
+def claimed_notification_still_current(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row,
+    trusted_enrollment: Mapping[str, str],
+) -> bool:
+    """Revalidate a claimed row against the current state and complete decision.
+
+    The claim/send fence binds the expected head state and canonical
+    orchestration identity immediately before transport. A webhook that
+    advances the same tuple after eligibility must retire the stale row.
+    """
+    return pending_review_notification_still_eligible(
+        connection, row, trusted_enrollment
+    )
+
+
+def retire_notification(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    required_status: str = "pending",
 ) -> bool:
     updated = connection.execute(
         """
         UPDATE notification_deliveries
         SET status = 'retired', last_error = ?, updated_at = ?
-        WHERE event_key = ? AND channel = ? AND status = 'pending'
+        WHERE event_key = ? AND channel = ? AND status = ?
         """,
         (
             NOTIFICATION_RETIRE_REASON,
             core.utc_now(),
             row["event_key"],
             row["channel"],
+            required_status,
         ),
     )
     return updated.rowcount == 1
+
+
+def retire_pending_notification(
+    connection: sqlite3.Connection, row: sqlite3.Row
+) -> bool:
+    return retire_notification(connection, row, required_status="pending")
 
 
 def suppressed_review_stages() -> dict[str, Any]:
@@ -2477,6 +2503,25 @@ def deliver_notifications(
                         "notification authority denial changed during recovery"
                     ) from exc
                 raise
+            # Bind the claim/send fence to the expected current state and
+            # complete canonical decision immediately before transport.
+            if not claimed_notification_still_current(
+                connection, row, trusted_enrollment
+            ):
+                if retire_notification(
+                    connection, row, required_status="uncertain"
+                ):
+                    connection.commit()
+                    outcomes.append(
+                        {
+                            "event_key": row["event_key"],
+                            "channel": row["channel"],
+                            "result": "retired",
+                        }
+                    )
+                else:
+                    connection.rollback()
+                continue
             try:
                 notifier.send(row["channel"], payload["message"])
             except NotificationUnavailable as exc:

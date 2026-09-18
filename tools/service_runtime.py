@@ -737,11 +737,28 @@ def _stored_dataclass_mapping(value: Any) -> dict[str, Any] | None:
     return stored
 
 
+_UNUSABLE_FIELD = object()
+
+
+def _exact_base_field(value: Any) -> Any:
+    """Copy one stored field into an exact builtin. Subclasses fail closed."""
+    if type(value) is str:
+        return str(value)
+    if type(value) is int:
+        return int(value)
+    if value is None:
+        return None
+    return _UNUSABLE_FIELD
+
+
 def _exact_dataclass_from_stored_fields(value: Any, cls: type) -> Any | None:
     """Rebuild one exact base dataclass from stored fields only.
 
     Subclass methods, properties, and synthetic attributes cannot grant a
-    value. Missing, extra, or mutated stored fields fail closed.
+    value. Authority-bearing string and integer fields must be exact
+    builtins; missing, extra, mutated, or subclassed stored fields fail
+    closed. Reconstruction compares the rebuilt exact base values, not
+    attacker-controlled equality on the original stored objects.
     """
     if type(value) is not cls:
         return None
@@ -751,15 +768,25 @@ def _exact_dataclass_from_stored_fields(value: Any, cls: type) -> Any | None:
     fields = tuple(cls.__dataclass_fields__)
     if set(stored) != set(fields):
         return None
+    args = []
+    for name in fields:
+        exact = _exact_base_field(stored[name])
+        if exact is _UNUSABLE_FIELD:
+            return None
+        args.append(exact)
     try:
-        concrete = cls(*(stored[name] for name in fields))
+        concrete = cls(*args)
     except (admission.AdmissionError, TypeError):
         return None
     if type(concrete) is not cls:
         return None
     rebuilt = _stored_dataclass_mapping(concrete)
-    if rebuilt is None or any(rebuilt.get(name) != stored[name] for name in fields):
+    if rebuilt is None:
         return None
+    for name, exact in zip(fields, args):
+        current = rebuilt.get(name)
+        if type(current) is not type(exact) or current != exact:
+            return None
     return concrete
 
 

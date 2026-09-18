@@ -96,9 +96,18 @@ absent). `load_registry` rejects malformed or ambiguous marker forms.
 `trusted_enrollment_from_registry` consumes only that loaded field
 after snapshotting and revalidating exact base Registry dataclass
 fields and each nested Enrollment and optional LegacyXapiMarker from
-its own stored base-dataclass fields. The service-profile repository
+its own stored base-dataclass fields. Nested authority-bearing
+strings and IDs must be exact builtins; reconstruction compares those
+exact base values so a str subclass cannot synthesize repository, ID,
+or legacy authority. The service-profile repository
 must be an exact admitted-scope string before omitted-marker absence
-is treated as legitimate none.
+is treated as legitimate none. `service_entrypoint.registry_provider`
+loads and validates the external registry document without applying
+`require_profile_enrolled`; webhook ingress remains strict while the
+production worker can represent Conductor, legacy-only, none, dual,
+and broken routes. Pending notification claim/send is bound to the
+expected current state and complete canonical decision, so a webhook
+transition between eligibility and send retires the stale row.
 Impossible state/rail/result tuples, including mismatched rails,
 fail closed before enrollment-route short-circuits, dispatch, or
 notification eligibility. Unknown/result/tuple coherence is validated

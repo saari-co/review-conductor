@@ -173,6 +173,34 @@ class RegistryTests(unittest.TestCase):
         with self.assertRaises(ta.AdmissionError):
             ta.LegacyXapiMarker(SMCBD, "broken")
 
+    def test_nested_authority_fields_reject_str_subclasses(self):
+        class Alias(str):
+            def __eq__(self, other):
+                return True
+
+        enrollment = self.fx.registry().enrollments[0]
+        fields = {
+            name: object.__getattribute__(enrollment, name)
+            for name in ta.Enrollment.__dataclass_fields__
+        }
+        string_fields = (
+            "repository",
+            "installation_account",
+            "approved_policy_commit",
+            "approved_policy_sha256",
+            "reviewer_openclaw",
+            "reviewer_clawsweeper",
+        )
+        for name in string_fields:
+            forged = dict(fields)
+            forged[name] = Alias(fields[name])
+            with self.subTest(field=name), self.assertRaises(ta.AdmissionError):
+                ta.Enrollment(**forged)
+        with self.assertRaises(ta.AdmissionError):
+            ta.LegacyXapiMarker(Alias(SMCBD), "present")
+        with self.assertRaises(ta.AdmissionError):
+            ta.LegacyXapiMarker(SMCBD, Alias("present"))
+
     def test_lookup_requires_every_identity_component(self):
         registry = self.fx.registry()
         self.assertEqual(registry.lookup(BLOCKS, 1306882611, BLOCKS_APP, BLOCKS_INSTALL).repository, BLOCKS)

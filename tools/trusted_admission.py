@@ -50,20 +50,26 @@ def _positive_int(value, label):
     return value
 
 
+def _exact_str(value, label):
+    if type(value) is not str:
+        _fail(f"{label} must be an exact string")
+    return value
+
+
 def _sha1(value, label):
-    if not isinstance(value, str) or not SHA1_RE.fullmatch(value):
+    if type(value) is not str or not SHA1_RE.fullmatch(value):
         _fail(f"{label} must be a 40-character lowercase hex commit")
     return value
 
 
 def _sha256(value, label):
-    if not isinstance(value, str) or not SHA256_RE.fullmatch(value):
+    if type(value) is not str or not SHA256_RE.fullmatch(value):
         _fail(f"{label} must be a 64-character lowercase hex digest")
     return value
 
 
 def _actor(value, label):
-    if not isinstance(value, str) or not value or len(value) > 200 or value.strip() != value:
+    if type(value) is not str or not value or len(value) > 200 or value.strip() != value:
         _fail(f"{label} must be a non-empty bounded actor identity")
     return value
 
@@ -81,13 +87,15 @@ class Enrollment:
     reviewer_clawsweeper: str
 
     def __post_init__(self):
-        if not isinstance(self.repository, str) or self.repository not in INITIAL_ENROLLMENT_SCOPE:
+        repository = _exact_str(self.repository, "repository")
+        if repository not in INITIAL_ENROLLMENT_SCOPE:
             _fail("repository is outside the initial enrollment scope")
-        if type(self.repository_id) is not int or self.repository_id != INITIAL_ENROLLMENT_SCOPE[self.repository]:
+        if type(self.repository_id) is not int or self.repository_id != INITIAL_ENROLLMENT_SCOPE[repository]:
             _fail("enrollment repository_id contradicts the recorded numeric identity")
         _positive_int(self.app_id, "GitHub App id")
         _positive_int(self.installation_id, "installation id")
-        if self.installation_account != self.repository.split("/", 1)[0]:
+        account = _exact_str(self.installation_account, "installation account")
+        if account != repository.split("/", 1)[0]:
             _fail("installation account must own the enrolled repository")
         _sha1(self.approved_policy_commit, "approved policy commit")
         _sha256(self.approved_policy_sha256, "approved policy sha256")
@@ -110,9 +118,11 @@ class LegacyXapiMarker:
     status: str
 
     def __post_init__(self):
-        if not isinstance(self.repository, str) or self.repository not in INITIAL_ENROLLMENT_SCOPE:
+        repository = _exact_str(self.repository, "legacy_xapi repository")
+        if repository not in INITIAL_ENROLLMENT_SCOPE:
             _fail("legacy_xapi repository is outside the initial enrollment scope")
-        if type(self.status) is not str or self.status not in LEGACY_XAPI_STATUSES:
+        status = _exact_str(self.status, "legacy_xapi status")
+        if status not in LEGACY_XAPI_STATUSES:
             _fail("legacy_xapi status is unknown")
 
 
@@ -191,8 +201,8 @@ def load_registry(raw):
     enrollments = []
     for item in value["enrollments"]:
         _exact(item, ["repository", "repository_id", "github_app", "approved_policy", "reviewers"], "enrollment")
-        repository = item["repository"]
-        if not isinstance(repository, str) or repository not in INITIAL_ENROLLMENT_SCOPE:
+        repository = _exact_str(item["repository"], "repository")
+        if repository not in INITIAL_ENROLLMENT_SCOPE:
             _fail("repository is outside the initial enrollment scope")
         repository_id = _positive_int(item["repository_id"], "enrollment repository_id")
         github_app = item["github_app"]
@@ -212,11 +222,11 @@ def _load_legacy_xapi(value):
         return None
     marker = value["legacy_xapi"]
     _exact(marker, ["repository", "status"], "legacy_xapi")
-    repository = marker["repository"]
-    if not isinstance(repository, str) or repository not in INITIAL_ENROLLMENT_SCOPE:
+    repository = _exact_str(marker["repository"], "legacy_xapi repository")
+    if repository not in INITIAL_ENROLLMENT_SCOPE:
         _fail("legacy_xapi repository is outside the initial enrollment scope")
-    status = marker["status"]
-    if type(status) is not str or status not in LEGACY_XAPI_STATUSES:
+    status = _exact_str(marker["status"], "legacy_xapi status")
+    if status not in LEGACY_XAPI_STATUSES:
         _fail("legacy_xapi status is unknown")
     return LegacyXapiMarker(repository, status)
 

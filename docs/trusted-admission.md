@@ -78,13 +78,19 @@ Rules enforced by `load_registry`:
   that loaded status for the exact service profile and `absent` when the field
   is omitted or names another profile. The profile repository must be an
   exact admitted-scope string before that omitted-marker absence is
-  treated as legitimate. `trusted_enrollment_from_registry` snapshots
+  treated as legitimate.   `trusted_enrollment_from_registry` snapshots
   and revalidates the exact base Registry dataclass fields and each
   nested Enrollment and optional LegacyXapiMarker from its own stored
   base-dataclass fields, then consumes only those loaded values.
-  Userland `enabled` / `blockers` and synthetic subclass methods or
-  attributes cannot grant a legacy status or synthesize Conductor,
-  dual, or broken routing.
+  Nested authority-bearing strings and IDs must be exact builtins;
+  reconstruction compares those exact base values. A str subclass
+  with attacker-controlled equality cannot synthesize repository, ID,
+  or legacy authority. Userland `enabled` / `blockers` and synthetic
+  subclass methods or attributes cannot grant a legacy status or
+  synthesize Conductor, dual, or broken routing. External registry
+  document validation/loading is separate from strict Conductor
+  ingress admission so worker ticks can represent every trusted
+  route.
 
 `Registry.lookup(repository, repository_id, app_id, installation_id)` succeeds
 only when all four agree with one enrollment; strings, booleans or a neighbouring

@@ -1439,6 +1439,78 @@ def test_stale_decision_identity_retires_and_new_blocked_delivers_once() -> None
         assert len(_notification_rows(config)) == 6
 
 
+def test_webhook_state_change_between_claim_and_send_retires_stale_notification() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        config = config_fixture(Path(temporary))
+        pr = 117
+        ingress(config, "pull_request", "race-notify-pr", pr_payload(pr))
+        ingress(
+            config,
+            "workflow_run",
+            "race-notify-ci",
+            ci_payload(pr, 2117, conclusion="failure"),
+        )
+        first = userland.deliver_notifications(config, UnavailableNotifier(), dry_run=False)
+        assert [item["result"] for item in first["deliveries"]] == [
+            "not_ready",
+            "not_ready",
+            "not_ready",
+        ]
+        assert current(config, pr)["state"] == "ci_failed"
+
+        class RacingClient:
+            def assert_authority(self, operation):
+                set_head(
+                    config,
+                    pr,
+                    state="openclaw_queued",
+                    rail="openclaw",
+                    blocker=None,
+                )
+
+        notifier = FakeNotifier()
+        raced = userland.deliver_notifications(
+            config, notifier, dry_run=False, authority_client=RacingClient()
+        )
+        assert [item["result"] for item in raced["deliveries"]] == [
+            "retired",
+            "retired",
+            "retired",
+        ]
+        assert notifier.sent == []
+        assert notification_statuses(config) == [
+            ("discord", "retired"),
+            ("openclaw_context", "retired"),
+            ("signal", "retired"),
+        ]
+        assert current(config, pr)["state"] == "openclaw_queued"
+
+    with tempfile.TemporaryDirectory() as temporary:
+        config = config_fixture(Path(temporary))
+        pr = 118
+        ingress(config, "pull_request", "same-decision-pr", pr_payload(pr))
+        ingress(
+            config,
+            "workflow_run",
+            "same-decision-ci",
+            ci_payload(pr, 2118, conclusion="failure"),
+        )
+        userland.deliver_notifications(config, UnavailableNotifier(), dry_run=False)
+        notifier = FakeNotifier()
+        delivered = userland.deliver_notifications(config, notifier, dry_run=False)
+        assert [item["result"] for item in delivered["deliveries"]] == [
+            "sent",
+            "sent",
+            "sent",
+        ]
+        assert_exact_terminal_messages(notifier, concise_blocked(pr, current(config, pr)["blocker"]))
+        second = FakeNotifier()
+        again = userland.deliver_notifications(config, second, dry_run=False)
+        assert again["deliveries"] == []
+        assert second.sent == []
+        assert {status for _channel, status in notification_statuses(config)} == {"sent"}
+
+
 def test_legacy_pending_rows_without_decision_identity_do_not_duplicate_delivery() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         config = config_fixture(Path(temporary))
@@ -2445,6 +2517,7 @@ def main() -> None:
         test_run_tick_suppresses_review_stages_unless_conductor_enrolled,
         test_pending_notifications_are_revalidated_before_send,
         test_stale_decision_identity_retires_and_new_blocked_delivers_once,
+        test_webhook_state_change_between_claim_and_send_retires_stale_notification,
         test_legacy_pending_rows_without_decision_identity_do_not_duplicate_delivery,
         test_invalid_tuple_persisted_rows_fail_closed_without_review_dispatch,
         test_unenrolled_inconsistent_tuple_notifies_blocked_without_dispatch,

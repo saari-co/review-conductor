@@ -506,8 +506,11 @@ class AdmissionIngressTests(unittest.TestCase):
         nested.chmod(0o755)
         self.assertEqual(entrypoint.read_service_registry(nested_registry, []).enrollments[0].app_id, APP_ID)
         path.write_text(json.dumps({**document, "enrollments": []}))
-        with self.assertRaises(core.ContractError):
-            entrypoint.read_service_registry(path, [])
+        empty = entrypoint.read_service_registry(path, [])
+        self.assertEqual(empty.enrollments, ())
+        with self.assertRaises(core.ContractError) as ctx:
+            service.require_profile_enrolled(self.fx.app_config(), empty)
+        self.assertIn("runtime profile is not enrolled in the service registry", str(ctx.exception))
 
     def test_registry_is_read_from_the_validated_descriptor_not_the_pathname(self):
         def document(app_id):
@@ -1557,6 +1560,176 @@ class AdmissionIngressTests(unittest.TestCase):
                 else:
                     self.assertEqual(tick["notifications"]["deliveries"], [])
 
+    def test_entrypoint_loaded_registry_exposes_all_trusted_routes(self):
+        self.fx.ingest("initial", self.fx.payload())
+        this_profile = {"repository": REPOSITORY, "status": "present"}
+        provider_config = {
+            "core_config": str(self.fx.config_path),
+            "paths": {
+                key: str(self.fx.root.resolve() / key)
+                for key in ("blocks_checkout", "state_root", "proof_root")
+            },
+            "github_app": self.fx.app_config()["github_app"],
+        }
+
+        def write_registry(*, enroll=True, legacy=None, app_id=APP_ID, raw=None):
+            path = self.fx.root.resolve() / "service-registry.json"
+            if raw is not None:
+                path.write_bytes(raw)
+            else:
+                if enroll:
+                    doc = self.fx.registry_document(app_id=app_id)
+                else:
+                    doc = {"schema": admission.REGISTRY_SCHEMA, "enrollments": []}
+                if legacy is not None:
+                    doc = {**doc, "legacy_xapi": legacy}
+                path.write_text(json.dumps(doc))
+            path.chmod(0o600)
+            return path
+
+        cases = (
+            (
+                "conductor",
+                {"enroll": True},
+                {"review_conductor": "present", "legacy_xapi": "absent"},
+                "review_conductor",
+                True,
+                False,
+            ),
+            (
+                "legacy-only",
+                {"enroll": False, "legacy": this_profile},
+                {"review_conductor": "absent", "legacy_xapi": "present"},
+                "legacy_xapi",
+                False,
+                False,
+            ),
+            (
+                "none",
+                {"enroll": False},
+                {"review_conductor": "absent", "legacy_xapi": "absent"},
+                "none",
+                False,
+                False,
+            ),
+            (
+                "dual",
+                {"enroll": True, "legacy": this_profile},
+                {"review_conductor": "present", "legacy_xapi": "present"},
+                "review_conductor",
+                True,
+                False,
+            ),
+            (
+                "broken",
+                {"enroll": True, "app_id": APP_ID + 1},
+                {"review_conductor": "broken", "legacy_xapi": "broken"},
+                "fail_closed",
+                False,
+                True,
+            ),
+        )
+        for name, registry_kwargs, expected_pair, route, runs_stages, notifies in cases:
+            with self.subTest(route=name):
+                path = write_registry(**registry_kwargs)
+                provider = entrypoint.registry_provider(path, provider_config)
+                loaded = provider()
+                self.assertIs(type(loaded), admission.Registry)
+                self.assertEqual(
+                    service.trusted_enrollment_from_registry(self.fx.app_config(), loaded),
+                    expected_pair,
+                )
+                captured = {}
+                real_tick = userland.run_tick
+
+                def wrapping_tick(config, client, notifier, *, dry_run, enrollment=None):
+                    captured["enrollment"] = enrollment
+                    return real_tick(
+                        config, client, notifier, dry_run=True, enrollment=enrollment
+                    )
+
+                notifier = legacy.FakeNotifier()
+                with patch.object(userland, "run_tick", wrapping_tick), patch.object(
+                    userland, "hydrate_pending_openclaw_heads", lambda *a, **k: []
+                ), patch.object(
+                    runtime, "drain_actions",
+                    lambda *a, **k: {
+                        "schema": "smoky.review-conductor.worker-wake.v1",
+                        "result": "planned",
+                        "recovered": [],
+                        "actions": ["planned"],
+                        "failed_actions": [],
+                        "github_ci_polled": False,
+                        "merge_dispatched": False,
+                    },
+                ), patch.object(
+                    runtime, "drain_bridge_inboxes",
+                    lambda *a, **k: {
+                        "schema": "smoky.review-conductor.bridge-drain.v1",
+                        "result": "planned",
+                        "artifacts": [],
+                    },
+                ), patch.object(
+                    runtime, "reconcile_projection",
+                    lambda *a, **k: {
+                        "schema": "smoky.review-conductor.projection.v1",
+                        "result": "planned",
+                        "projected": [],
+                        "merge_authorized": False,
+                    },
+                ), patch.object(
+                    userland, "collect_openclaw_terminals", lambda *a, **k: []
+                ), patch.object(
+                    userland, "collect_clawsweeper_terminals", lambda *a, **k: []
+                ):
+                    tick = service.run_service_tick(
+                        self.fx.app_config(), provider, object(), notifier, dry_run=True
+                    )
+                self.assertEqual(captured["enrollment"], expected_pair)
+                self.assertFalse(tick.get("legacy_dispatch", False))
+                self.assertEqual(orchestration.enrollment_route(expected_pair)[0], route)
+                if runs_stages:
+                    self.assertEqual(tick["worker"]["result"], "planned")
+                    self.assertEqual(tick["worker"]["actions"], ["planned"])
+                else:
+                    self.assertEqual(tick["worker"]["result"], "skipped")
+                    self.assertEqual(tick["hydration"], [])
+                    self.assertEqual(tick["openclaw"], [])
+                    self.assertEqual(tick["clawsweeper"], [])
+                if notifies:
+                    self.assertTrue(tick["notifications"]["deliveries"])
+                else:
+                    self.assertEqual(tick["notifications"]["deliveries"], [])
+                if name in {"legacy-only", "none", "broken"}:
+                    with self.assertRaises(core.ContractError) as ctx:
+                        service.preflight_enrollment(
+                            self.fx.app_config(), loaded, self.fx.payload()
+                        )
+                    self.assertIn(
+                        "runtime profile is not enrolled in the service registry",
+                        str(ctx.exception),
+                    )
+                else:
+                    enrolled = service.preflight_enrollment(
+                        self.fx.app_config(), loaded, self.fx.payload()
+                    )
+                    self.assertEqual(enrolled.repository, REPOSITORY)
+
+        malformed = write_registry(
+            raw=json.dumps({
+                "schema": admission.REGISTRY_SCHEMA,
+                "enrollments": [],
+                "legacy_xapi": "present",
+            }).encode()
+        )
+        broken_provider = entrypoint.registry_provider(malformed, provider_config)
+        with self.assertRaises(core.ContractError):
+            broken_provider()
+        with self.assertRaises(core.ContractError):
+            service.run_service_tick(
+                self.fx.app_config(), broken_provider, object(), object(), dry_run=True
+            )
+
     def test_registry_legacy_xapi_malformed_and_synthetic_attributes_fail_closed(self):
         self.fx.ingest("initial", self.fx.payload())
         doc = self.fx.registry_document()
@@ -1828,6 +2001,104 @@ class AdmissionIngressTests(unittest.TestCase):
             service.trusted_enrollment_from_registry(
                 self.fx.app_config(),
                 admission.Registry((), legacy_xapi=mutated),
+            ),
+            {"review_conductor": "broken", "legacy_xapi": "broken"},
+        )
+
+    def test_nested_str_subclass_equality_cannot_synthesize_authority(self):
+        loaded = self._load_route_registry()
+        real = loaded.enrollments[0]
+        other = "dinkuskit/blocks"
+
+        class Alias(str):
+            def __eq__(self, other_value):
+                return other_value in {other, str.__str__(self)} or str.__eq__(self, other_value)
+
+            def __hash__(self):
+                return str.__hash__(self)
+
+        class AliasInt(int):
+            def __eq__(self, other_value):
+                return True
+
+            def __hash__(self):
+                return int.__hash__(self)
+
+        with self.assertRaises(admission.AdmissionError):
+            admission.LegacyXapiMarker(Alias(REPOSITORY), "present")
+        with self.assertRaises(admission.AdmissionError):
+            admission.Enrollment(
+                Alias(REPOSITORY),
+                real.repository_id,
+                real.app_id,
+                real.installation_id,
+                real.installation_account,
+                real.approved_policy_commit,
+                real.approved_policy_sha256,
+                real.reviewer_openclaw,
+                real.reviewer_clawsweeper,
+            )
+        string_fields = (
+            "repository",
+            "installation_account",
+            "approved_policy_commit",
+            "approved_policy_sha256",
+            "reviewer_openclaw",
+            "reviewer_clawsweeper",
+        )
+        int_fields = ("repository_id", "app_id", "installation_id")
+        stored = {
+            name: object.__getattribute__(real, name)
+            for name in admission.Enrollment.__dataclass_fields__
+        }
+        for name in string_fields:
+            forged = admission.Enrollment(
+                *(stored[field] for field in admission.Enrollment.__dataclass_fields__)
+            )
+            object.__setattr__(forged, name, Alias(stored[name]))
+            self.assertEqual(forged.repository, REPOSITORY)
+            self.assertEqual(
+                service.trusted_enrollment_from_registry(
+                    self.fx.app_config(),
+                    admission.Registry((forged,)),
+                ),
+                {"review_conductor": "broken", "legacy_xapi": "broken"},
+            )
+        for name in int_fields:
+            forged = admission.Enrollment(
+                *(stored[field] for field in admission.Enrollment.__dataclass_fields__)
+            )
+            object.__setattr__(forged, name, AliasInt(stored[name]))
+            self.assertEqual(
+                service.trusted_enrollment_from_registry(
+                    self.fx.app_config(),
+                    admission.Registry((forged,)),
+                ),
+                {"review_conductor": "broken", "legacy_xapi": "broken"},
+            )
+
+        marker = admission.LegacyXapiMarker(REPOSITORY, "present")
+        object.__setattr__(marker, "repository", Alias(REPOSITORY))
+        self.assertEqual(marker.repository, other)
+        wrapper = admission.Registry((), legacy_xapi=marker)
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(
+                {**self.fx.app_config(), "github_app": {
+                    **self.fx.app_config()["github_app"],
+                    "repository": other,
+                    "repository_id": 1306882611,
+                }},
+                wrapper,
+            ),
+            {"review_conductor": "broken", "legacy_xapi": "broken"},
+        )
+        status_marker = admission.LegacyXapiMarker(REPOSITORY, "absent")
+        object.__setattr__(status_marker, "status", Alias("present"))
+        self.assertEqual(status_marker.status, "present")
+        self.assertEqual(
+            service.trusted_enrollment_from_registry(
+                self.fx.app_config(),
+                admission.Registry((), legacy_xapi=status_marker),
             ),
             {"review_conductor": "broken", "legacy_xapi": "broken"},
         )
@@ -2337,6 +2608,72 @@ class AdmissionIngressTests(unittest.TestCase):
                     )
             self.assertEqual(len(fences), 2)
             self.assertEqual(len(sent), 1)
+
+    def test_webhook_state_change_between_eligibility_and_send_retires_stale_notification(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = legacy.config_fixture(Path(temporary))
+            pr = 219
+            legacy.ingress(config, "pull_request", "race-pr", legacy.pr_payload(pr))
+            legacy.ingress(
+                config,
+                "workflow_run",
+                "race-ci",
+                legacy.ci_payload(pr, 2219, conclusion="failure"),
+            )
+            first = userland.deliver_notifications(
+                config, legacy.UnavailableNotifier(), dry_run=False
+            )
+            self.assertEqual(
+                [item["result"] for item in first["deliveries"]],
+                ["not_ready", "not_ready", "not_ready"],
+            )
+
+            class RacingClient:
+                def assert_authority(self, operation):
+                    legacy.set_head(
+                        config,
+                        pr,
+                        state="openclaw_queued",
+                        rail="openclaw",
+                        blocker=None,
+                    )
+
+            notifier = legacy.FakeNotifier()
+            raced = userland.deliver_notifications(
+                config, notifier, dry_run=False, authority_client=RacingClient()
+            )
+            self.assertEqual(
+                [item["result"] for item in raced["deliveries"]],
+                ["retired", "retired", "retired"],
+            )
+            self.assertEqual(notifier.sent, [])
+            self.assertEqual(legacy.current(config, pr)["state"], "openclaw_queued")
+
+        with tempfile.TemporaryDirectory() as same_root:
+            same_config = legacy.config_fixture(Path(same_root))
+            same_pr = 220
+            legacy.ingress(same_config, "pull_request", "same-pr", legacy.pr_payload(same_pr))
+            legacy.ingress(
+                same_config,
+                "workflow_run",
+                "same-ci",
+                legacy.ci_payload(same_pr, 2220, conclusion="failure"),
+            )
+            userland.deliver_notifications(
+                same_config, legacy.UnavailableNotifier(), dry_run=False
+            )
+            sent = legacy.FakeNotifier()
+            delivered = userland.deliver_notifications(same_config, sent, dry_run=False)
+            self.assertEqual(
+                [item["result"] for item in delivered["deliveries"]],
+                ["sent", "sent", "sent"],
+            )
+            duplicate = legacy.FakeNotifier()
+            self.assertEqual(
+                userland.deliver_notifications(same_config, duplicate, dry_run=False)["deliveries"],
+                [],
+            )
+            self.assertEqual(duplicate.sent, [])
 
     def test_notification_is_uncertain_before_transport_and_survives_crash(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -3056,7 +3393,7 @@ class EntrypointTests(unittest.TestCase):
         self.assertIn("service enrollment registry is unavailable", stderr)
         self.assertNotIn("Traceback", stderr)
 
-    def test_enabled_profile_still_requires_registry_agreement_before_credentials(self):
+    def test_enabled_profile_still_requires_registry_agreement_on_ingress(self):
         self.enable_profile()
         registry = self.root / "registry.json"
         document = {
@@ -3071,18 +3408,40 @@ class EntrypointTests(unittest.TestCase):
         }
         registry.write_text(json.dumps(document))
         registry.chmod(0o600)
-        with patch.object(userland, "read_inherited_value", side_effect=AssertionError("credentials were read")):
-            code, stderr = self.run_main(registry)
-        self.assertEqual(code, 2)
-        self.assertIn("runtime profile is not enrolled in the service registry", stderr)
-        # The registry, not the profile, names the reviewer actors the engine trusts.
+        config = userland.load_config(self.profile)
+        provider = entrypoint.registry_provider(registry, {
+            "core_config": str(self.core_profile),
+            "paths": {key: str(self.root / key) for key in (
+                "blocks_checkout", "state_root", "proof_root")},
+            "github_app": config["github_app"],
+        })
+        loaded = provider()
+        with self.assertRaises(core.ContractError) as ctx:
+            service.require_profile_enrolled(config, loaded)
+        self.assertIn("runtime profile is not enrolled in the service registry", str(ctx.exception))
         document["enrollments"][0]["github_app"]["id"] = APP_ID
         document["enrollments"][0]["reviewers"] = {"openclaw": "someone-else", "clawsweeper": REVIEWERS["clawsweeper"]}
         registry.write_text(json.dumps(document))
-        with patch.object(userland, "read_inherited_value", side_effect=AssertionError("credentials were read")):
-            code, stderr = self.run_main(registry)
-        self.assertEqual(code, 2)
-        self.assertIn("reviewer identities contradict service enrollment", stderr)
+        registry.chmod(0o600)
+        mismatched = provider()
+        with self.assertRaises(core.ContractError) as ctx:
+            service.require_profile_enrolled(config, mismatched)
+        self.assertIn("reviewer identities contradict service enrollment", str(ctx.exception))
+
+    def test_registry_document_validation_precedes_credentials(self):
+        self.enable_profile()
+        registry = self.root / "registry.json"
+        document = {
+            "schema": admission.REGISTRY_SCHEMA,
+            "enrollments": [{
+                "repository": REPOSITORY, "repository_id": REPOSITORY_ID,
+                "github_app": {"id": APP_ID, "installation_id": INSTALLATION_ID,
+                               "installation_account": "saari-co"},
+                "approved_policy": {"commit": POLICY_COMMIT, "sha256": "f" * 64},
+                "reviewers": dict(REVIEWERS),
+            }],
+        }
+        registry.write_text(json.dumps(document))
         registry.chmod(0o640)
         with patch.object(userland, "read_inherited_value", side_effect=AssertionError("credentials were read")):
             code, stderr = self.run_main(registry)
@@ -3383,11 +3742,11 @@ MUTANTS = [
         "GitHubAdapterTests.test_policy_reader_and_check_publisher_cannot_cross_repository_or_merge",
     ),
     (
-        "skip the service enrollment check in the entrypoint",
+        "require Conductor enrollment before the worker can load a registry",
         "tools/service_entrypoint.py",
-        "        service.require_profile_enrolled(config, registry)\n        return registry\n",
-        "        return registry\n",
-        "EntrypointTests.test_enabled_profile_still_requires_registry_agreement_before_credentials",
+        "        return read_service_registry(path, roots)\n",
+        "        registry = read_service_registry(path, roots)\n        service.require_profile_enrolled(config, registry)\n        return registry\n",
+        "AdmissionIngressTests.test_entrypoint_loaded_registry_exposes_all_trusted_routes",
     ),
     (
         "serve an inactive profile",
@@ -3413,8 +3772,8 @@ MUTANTS = [
     (
         "cache the registry instead of re-reading it",
         "tools/service_entrypoint.py",
-        "    def provide() -> admission.Registry:\n        registry = read_service_registry(path, roots)\n",
-        "    cached = read_service_registry(path, roots)\n\n    def provide() -> admission.Registry:\n        registry = cached\n",
+        "    def provide() -> admission.Registry:\n        return read_service_registry(path, roots)\n",
+        "    cached = read_service_registry(path, roots)\n\n    def provide() -> admission.Registry:\n        return cached\n",
         "AdmissionIngressTests.test_registry_provider_observes_promotion_and_revocation_without_restart",
     ),
     (
@@ -3962,6 +4321,27 @@ MUTANTS = [
         "    if type(repository) is not str or repository not in admission.INITIAL_ENROLLMENT_SCOPE:\n        return dict(broken)\n",
         '    if type(repository) is not str or repository not in admission.INITIAL_ENROLLMENT_SCOPE:\n        return {"review_conductor": "absent", "legacy_xapi": "absent"}\n',
         "AdmissionIngressTests.test_malformed_service_profile_repository_is_broken_not_unenrolled",
+    ),
+    (
+        "admit nested str subclasses during direct construction",
+        "tools/trusted_admission.py",
+        '    if type(value) is not str:\n        _fail(f"{label} must be an exact string")\n',
+        '    if not isinstance(value, str):\n        _fail(f"{label} must be an exact string")\n',
+        "AdmissionIngressTests.test_nested_str_subclass_equality_cannot_synthesize_authority",
+    ),
+    (
+        "convert nested str subclasses instead of failing closed",
+        "tools/service_runtime.py",
+        "    if type(value) is str:\n        return str(value)\n",
+        "    if isinstance(value, str):\n        return str(value)\n",
+        "AdmissionIngressTests.test_nested_str_subclass_equality_cannot_synthesize_authority",
+    ),
+    (
+        "skip the claim/send notification fence",
+        "tools/review_conductor_userland.py",
+        "            if not claimed_notification_still_current(\n                connection, row, trusted_enrollment\n            ):\n",
+        "            if False and not claimed_notification_still_current(\n                connection, row, trusted_enrollment\n            ):\n",
+        "AdmissionIngressTests.test_webhook_state_change_between_eligibility_and_send_retires_stale_notification",
     ),
 ]
 

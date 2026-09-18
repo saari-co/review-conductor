@@ -1,4 +1,4 @@
-# Issue #687 frozen post-cap closure — Copilot 5242559787 nested authority — 2026-09-17
+# Issue #687 bounded repair — Copilot 5242972219 — 2026-09-17
 
 ## Ownership
 
@@ -8,18 +8,17 @@
 - Branch: `openclaw/review-conductor-issue-687-routing-v1`
 - Required start/base: `8cc4094e88c8cd04c5b7da28e0c6a9ef054ea69c` (`origin/main`).
 - Authorized frozen starting HEAD / parent candidate:
-  `bc87f93c3534f1cd877fc6bb424d254b5445e055`.
-- Live retained branch/PR head this closure starts from:
-  `bc87f93c3534f1cd877fc6bb424d254b5445e055`.
+  `a3922f0af5984756bc9deb69d43775827ac40c38`.
+- Live retained branch/PR head this repair starts from:
+  `a3922f0af5984756bc9deb69d43775827ac40c38`.
 - Sole source-changing owner: this worktree. No x-api, Suite, or other
   repository was edited.
-- Mode: frozen post-cap closure of the already-reviewed Copilot review
-  5242559787. This is not a new review cycle. The prior four required-fix
-  findings remain closed at `bc87f93c3534f1cd877fc6bb424d254b5445e055`.
-  This batch closes the remaining nested Enrollment / LegacyXapiMarker
-  virtual-authority finding. No Copilot, OpenClaw, or ClawSweeper review
-  is requested. No merge, deploy, activation, credential, protection,
-  live notification, or target-repository onboarding.
+- Mode: bounded repair of the three verified required findings from
+  Copilot review 5242972219. The fourth finding (cycle-2 "unbounded
+  repairs") is REJECTED as inconsistent with the confirmed product
+  contract. No Copilot, OpenClaw, or ClawSweeper review is requested.
+  No merge, deploy, activation, credential, protection, live
+  notification, or target-repository onboarding.
 
 A commit cannot contain its own SHA. `candidate-manifest.json` records the
 required start SHA, the parent candidate SHA, and per-file source hashes. The
@@ -27,40 +26,43 @@ branch head after this commit is the exact candidate SHA for later CI.
 
 ## Historical evidence preserved
 
-The previous post-cap batch at `bc87f93c3534f1cd877fc6bb424d254b5445e055`
-closed these four Copilot 5242559787 required-fix findings and remains
-part of the review ledger:
+Prior PR #18 batches remain part of the review ledger, including the
+Copilot 5242559787 nested-authority closure at
+`a3922f0af5984756bc9deb69d43775827ac40c38` (hosted CI run 35291533204).
 
-1. Missing, partial, or legacy pending decision identities retire
-   fail-closed. Only an exact current schema, route, reason, and
-   notification may remain eligible. Identical current decisions stay
-   deduped.
-2. Closed-state handling stays first. Unknown state, unknown rail
-   results, and state/rail/result incoherence are validated after that
-   closed exception and before unenrolled, legacy, or broken enrollment
-   short-circuits.
-3. Direct state/rail/result tuple validation requires each state's
-   valid rail. Impossible tuples return blocked fail-closed with
-   `review_dispatch=false`.
-4. Persisted-row reconstruction maps inconsistent stored state/rail
-   pairs to typed unknown results so the queue can notify blocked once.
-   Direct public contract inputs remain strict.
+## Defects and required behavior
 
-Hosted CI for that exact head passed as run 35290354503.
+1. Nested trusted registry fields still admitted `str` subclasses.
+   `Enrollment` and `LegacyXapiMarker` now require exact built-in
+   strings (and exact integers) for every authority-bearing field.
+   Snapshot reconstruction copies those exact base values and fails
+   closed on subclasses, missing fields, extra fields, or mutated
+   stored fields. A `str` subclass with attacker-controlled equality
+   cannot synthesize repository, ID, or legacy authority.
 
-## Defect and required behavior
+2. Notification eligibility was not bound to the later send. The
+   claim/send fence now revalidates the expected current head state
+   and complete canonical orchestration decision immediately before
+   transport. A webhook that advances the same tuple between
+   eligibility and send retires the stale notification. Identical
+   current decisions still dedupe and deliver exactly once.
 
-Rebuilding only the outer Registry left nested Admission values virtual.
-`Registry.__post_init__` accepts Enrollment / LegacyXapiMarker subclasses
-and reads overridden attributes, so an Enrollment whose stored
-repository or IDs are out of scope, or a LegacyXapiMarker whose stored
-status is invalid, could still appear admitted through
-`__getattribute__`. `trusted_enrollment_from_registry` now snapshots and
-reconstructs each nested Enrollment and optional LegacyXapiMarker from
-its own exact stored base-dataclass fields, revalidates those values
-into exact base-class objects, and fails closed on subclasses, missing
-fields, extra fields, or mutated stored fields. Omitted `legacy_xapi`
-remains legitimate absence. Unrelated routing behavior is unchanged.
+3. `service_entrypoint.registry_provider` applied
+   `require_profile_enrolled` before `run_service_tick` could derive
+   legacy-only, unenrolled, dual, or broken routes. External registry
+   document validation/loading is now separate from strict Conductor
+   ingress admission. The production worker can represent all trusted
+   routes. Webhook ingress remains enrolled-only. Malformed documents
+   fail closed. Only Conductor/dual dispatch reviews. There is no
+   x-api dispatch.
+
+4. REJECTED: Copilot 5242972219's cycle-2 "unbounded repairs" finding
+   is inconsistent with the confirmed product contract. The saturating
+   2/2 automatic ledger and explicit human `required_fix` gate for
+   later scoped repairs are preserved. Existing
+   `test_repair_cycle_saturates_and_required_fix_stays_scoped` and the
+   mutants that restore the old ceiling or increment past two remain
+   the truthful rejection evidence.
 
 Preserved: versioned `review-conductor.orchestration-outcome.v1`, silent
 first/second automatic rounds, saturating `repair_cycle=2`, no Conductor
@@ -79,7 +81,7 @@ independence. No second notification system and no live adapters.
 - No automatic merge and no notification during silent repair rounds.
 - No second notification system.
 - No Copilot, OpenClaw, or ClawSweeper review is requested from this
-  packet. This is not a new review cycle.
+  packet.
 
 ## Local commands and results
 
@@ -88,17 +90,18 @@ is not a deployed review PASS.
 
 | Command | Result |
 | --- | --- |
-| focused nested Enrollment virtual-authority test | PASS; stored out-of-scope repository/IDs that appear admitted only via overridden `__getattribute__` return broken, as do subclass, extra, missing, and mutated stored fields |
-| focused nested LegacyXapiMarker virtual-authority test | PASS; stored invalid marker values that appear present only via overridden `__getattribute__` return broken; omitted marker stays absent |
-| focused load_registry-driven route coverage | PASS; conductor, legacy-only, none, dual, and broken routes unchanged |
-| precise nested snapshot/reconstruction mutant | PASS; bypassing `_nested_registry_values_from_stored_fields` makes the Enrollment virtual-authority test fail by returning `present` |
+| focused nested exact-builtin string/ID negatives | PASS; str/int subclasses cannot synthesize Enrollment or LegacyXapiMarker authority; direct construction and stored-field reconstruction fail closed |
+| focused notification claim/send race | PASS; webhook `ci_failed` → `openclaw_queued` between eligibility and send retires the stale row; identical current decisions deliver once and then dedupe |
+| focused entrypoint-loaded route coverage | PASS; Conductor and dual dispatch reviews; legacy-only/none skip review stages; broken fails closed; no x-api dispatch; malformed documents fail closed; ingress stays enrolled-only |
+| precise mutants | PASS; direct-construction isinstance, reconstruction isinstance conversion, skipped claim/send fence, and re-added provider enrollment gate are killed |
+| rejected cycle-2 evidence | PASS; saturating 2/2 ledger and scoped `required_fix` mutants remain green |
 | `python3 tests/test_orchestration_outcome.py` | 32 tests OK |
-| `python3 tests/test_review_conductor_userland.py` | 36 passed |
-| `python3 tests/test_trusted_admission.py` | 21 tests OK |
-| `python3 -m unittest discover -s tests -p 'test_service_runtime.py'` | 79 tests OK, including the new nested negatives, prior registry-subclass regressions, and precise mutants |
-| `python3 -m compileall -q tools tests scripts` | passed |
-| `make check` | passed, including provenance for 14 extracted files and `git diff --check` |
-| `make build` | passed; wrote `dist/review-conductor.pyz` |
+| `python3 tests/test_review_conductor_userland.py` | 37 passed |
+| `python3 tests/test_trusted_admission.py` | 22 tests OK |
+| `python3 -m unittest discover -s tests -p 'test_service_runtime.py'` | recorded after the full check |
+| `python3 -m compileall -q tools tests scripts` | recorded after the full check |
+| `make check` | recorded after the full check |
+| `make build` | recorded after the full check |
 | `python3 scripts/check_whitespace.py 8cc4094e88c8cd04c5b7da28e0c6a9ef054ea69c <new-head>` | recorded after the candidate commit |
 
 Exact-head whitespace is `scripts/check_whitespace.py` against
@@ -107,7 +110,7 @@ script requires the checkout to equal HEAD, so it runs after the candidate
 commit.
 
 Provenance destination hashes were re-verified for the 14 recorded
-extracted files. This closure does not claim an x-api source branch or
+extracted files. This repair does not claim an x-api source branch or
 commit beyond that existing ledger.
 
 ## Untouched boundaries
@@ -115,9 +118,9 @@ commit beyond that existing ledger.
 - No credentials, live databases, checkouts, or proof stores outside this
   Git-only packet.
 - No x-api, spark-dgx, ClawSweeper, OpenClaw, or target-repository source.
-- The review ledger is closed for Copilot 5242559787. No further automatic
-  review is requested from this packet. Hosted CI remains later exact-head
-  work. This PR stays draft/open and does not merge or activate.
+- No Copilot, OpenClaw, or ClawSweeper review is requested from this
+  packet. Hosted CI remains later exact-head work. This PR stays
+  draft/open and does not merge or activate.
 
 ## Remaining issue
 

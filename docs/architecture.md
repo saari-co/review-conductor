@@ -36,6 +36,8 @@ parsing; replays are idempotent; conflicting deliveries fail closed. Uncertain
 non-idempotent dispatch is reconciled, not blindly retried. The first two
 repair cycles are a saturating automatic-repair ledger, not a ceiling on later
 scoped ``required_fix`` routes; reviewers never become mutation owners.
+Copilot review 5242972219's cycle-2 "unbounded repairs" finding is
+rejected as inconsistent with this confirmed product contract.
 
 Enrollment and terminal notification eligibility are one Conductor-owned
 decision, [`decide_orchestration_outcome`](../tools/orchestration_outcome.py)
@@ -49,13 +51,20 @@ Conductor and forbids duplicate legacy dispatch. Neither enrollment ends the
 process with no review and no notification. Ambiguous or broken enrollment
 fails closed and is never treated as unenrolled. `run_service_tick`
 resolves that pair from the authoritative registry/admission result and
-passes it into `run_tick`. The v2 service-owned registry may carry an
+passes it into `run_tick`. `service_entrypoint.registry_provider` loads
+the external registry document without applying Conductor enrollment
+admission, so the production worker can represent every trusted route
+while webhook ingress remains enrolled-only. The v2 service-owned registry may carry an
 optional exact-profile `legacy_xapi` marker; omitted documents remain
 legacy absent. `trusted_enrollment_from_registry` snapshots and
 revalidates the exact base Registry dataclass fields and each nested
 Enrollment and optional LegacyXapiMarker from its own stored
-base-dataclass fields; subclass methods or mutated nested values
-cannot synthesize Conductor, legacy, dual, or broken routing. The service-profile `github_app.repository` must be
+base-dataclass fields; nested authority-bearing strings and IDs must
+be exact builtins, and reconstruction compares those exact base
+values. A str subclass with attacker-controlled equality cannot
+synthesize repository, ID, or legacy authority. Subclass methods or
+mutated nested values cannot synthesize Conductor, legacy, dual, or
+broken routing. The service-profile `github_app.repository` must be
 an exact admitted-scope string before omitted-marker absence is treated
 as legitimate none. Userland activation flags (`enabled` /
 `blockers`) do not select legacy, none, dual, or broken routes.
@@ -70,7 +79,10 @@ notification queue still consumes the current-head decision; event
 identity includes canonical route, reason, and eligibility so a stale
 pending row can retire while the current blocked decision enqueues and
 delivers once. Pending rows are revalidated against the current head
-and trusted enrollment before claim or send. Missing, partial, or
+and trusted enrollment before claim, and the claim/send fence is bound
+to the expected current state and complete canonical decision
+immediately before transport. A webhook that advances the same tuple
+between eligibility and send retires the stale row. Missing, partial, or
 legacy decision identities retire fail-closed; only an exact current
 schema, route, reason, and notification may remain eligible, and
 identical current decisions stay deduped. Caller payloads cannot grant
