@@ -269,7 +269,9 @@ def load_config(
     if set(app["denied_permissions"]) != expected_denied_permissions:
         raise UserlandError("GitHub App denied permissions are incomplete")
     if app["events"] != runtime.APP_EVENTS:
-        raise UserlandError("GitHub App events must remain pull_request and workflow_run")
+        raise UserlandError(
+            "GitHub App events must remain pull_request, workflow_run, and issue_comment"
+        )
     projection = core.require_object(config["projection"], "projection")
     core.require_exact_keys(
         projection,

@@ -447,7 +447,7 @@ def _admission_hook(
         outcome: dict[str, Any],
     ) -> dict[str, Any] | None:
         # Only the accepted pull_request delivery that established a head may bind it.
-        # workflow_run deliveries (CI or ClawSweeper) never create bindings: their
+        # workflow_run and issue_comment deliveries never create bindings: their
         # head_sha is engine evidence, not admission, and the head they refer to is
         # either already bound by its own delivery or must not become bound by them.
         if (

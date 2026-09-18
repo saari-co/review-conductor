@@ -45,7 +45,8 @@ merge, or credential commands.
 | `docs/` | Architecture, integration, migration and source provenance |
 
 [Architecture](docs/architecture.md) · [Integration contract](docs/integration-contract.md)
-· [Trusted admission](docs/trusted-admission.md) · [SMCBD pilot handoff](docs/smcbd-pilot-handoff.md) · [Migration status](docs/migration.md)
+· [Trusted admission](docs/trusted-admission.md) · [ClawSweeper rereview](docs/clawsweeper-rereview.md)
+· [SMCBD pilot handoff](docs/smcbd-pilot-handoff.md) · [Migration status](docs/migration.md)
 · [Proof](proof/scaffold-20260911/PROOF.md)
 
 No open-source license is assigned by this scaffold; licensing remains an owner

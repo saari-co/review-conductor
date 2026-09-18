@@ -1,0 +1,33 @@
+{
+  "schema": "review-conductor.candidate-manifest.v1",
+  "base_sha": "b16e0c8bc3f32e997db31caa173b846b0e9041ce",
+  "starting_head_sha": "bc80b1e97f75148cd1b5be71b75f8c82cb3b9fdf",
+  "parent_candidate_sha": "2e40ffd1c8adb3062cb5af64f7a8ccaf5cab7ee5",
+  "retained_starting_head_sha": "65b10aff8faa78550f899881505b286b9116caae",
+  "preserved_full_candidate_sha": "6eaf99ef11180ea523db3229c2e5c49c736bdd64",
+  "merge_parents": [
+    "bc80b1e97f75148cd1b5be71b75f8c82cb3b9fdf",
+    "2e40ffd1c8adb3062cb5af64f7a8ccaf5cab7ee5"
+  ],
+  "captured_date": "2026-09-18",
+  "binding_scheme": "A commit cannot contain its own SHA. base_sha is the frozen origin/main integration base. starting_head_sha is the verified pre-merge adapter head. parent_candidate_sha is the exact PR #18 routing/admission core this stacked adapter now starts from. merge_parents are that adapter head then exact core. retained_starting_head_sha is the previous adapter head whose runtime behavior is preserved. preserved_full_candidate_sha is the pre-split full candidate used only as the restore source. Per-file sha256 values are of this merge-forward adapter candidate source relative to the merged core. The branch head after the merge commit is the exact candidate SHA for hosted CI. This preserves notification delivery/authority, Copilot 5243987118 repairs, and current-main PR #21 rereview. No Copilot, OpenClaw, or ClawSweeper review is requested from this packet.",
+  "files": {
+    "docs/architecture.md": "ddb9f532070b0f31f671cb3251fb5bc1037836429de8c5d479a2135cce0e1a97",
+    "docs/integration-contract.md": "06a050fbfc7ee10124ff3faeb3f9a4e14f4842440fc902bf6e9da149f566853e",
+    "docs/migration.md": "56316d65257b25b29e74412b3fababd95fd48be98ff95ed5dd7d8ab6c8124f28",
+    "docs/orchestration-decision-map.md": "98819f1a77035182dc46d1b9e6a2b70492e4aa893cda9663fd02f18fbcb8840e",
+    "docs/provenance.json": "83a43a7d384392959ee4a9b5e2ec92c9a6e5ac697802cf448253754dff7532df",
+    "proof/issue-687-notification-adapter-20260918/PROOF.md": "c01f97b6feff2cd320aeed712a7e751841c1d2b06ca780e9dc9912800268bc84",
+    "proof/issue-687-notification-adapter-20260918/candidate-manifest.json": "54aa26242daf02c2556bfce4661f77bc753cf8bcac8046f6c30b462411fdc4e6",
+    "proof/issue-687-notification-adapter-restack-20260918/PROOF.md": "691b8987c98a7a781ff9050824e27350fc4c7b7d97595e9be02f86ceae8d7628",
+    "proof/issue-687-notification-adapter-restack-20260918/candidate-manifest.json": "73b3eaefe7cdf5f14cfbcb271afc460160b1cb7d7330629e3b47887109548e8f",
+    "proof/issue-687-notification-adapter-merge-forward-20260918/PROOF.md": "ea983c92d67bc487391bb2fa5b76ac1c3dca6175c61d9a43d926ff9d2cb9d89c",
+    "tests/test_orchestration_outcome.py": "d9169ac9037dc2f355e0038b8b20f955106241a52d7cec928c8a8e7abe54a85c",
+    "tests/test_review_conductor_userland.py": "59df7131bfff9fa915ea508d4baa96fcbc18226d6e3a4f3a1398220b4ea792f2",
+    "tests/test_service_runtime.py": "44ca880de8029c26ce3392963e293bee47113f83dc35cdc23467e338c6cf9032",
+    "tools/orchestration_outcome.py": "a34065c6783855a83ef77e8cdbfc0aac511f94d048a2782e1b36075fe5d6ea58",
+    "tools/review_conductor_userland.py": "f96b9be99b00c011940f6385dc20568568a2c75d413ffd8b75028d2fa857cf36",
+    "tools/service_entrypoint.py": "2b8944117627599ae998f592cfc807a575bc0c7e7d3b34979c3f21b1c690fb10",
+    "tools/service_runtime.py": "49e45ed16ae73ba2e281bceee3b6d05fc643d9b20380e307afc2e3f86089ebc5"
+  }
+}
