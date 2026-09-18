@@ -19,6 +19,8 @@ BINDING_SCHEMA = "review-conductor.admission-binding.v2"
 MAX_REGISTRY_BYTES = 65536
 SHA1_RE = re.compile(r"[0-9a-f]{40}")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
+# Declared registry marker only. Runtime "broken" is derived, never a document value.
+LEGACY_XAPI_STATUSES = frozenset({"present", "absent"})
 # The initial enrollment decision covers exactly these repositories with the
 # numeric identities recorded in the historical profiles. Any other name or
 # any other numeric identity for these names fails closed. Expanding this map
@@ -48,20 +50,26 @@ def _positive_int(value, label):
     return value
 
 
+def _exact_str(value, label):
+    if type(value) is not str:
+        _fail(f"{label} must be an exact string")
+    return value
+
+
 def _sha1(value, label):
-    if not isinstance(value, str) or not SHA1_RE.fullmatch(value):
+    if type(value) is not str or not SHA1_RE.fullmatch(value):
         _fail(f"{label} must be a 40-character lowercase hex commit")
     return value
 
 
 def _sha256(value, label):
-    if not isinstance(value, str) or not SHA256_RE.fullmatch(value):
+    if type(value) is not str or not SHA256_RE.fullmatch(value):
         _fail(f"{label} must be a 64-character lowercase hex digest")
     return value
 
 
 def _actor(value, label):
-    if not isinstance(value, str) or not value or len(value) > 200 or value.strip() != value:
+    if type(value) is not str or not value or len(value) > 200 or value.strip() != value:
         _fail(f"{label} must be a non-empty bounded actor identity")
     return value
 
@@ -79,13 +87,15 @@ class Enrollment:
     reviewer_clawsweeper: str
 
     def __post_init__(self):
-        if not isinstance(self.repository, str) or self.repository not in INITIAL_ENROLLMENT_SCOPE:
+        repository = _exact_str(self.repository, "repository")
+        if repository not in INITIAL_ENROLLMENT_SCOPE:
             _fail("repository is outside the initial enrollment scope")
-        if type(self.repository_id) is not int or self.repository_id != INITIAL_ENROLLMENT_SCOPE[self.repository]:
+        if type(self.repository_id) is not int or self.repository_id != INITIAL_ENROLLMENT_SCOPE[repository]:
             _fail("enrollment repository_id contradicts the recorded numeric identity")
         _positive_int(self.app_id, "GitHub App id")
         _positive_int(self.installation_id, "installation id")
-        if self.installation_account != self.repository.split("/", 1)[0]:
+        account = _exact_str(self.installation_account, "installation account")
+        if account != repository.split("/", 1)[0]:
             _fail("installation account must own the enrolled repository")
         _sha1(self.approved_policy_commit, "approved policy commit")
         _sha256(self.approved_policy_sha256, "approved policy sha256")
@@ -101,8 +111,25 @@ class Enrollment:
 
 
 @dataclass(frozen=True)
+class LegacyXapiMarker:
+    """Exact-profile legacy x-api marker loaded from the v2 registry document."""
+
+    repository: str
+    status: str
+
+    def __post_init__(self):
+        repository = _exact_str(self.repository, "legacy_xapi repository")
+        if repository not in INITIAL_ENROLLMENT_SCOPE:
+            _fail("legacy_xapi repository is outside the initial enrollment scope")
+        status = _exact_str(self.status, "legacy_xapi status")
+        if status not in LEGACY_XAPI_STATUSES:
+            _fail("legacy_xapi status is unknown")
+
+
+@dataclass(frozen=True)
 class Registry:
     enrollments: tuple
+    legacy_xapi: object = None
 
     def __post_init__(self):
         if not isinstance(self.enrollments, tuple) or not all(isinstance(e, Enrollment) for e in self.enrollments):
@@ -112,20 +139,61 @@ class Registry:
         installations = [e.installation_id for e in self.enrollments]
         if len(set(names)) != len(names) or len(set(ids)) != len(ids) or len(set(installations)) != len(installations):
             _fail("enrollment identities must be unique across the registry")
+        if self.legacy_xapi is not None and not isinstance(self.legacy_xapi, LegacyXapiMarker):
+            _fail("registry legacy_xapi must be a validated marker or omitted")
+
+    def legacy_status_for(self, repository):
+        """Return the loaded legacy marker for one exact service profile.
+
+        The marker is absent when the v2 field is omitted or names another
+        profile. Reads the dataclass field only; subclass attributes and
+        properties cannot grant a status. The profile repository must be an
+        exact admitted-scope string before omitted-marker absence is treated
+        as legitimate. Malformed stored markers fail closed.
+        """
+        if type(repository) is not str or repository not in INITIAL_ENROLLMENT_SCOPE:
+            _fail("legacy_xapi profile repository is required")
+        stored = object.__getattribute__(self, "__dict__")
+        marker = stored.get("legacy_xapi") if isinstance(stored, dict) else None
+        if marker is None:
+            return "absent"
+        if not isinstance(marker, LegacyXapiMarker):
+            _fail("registry legacy_xapi is malformed")
+        if marker.repository != repository:
+            return "absent"
+        if type(marker.status) is not str or marker.status not in LEGACY_XAPI_STATUSES:
+            _fail("registry legacy_xapi is malformed")
+        return marker.status
 
     def lookup(self, repository, repository_id, app_id, installation_id):
         """Resolve one enrollment; every identity component must agree."""
-        if not isinstance(repository, str):
+        if type(repository) is not str:
             _fail("repository name is required")
-        match = [e for e in self.enrollments if e.repository == repository]
+        match = [
+            e
+            for e in self.enrollments
+            if type(e.repository) is str and e.repository == repository
+        ]
         if not match:
             _fail("repository is not enrolled")
         enrollment = match[0]
-        if type(repository_id) is not int or repository_id != enrollment.repository_id:
+        if (
+            type(repository_id) is not int
+            or type(enrollment.repository_id) is not int
+            or repository_id != enrollment.repository_id
+        ):
             _fail("repository numeric identity does not match enrollment")
-        if type(app_id) is not int or app_id != enrollment.app_id:
+        if (
+            type(app_id) is not int
+            or type(enrollment.app_id) is not int
+            or app_id != enrollment.app_id
+        ):
             _fail("GitHub App does not match enrollment")
-        if type(installation_id) is not int or installation_id != enrollment.installation_id:
+        if (
+            type(installation_id) is not int
+            or type(enrollment.installation_id) is not int
+            or installation_id != enrollment.installation_id
+        ):
             _fail("installation does not match enrollment")
         return enrollment
 
@@ -138,7 +206,10 @@ def load_registry(raw):
         value = json.loads(bytes(raw).decode("utf-8"), object_pairs_hook=unique_object)
     except (UnicodeError, RecursionError, ValueError) as exc:
         raise AdmissionError("registry document is not strict UTF-8 JSON") from exc
-    _exact(value, ["schema", "enrollments"], "registry")
+    registry_keys = ["schema", "enrollments"]
+    if isinstance(value, dict) and "legacy_xapi" in value:
+        registry_keys = ["schema", "enrollments", "legacy_xapi"]
+    _exact(value, registry_keys, "registry")
     if value["schema"] != REGISTRY_SCHEMA:
         _fail("unsupported registry schema")
     if not isinstance(value["enrollments"], list):
@@ -146,8 +217,8 @@ def load_registry(raw):
     enrollments = []
     for item in value["enrollments"]:
         _exact(item, ["repository", "repository_id", "github_app", "approved_policy", "reviewers"], "enrollment")
-        repository = item["repository"]
-        if not isinstance(repository, str) or repository not in INITIAL_ENROLLMENT_SCOPE:
+        repository = _exact_str(item["repository"], "repository")
+        if repository not in INITIAL_ENROLLMENT_SCOPE:
             _fail("repository is outside the initial enrollment scope")
         repository_id = _positive_int(item["repository_id"], "enrollment repository_id")
         github_app = item["github_app"]
@@ -158,7 +229,22 @@ def load_registry(raw):
         _exact(reviewers, ["openclaw", "clawsweeper"], "reviewers")
         enrollments.append(Enrollment(repository, repository_id, github_app["id"], github_app["installation_id"], github_app["installation_account"],
                                       policy["commit"], policy["sha256"], reviewers["openclaw"], reviewers["clawsweeper"]))
-    return Registry(tuple(enrollments))
+    return Registry(tuple(enrollments), _load_legacy_xapi(value))
+
+
+def _load_legacy_xapi(value):
+    """Parse the optional exact-profile legacy marker. Omitted means absent."""
+    if "legacy_xapi" not in value:
+        return None
+    marker = value["legacy_xapi"]
+    _exact(marker, ["repository", "status"], "legacy_xapi")
+    repository = _exact_str(marker["repository"], "legacy_xapi repository")
+    if repository not in INITIAL_ENROLLMENT_SCOPE:
+        _fail("legacy_xapi repository is outside the initial enrollment scope")
+    status = _exact_str(marker["status"], "legacy_xapi status")
+    if status not in LEGACY_XAPI_STATUSES:
+        _fail("legacy_xapi status is unknown")
+    return LegacyXapiMarker(repository, status)
 
 
 @dataclass(frozen=True)

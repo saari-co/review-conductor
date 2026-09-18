@@ -33,11 +33,123 @@ not Gateway startup or unrelated agent work. No automatic merge endpoint.
 The canonical tuple is repository + PR + base SHA + head SHA + review epoch.
 Any base/head change invalidates evidence. Webhook authentication precedes
 parsing; replays are idempotent; conflicting deliveries fail closed. Uncertain
-non-idempotent dispatch is reconciled, not blindly retried. Two repair cycles
-exhaust automatic repair; reviewers never become mutation owners. Maintainer
-`@ClawSweeper rereview` / `@clawsweeper re-review` comments are the supported
-same-head ClawSweeper refresh entry; `pull_request.edited` is not a trigger.
-See [ClawSweeper rereview](clawsweeper-rereview.md).
+non-idempotent dispatch is reconciled, not blindly retried. The first two
+repair cycles are a saturating automatic-repair ledger, not a ceiling on later
+scoped ``required_fix`` routes; reviewers never become mutation owners.
+Copilot review 5242972219's cycle-2 "unbounded repairs" finding is
+rejected as inconsistent with this confirmed product contract.
+Maintainer `@ClawSweeper rereview` / `@clawsweeper re-review` comments are the
+supported same-head ClawSweeper refresh entry; `pull_request.edited` is not a
+trigger. See [ClawSweeper rereview](clawsweeper-rereview.md).
+
+Enrollment and terminal notification eligibility are one Conductor-owned
+decision, [`decide_orchestration_outcome`](../tools/orchestration_outcome.py)
+with schema `review-conductor.orchestration-outcome.v1`. A Review
+Conductor-enrolled repository uses the automatic CI → OpenClaw →
+repair/adjudication → ClawSweeper pipeline. A repository enrolled only in
+legacy x-api rails is reported as `route=legacy_xapi` with handoff required;
+Conductor does not import, encode, or dispatch the x-api conveyor
+(`legacy_dispatch` stays false). Dual enrollment selects Review
+Conductor and forbids duplicate legacy dispatch. Neither enrollment ends the
+process with no review and no notification. Ambiguous or broken enrollment
+fails closed and is never treated as unenrolled. This routing/admission
+core publishes that pair through
+[`trusted_enrollment_from_registry`](../tools/service_runtime.py) and
+[`decide_orchestration_outcome`](../tools/orchestration_outcome.py). It
+does not change live `run_service_tick`, `run_tick`,
+`queue_notifications`, `deliver_notifications`, or
+`service_entrypoint.registry_provider`. Live queue, delivery, GitHub
+dispatch, and notifier behavior stay on the approved-base path until the
+stacked adapter. The v2 service-owned registry may carry an
+optional exact-profile `legacy_xapi` marker; omitted documents remain
+legacy absent. `trusted_enrollment_from_registry` snapshots and
+revalidates the exact base Registry dataclass fields and each nested
+Enrollment and optional LegacyXapiMarker from its own stored
+base-dataclass fields; nested authority-bearing strings and IDs must
+be exact builtins, and reconstruction compares those exact base
+values. A str subclass with attacker-controlled equality cannot
+synthesize repository, ID, or legacy authority, including at
+`Registry.lookup`. Subclass methods or
+mutated nested values cannot synthesize Conductor, legacy, dual, or
+broken routing. The service-profile `github_app.repository` must be
+an exact admitted-scope string before omitted-marker absence is treated
+as legitimate none. Userland activation flags (`enabled` /
+`blockers`) do not select legacy, none, dual, or broken routes.
+A matching enrollment still requires a valid enabled core
+`review_policy` and the exact registry reviewer mapping before
+Conductor present; missing or non-dict policy or core config is
+broken. Unmatched enrollment keeps the existing absent/legacy
+result.
+An explicit
+`human_gate=true` takes precedence over merge-ready and silent
+nonterminal progression: no structurally valid gated input may become
+`merge_ready` or continue review dispatch silently. Outcome eligibility
+is `silent`/`none` for internal progression and `merge_ready` or
+`blocked` for notify-eligible terminals. Live queue consumption, send
+leases, reserved claim/send fencing, route-freshness guards used only for
+delivery, route-suppressed review stages, and complete current-event
+revalidation are stacked adapter work, not this routing/admission core.
+Public enum-like inputs require exact builtin strings before
+membership checks and raise `OrchestrationError` for unhashable or
+subclass tokens; persisted readiness/quality flags accept only stored
+integer `0`/`1` and otherwise map to unknown rail results. Exact
+binding checks remain Conductor-only. Caller payloads cannot grant
+Conductor authority. Identical current eligibility decisions stay
+deduped by route, reason, and eligibility. `closed` and
+`closed_merged` are terminal silent non-dispatchable states on every
+direct and service-loop path, including when trusted enrollment is
+broken; closed-state handling precedes enrollment short-circuits.
+Unknown state, unknown rail results, state/rail/result
+incoherence, and contradictory `ready_for_human_merge`
+`required_fix` / `human_gate` dispositions are validated after that
+closed exception and before any unenrolled, legacy, or broken
+enrollment short-circuit.
+
+The existing notification queue remains the later consumer of that
+outcome. This core does not invent a second sender and does not change
+the live queue. `repair_required` and `awaiting_adjudication` without a genuine
+human gate are silent internal progression, including the first two automatic
+repair rounds. At ledger cycle 2, `required_fix` may still create a scoped
+repair route, change the head, and rerun exact-head rails while preserving
+cycle 2; later findings stay in adjudication without another broad automatic
+round or ledger reset. OpenClaw findings suppress ClawSweeper eligibility.
+`openclaw_clean_draft` keeps `clawsweeper_eligible` false so a clean draft
+cannot select ClawSweeper. ClawSweeper findings suppress merge-ready
+eligibility. Merge-ready notification requires both required exact-head
+rails to be effectively clean, including authorized deferrals or
+rejections on an unchanged head, plus the existing ready-quality policy,
+and no explicit `human_gate`. `ready_for_human_merge` is compatible with
+no `adjudication_dispositions` or only the allowed `defer` /
+`reject_false_positive` set; `required_fix` or `human_gate` dispositions
+on that state are contradictory and use canonical fail-closed blocked
+handling instead of becoming merge-ready, silently clearing the
+disposition, or taking an unenrolled/legacy `none` short-circuit.
+`ready_for_human_merge` with `clawsweeper_result=failed` or
+`human_gate` is an impossible terminal tuple: the engine would have
+moved to `clawsweeper_failed` or `waiting_human`, so the outcome
+fail-closes to the blocked path instead of silently returning
+`merge_ready_suppressed`. Only merge-ready or
+genuinely blocked/human-action-required outcomes notify. Terminal copy is
+`<repo>#<pr> ready to merge` or `<repo>#<pr> blocked — <specific reason>`,
+optionally with the PR URL, and carries no transcript, progress, cycle, tier,
+or proof prose. A changed head preserves the 2/2 repair ledger. Representable
+fail-closed enrollment, unknown state/result, inconsistent
+state/rail/result tuples, mismatched rails, and equivalent invalid
+orchestration states keep routing and dispatch suppressed and stay
+eligible for the blocked notification path. The persisted-row adapter
+applies the same rail-aware validation and maps inconsistent or
+malformed stored state/rail tokens such as rail='spark' to typed
+unknown results and exact builtin state/rail values so the canonical
+decision can fail closed to blocked instead of raising. Direct public
+contract inputs remain strict. Delivering one concise blocked
+notification for every malformed persisted rail/state token is
+stacked adapter work.
+Impossible contradictions, including a blocked or running state with
+the wrong rail, are rejected before any review_dispatch or
+notification eligibility is calculated. Fail-closed copy uses the
+canonical decision reason, not stale persisted blocker text. Direct
+public contract inputs still raise. See the
+[decision map](orchestration-decision-map.md) for later #687 workstreams.
 
 The Conductor is the sole writer of the authoritative `OpenClaw Review Rail`
 and `ClawSweeper Review Rail` checks after it validates reviewer-native evidence.

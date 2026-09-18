@@ -62,6 +62,77 @@ and evidence-consumer dependency only. It does not attach, pin, publish,
 install, or activate the x-api transport or a spark-dgx applied-P3 attestation
 source.
 
+## Completed for issue #687 slice 1 (source-only; not deployed)
+
+Deterministic terminal notification eligibility now lives in Review Conductor
+as `review-conductor.orchestration-outcome.v1`. This core does not change
+the live userland queue, delivery, GitHub dispatch, or notifier path;
+[`decide_orchestration_outcome`](../tools/orchestration_outcome.py) is the
+inert eligibility contract only. There is no second notification system and
+no x-api runtime dependency. Silent first
+and second automatic repair rounds, third-set adjudication without a human
+gate, rail suppression, merge-ready, blocked/human-gate, unenrolled-none, and
+fail-closed broken/unknown outcomes are source-qualified. Representable
+fail-closed enrollment, unknown state/result, and equivalent invalid
+orchestration states keep dispatch suppressed (`legacy_dispatch` remains
+false) and stay eligible for a later blocked notification. Live
+`run_tick` route suppression, queue/message/identity/delivery logic,
+`run_service_tick` enrollment wiring, and
+`service_entrypoint.registry_provider` document-only loading are stacked
+adapter work. Caller payloads cannot grant enrollment,
+and fail-closed copy prefers the canonical reason over stale persisted
+blocker text. Notification delivery, send leases, reserved claim/send
+fencing, and route-freshness guards used only for delivery are stacked
+adapter work, not this routing/admission core. Public enum-like inputs require
+exact builtin strings and raise `OrchestrationError` instead of
+`TypeError`; persisted readiness/quality flags accept only integer
+`0`/`1` and otherwise fail closed through unknown rail results. Current
+eligibility decisions stay deduped by route, reason, and eligibility. `closed` and `closed_merged`
+stay silent and non-dispatchable even when trusted enrollment is broken.
+The v2 registry document may name one exact-profile `legacy_xapi`
+marker; existing documents that omit it stay Conductor-only (legacy
+absent). `load_registry` rejects malformed or ambiguous marker forms.
+`trusted_enrollment_from_registry` consumes only that loaded field
+after snapshotting and revalidating exact base Registry dataclass
+fields and each nested Enrollment and optional LegacyXapiMarker from
+its own stored base-dataclass fields. Nested authority-bearing
+strings and IDs must be exact builtins; reconstruction compares those
+exact base values so a str subclass cannot synthesize repository, ID,
+or legacy authority. The service-profile repository
+must be an exact admitted-scope string before omitted-marker absence
+is treated as legitimate none. A matching enrollment still requires
+a valid enabled core `review_policy` and the exact registry reviewer
+mapping before Conductor present; missing or non-dict policy or
+core config is broken. Unmatched enrollment keeps the existing
+absent/legacy result.
+Impossible state/rail/result tuples, including mismatched rails and
+`ready_for_human_merge` with `clawsweeper_result=failed` or
+`human_gate`, fail closed before enrollment-route short-circuits,
+dispatch, or notification eligibility instead of silently returning
+`merge_ready_suppressed`. Unknown/result/tuple coherence and
+contradictory ready `required_fix` / `human_gate` dispositions are
+validated after closed-state handling and before unenrolled or legacy
+short-circuits. The persisted-row adapter applies the same rail-aware
+validation and maps inconsistent or malformed stored state/rail
+tokens such as rail='spark' to typed unknown results and exact
+builtin state/rail values so the canonical decision can fail closed
+to blocked instead of raising. Direct public contract inputs remain
+strict. Delivering one concise blocked notification for every
+malformed persisted rail/state token is stacked adapter work. `human_gate=true` precedes merge-ready and silent nonterminal dispatch.
+`openclaw_clean_draft` keeps `clawsweeper_eligible` false.
+`ready_for_human_merge` accepts no dispositions or only `defer` /
+`reject_false_positive`; `required_fix` or `human_gate` dispositions on
+that state fail closed to the blocked path instead of becoming
+merge-ready.
+`repair_cycle` is the
+saturating ledger for the first two broad automatic rounds: cycle 2 still
+allows a scoped `required_fix` route, head change, and exact-head rerun
+without a third automatic round or ledger reset. Terminal messages are
+`<repo>#<pr> ready to merge` or `<repo>#<pr> blocked — <reason>`. Legacy-only
+output names `route=legacy_xapi` / handoff required and does not dispatch
+x-api. Later #687 workstreams are sequenced in
+[orchestration-decision-map.md](orchestration-decision-map.md).
+
 ## Not completed / prerequisites for migration
 
 1. Trusted enrollment, approved base-policy loading and policy-hash binding now

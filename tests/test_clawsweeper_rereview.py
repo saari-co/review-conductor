@@ -453,7 +453,35 @@ def test_exhausted_repair_budget_refuses_rereview(temp: Path) -> None:
                 f"internal:budget-adjudication-{index}", 305, head, request_id, ["required_fix"]
             ),
         )
-    assert adjudicated["state"] == "waiting_human"
+    assert adjudicated["state"] == "repair_required"
+    assert legacy.status(state, 305)["head"]["repair_cycle"] == 2
+    waiting_head = "7" * 40
+    legacy.github_event(
+        temp, state, "pull_request", "budget-pr-waiting", legacy.pr_payload(305, waiting_head, "synchronize")
+    )
+    legacy.github_event(
+        temp,
+        state,
+        "workflow_run",
+        "budget-ci-waiting",
+        legacy.workflow_payload(305, waiting_head, "success", 1403),
+    )
+    waiting_request = legacy.dispatch_openclaw(temp, state, 305, waiting_head)
+    waiting = legacy.internal_event(
+        temp,
+        state,
+        "budget-human-gate",
+        legacy.openclaw_event(
+            "internal:budget-human-gate",
+            "openclaw.terminal",
+            305,
+            waiting_head,
+            waiting_request,
+            result="human_gate",
+            findings=0,
+        ),
+    )
+    assert waiting["state"] == "waiting_human"
     assert legacy.status(state, 305)["head"]["repair_cycle"] == 2
     refused = legacy.github_event(
         temp,

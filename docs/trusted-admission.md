@@ -27,9 +27,23 @@ to this repository; tests build synthetic registries in memory.
       "approved_policy": {"commit": "<40 lowercase hex>", "sha256": "<64 lowercase hex>"},
       "reviewers": {"openclaw": "<openclaw-actor>", "clawsweeper": "<clawsweeper-actor>"}
     }
-  ]
+  ],
+  "legacy_xapi": {
+    "repository": "saari-co/openclaw-smcbd-suite",
+    "status": "present"
+  }
 }
 ```
+
+The optional top-level `legacy_xapi` object is the only allowed placement for the
+legacy marker. It names exactly one `INITIAL_ENROLLMENT_SCOPE` repository and
+`status` `present` or `absent`. Existing v2 documents that omit the field stay
+valid and mean legacy absent for every profile (backward-compatible
+Conductor-only behavior). A marker for another repository does not apply to
+the running service profile. Strings, booleans, lists, `null`, `broken`,
+unknown repositories, missing keys, extra keys, and enrollment-nested copies
+fail closed. Declared `broken` is not a document value; runtime broken is
+derived from contradictions.
 
 Rules enforced by `load_registry`:
 
@@ -59,10 +73,35 @@ Rules enforced by `load_registry`:
   to serve, tick or accept deliveries while the engine profile's
   `review_policy.reviewers` differs from the enrollment, so a profile cannot
   supply or change the actors the engine trusts.
+- Optional `legacy_xapi` may appear only as a top-level object with exact keys
+  `repository` and `status`. `Registry.legacy_status_for(repository)` returns
+  that loaded status for the exact service profile and `absent` when the field
+  is omitted or names another profile. The profile repository must be an
+  exact admitted-scope string before that omitted-marker absence is
+  treated as legitimate.   `trusted_enrollment_from_registry` snapshots
+  and revalidates the exact base Registry dataclass fields and each
+  nested Enrollment and optional LegacyXapiMarker from its own stored
+  base-dataclass fields, then consumes only those loaded values.
+  Nested authority-bearing strings and IDs must be exact builtins;
+  reconstruction compares those exact base values. A str subclass
+  with attacker-controlled equality cannot synthesize repository, ID,
+  or legacy authority. Userland `enabled` / `blockers` and synthetic
+  subclass methods or attributes cannot grant a legacy status or
+  synthesize Conductor, dual, or broken routing. A matching
+  enrollment still requires a valid enabled core `review_policy`
+  and the exact registry reviewer mapping before Conductor present;
+  missing or non-dict policy or core config is broken. Unmatched
+  enrollment keeps the existing absent/legacy result. External registry
+  document validation/loading is separate from strict Conductor
+  ingress admission so worker ticks can represent every trusted
+  route.
 
 `Registry.lookup(repository, repository_id, app_id, installation_id)` succeeds
 only when all four agree with one enrollment; strings, booleans or a neighbouring
-enrollment's values fail.
+enrollment's values fail. The lookup boundary requires exact built-in
+strings and integers on the caller and stored enrollment fields. A
+`str` subclass whose `__eq__` always returns true cannot look up a
+real enrollment.
 
 ## Approved base-policy loading
 

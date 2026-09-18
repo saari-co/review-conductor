@@ -1,0 +1,178 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/saari-co/review-conductor/blob/main/contracts/orchestration-outcome.schema.json",
+  "title": "Review Conductor orchestration outcome v1",
+  "$comment": "Canonical enrollment-route, rail-suppression, and terminal notification decision. The existing notification queue consumes this outcome. It is not a second notification system and grants no merge or x-api authority. legacy_dispatch is always false: Conductor describes a legacy_xapi handoff when needed but never encodes or dispatches the x-api conveyor. Representable fail-closed routing keeps dispatch suppressed and uses notification.eligibility=blocked. notification.eligibility/kind/channels accept only producer-emittable combinations. repair.cycle is the saturating 2/2 automatic-repair ledger, not a ceiling on later scoped required_fix routes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "route",
+    "review_dispatch",
+    "legacy_dispatch",
+    "clawsweeper_eligible",
+    "merge_ready_eligible",
+    "notification",
+    "repair",
+    "reason"
+  ],
+  "properties": {
+    "schema": {
+      "const": "review-conductor.orchestration-outcome.v1"
+    },
+    "route": {
+      "enum": [
+        "review_conductor",
+        "legacy_xapi",
+        "none",
+        "fail_closed"
+      ]
+    },
+    "review_dispatch": {
+      "type": "boolean"
+    },
+    "legacy_dispatch": {
+      "type": "boolean",
+      "const": false,
+      "$comment": "Review Conductor never dispatches the x-api legacy conveyor. route=legacy_xapi means handoff required."
+    },
+    "clawsweeper_eligible": {
+      "type": "boolean"
+    },
+    "merge_ready_eligible": {
+      "type": "boolean"
+    },
+    "notification": {
+      "$comment": "Exactly the producer-emittable combinations from decide_orchestration_outcome. Independent eligibility/kind/channels fields are rejected.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "eligibility",
+            "kind",
+            "channels"
+          ],
+          "properties": {
+            "eligibility": {
+              "const": "merge_ready"
+            },
+            "kind": {
+              "const": "merge_ready"
+            },
+            "channels": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 3,
+              "prefixItems": [
+                {
+                  "const": "openclaw_context"
+                },
+                {
+                  "const": "discord"
+                },
+                {
+                  "const": "signal"
+                }
+              ],
+              "items": false
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "eligibility",
+            "kind",
+            "channels"
+          ],
+          "properties": {
+            "eligibility": {
+              "const": "blocked"
+            },
+            "kind": {
+              "const": "human_action_required"
+            },
+            "channels": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 3,
+              "prefixItems": [
+                {
+                  "const": "openclaw_context"
+                },
+                {
+                  "const": "discord"
+                },
+                {
+                  "const": "signal"
+                }
+              ],
+              "items": false
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "eligibility",
+            "kind",
+            "channels"
+          ],
+          "properties": {
+            "eligibility": {
+              "enum": [
+                "silent",
+                "none"
+              ]
+            },
+            "kind": {
+              "type": "null"
+            },
+            "channels": {
+              "type": "array",
+              "maxItems": 0
+            }
+          }
+        }
+      ]
+    },
+    "repair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cycle",
+        "finding_set",
+        "automatic_rounds_remaining",
+        "ledger_preserved"
+      ],
+      "properties": {
+        "cycle": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "finding_set": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        },
+        "automatic_rounds_remaining": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "ledger_preserved": {
+          "const": true
+        }
+      }
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    }
+  }
+}

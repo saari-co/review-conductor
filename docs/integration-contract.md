@@ -42,7 +42,29 @@ they do not promote policy, grant merge, or accept `@clawsweeper review` as an
 alias. `pull_request.edited` remains unsupported. See
 [ClawSweeper rereview](clawsweeper-rereview.md). Worker/check projection is blocked if a
 current head lacks a current binding; the registry is re-read on every delivery
-and tick. See [trusted admission](trusted-admission.md).
+and tick. The same v2 registry may carry an optional exact-profile
+`legacy_xapi` marker; omitted documents remain legacy absent, and
+`trusted_enrollment_from_registry` consumes only that loaded field
+after snapshotting and revalidating the exact base Registry dataclass
+fields and each nested Enrollment and optional LegacyXapiMarker from
+its own stored base-dataclass fields. Nested authority-bearing
+strings and IDs must be exact builtins; reconstruction compares those
+exact base values so a str subclass cannot synthesize repository, ID,
+or legacy authority. `Registry.lookup` also requires those exact
+builtin types at the lookup boundary. The service-profile repository
+must be an exact admitted-scope string before omitted-marker absence
+is treated as legitimate none. A matching enrollment still requires
+a valid enabled core `review_policy` and the exact registry reviewer
+mapping before Conductor present; missing or non-dict policy or
+core config is broken. Unmatched enrollment keeps the existing
+absent/legacy result. Inert registry document
+validation/loading stays available here; live
+`registry_provider` document-only worker ticks, `run_service_tick`
+enrollment wiring, and queue/delivery consumption are stacked adapter
+work. Notification send leases, reserved claim/send
+fencing, and route-freshness guards used only for delivery are stacked
+adapter work, not this routing/admission core.
+See [trusted admission](trusted-admission.md).
 No live registry, credential, HTTPS edge or deployment exists, so this is
 qualified source behavior, not live admission.
 

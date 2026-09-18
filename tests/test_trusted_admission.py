@@ -119,6 +119,88 @@ class RegistryTests(unittest.TestCase):
             with self.subTest(raw=raw[:20]), self.assertRaises(ta.AdmissionError):
                 ta.load_registry(raw)
 
+    def test_omitted_legacy_xapi_is_absent_for_every_scoped_profile(self):
+        registry = self.fx.registry()
+        self.assertIsNone(registry.legacy_xapi)
+        self.assertEqual(registry.legacy_status_for(BLOCKS), "absent")
+        self.assertEqual(registry.legacy_status_for(SMCBD), "absent")
+        empty = self.fx.registry({"schema": ta.REGISTRY_SCHEMA, "enrollments": []})
+        self.assertIsNone(empty.legacy_xapi)
+        self.assertEqual(empty.legacy_status_for(BLOCKS), "absent")
+        for repository in (None, 1, True, "", "saari-co/x-api"):
+            with self.subTest(repository=repository), self.assertRaises(ta.AdmissionError):
+                empty.legacy_status_for(repository)
+
+    def test_legacy_xapi_marker_is_exact_profile_status(self):
+        doc = self.fx.registry_doc()
+        doc["legacy_xapi"] = {"repository": SMCBD, "status": "present"}
+        registry = self.fx.registry(doc)
+        self.assertEqual(registry.legacy_status_for(SMCBD), "present")
+        self.assertEqual(registry.legacy_status_for(BLOCKS), "absent")
+        doc["legacy_xapi"] = {"repository": BLOCKS, "status": "absent"}
+        explicit_absent = self.fx.registry(doc)
+        self.assertEqual(explicit_absent.legacy_status_for(BLOCKS), "absent")
+        self.assertEqual(explicit_absent.legacy_status_for(SMCBD), "absent")
+
+    def test_legacy_xapi_malformed_forms_fail_closed(self):
+        doc = self.fx.registry_doc()
+        bad = [
+            {**doc, "legacy_xapi": "present"},
+            {**doc, "legacy_xapi": True},
+            {**doc, "legacy_xapi": 1},
+            {**doc, "legacy_xapi": None},
+            {**doc, "legacy_xapi": []},
+            {**doc, "legacy_xapi": {}},
+            {**doc, "legacy_xapi": {"status": "present"}},
+            {**doc, "legacy_xapi": {"repository": SMCBD}},
+            {**doc, "legacy_xapi": {"repository": SMCBD, "status": "present", "extra": 1}},
+            {**doc, "legacy_xapi": {"repository": "saari-co/x-api", "status": "present"}},
+            {**doc, "legacy_xapi": {"repository": SMCBD, "status": "broken"}},
+            {**doc, "legacy_xapi": {"repository": SMCBD, "status": "Present"}},
+            {**doc, "legacy_xapi": {"repository": SMCBD, "status": True}},
+            {**doc, "legacy_xapi": {"repository": SMCBD, "status": None}},
+        ]
+        enrollment_marker = copy.deepcopy(doc)
+        enrollment_marker["enrollments"][0]["legacy_xapi"] = {"repository": BLOCKS, "status": "present"}
+        bad.append(enrollment_marker)
+        for candidate in bad:
+            with self.subTest(candidate=candidate), self.assertRaises(ta.AdmissionError):
+                self.fx.registry(candidate)
+        with self.assertRaises(ta.AdmissionError):
+            ta.Registry((), legacy_xapi="present")
+        with self.assertRaises(ta.AdmissionError):
+            ta.LegacyXapiMarker("saari-co/x-api", "present")
+        with self.assertRaises(ta.AdmissionError):
+            ta.LegacyXapiMarker(SMCBD, "broken")
+
+    def test_nested_authority_fields_reject_str_subclasses(self):
+        class Alias(str):
+            def __eq__(self, other):
+                return True
+
+        enrollment = self.fx.registry().enrollments[0]
+        fields = {
+            name: object.__getattribute__(enrollment, name)
+            for name in ta.Enrollment.__dataclass_fields__
+        }
+        string_fields = (
+            "repository",
+            "installation_account",
+            "approved_policy_commit",
+            "approved_policy_sha256",
+            "reviewer_openclaw",
+            "reviewer_clawsweeper",
+        )
+        for name in string_fields:
+            forged = dict(fields)
+            forged[name] = Alias(fields[name])
+            with self.subTest(field=name), self.assertRaises(ta.AdmissionError):
+                ta.Enrollment(**forged)
+        with self.assertRaises(ta.AdmissionError):
+            ta.LegacyXapiMarker(Alias(SMCBD), "present")
+        with self.assertRaises(ta.AdmissionError):
+            ta.LegacyXapiMarker(SMCBD, Alias("present"))
+
     def test_lookup_requires_every_identity_component(self):
         registry = self.fx.registry()
         self.assertEqual(registry.lookup(BLOCKS, 1306882611, BLOCKS_APP, BLOCKS_INSTALL).repository, BLOCKS)
@@ -131,6 +213,39 @@ class RegistryTests(unittest.TestCase):
                      (None, 1306882611, BLOCKS_APP, BLOCKS_INSTALL), ("saari-co/x-api", 1, 1, 1)]:
             with self.subTest(args=args), self.assertRaises(ta.AdmissionError):
                 registry.lookup(*args)
+
+    def test_lookup_rejects_hostile_str_subclass(self):
+        class AlwaysEqual(str):
+            def __eq__(self, other):
+                return True
+
+            def __hash__(self):
+                return str.__hash__(self)
+
+        class AlwaysEqualInt(int):
+            def __eq__(self, other):
+                return True
+
+            def __hash__(self):
+                return int.__hash__(self)
+
+        registry = self.fx.registry()
+        enrolled = registry.lookup(BLOCKS, 1306882611, BLOCKS_APP, BLOCKS_INSTALL)
+        self.assertIs(type(enrolled.repository), str)
+        for repository in (AlwaysEqual("attacker/unrelated"), AlwaysEqual(BLOCKS)):
+            with self.subTest(repository=str(repository)), self.assertRaises(ta.AdmissionError):
+                registry.lookup(repository, 1306882611, BLOCKS_APP, BLOCKS_INSTALL)
+        for args in [
+            (BLOCKS, AlwaysEqualInt(1306882611), BLOCKS_APP, BLOCKS_INSTALL),
+            (BLOCKS, 1306882611, AlwaysEqualInt(BLOCKS_APP), BLOCKS_INSTALL),
+            (BLOCKS, 1306882611, BLOCKS_APP, AlwaysEqualInt(BLOCKS_INSTALL)),
+        ]:
+            with self.subTest(args=args), self.assertRaises(ta.AdmissionError):
+                registry.lookup(*args)
+        self.assertEqual(
+            registry.lookup(BLOCKS, 1306882611, BLOCKS_APP, BLOCKS_INSTALL).repository,
+            BLOCKS,
+        )
 
 
 class PolicyLoadingTests(unittest.TestCase):

@@ -104,11 +104,13 @@ def _staged_reader(enrolled: admission.Enrollment, staged: bytes) -> PolicyReade
 
     return read
 PolicyReader = Callable[[str, str], bytes]
-RegistrySource = Union[admission.Registry, Callable[[], admission.Registry]]
 
 
 class ServiceError(core.ContractError):
     """A service-owned identity, enrollment or policy boundary failed closed."""
+
+
+RegistrySource = Union[admission.Registry, Callable[[], admission.Registry]]
 
 
 def resolve_registry(source: RegistrySource) -> admission.Registry:
@@ -724,6 +726,195 @@ def require_exact_current_binding(
         return binding
     finally:
         connection.close()
+
+
+def _stored_dataclass_mapping(value: Any) -> dict[str, Any] | None:
+    try:
+        stored = object.__getattribute__(value, "__dict__")
+    except AttributeError:
+        return None
+    if type(stored) is not dict:
+        return None
+    return stored
+
+
+_UNUSABLE_FIELD = object()
+
+
+def _exact_base_field(value: Any) -> Any:
+    """Copy one stored field into an exact builtin. Subclasses fail closed."""
+    if type(value) is str:
+        return str(value)
+    if type(value) is int:
+        return int(value)
+    if value is None:
+        return None
+    return _UNUSABLE_FIELD
+
+
+def _exact_dataclass_from_stored_fields(value: Any, cls: type) -> Any | None:
+    """Rebuild one exact base dataclass from stored fields only.
+
+    Subclass methods, properties, and synthetic attributes cannot grant a
+    value. Authority-bearing string and integer fields must be exact
+    builtins; missing, extra, mutated, or subclassed stored fields fail
+    closed. Reconstruction compares the rebuilt exact base values, not
+    attacker-controlled equality on the original stored objects.
+    """
+    if type(value) is not cls:
+        return None
+    stored = _stored_dataclass_mapping(value)
+    if stored is None:
+        return None
+    fields = tuple(cls.__dataclass_fields__)
+    if set(stored) != set(fields):
+        return None
+    args = []
+    for name in fields:
+        exact = _exact_base_field(stored[name])
+        if exact is _UNUSABLE_FIELD:
+            return None
+        args.append(exact)
+    try:
+        concrete = cls(*args)
+    except (admission.AdmissionError, TypeError):
+        return None
+    if type(concrete) is not cls:
+        return None
+    rebuilt = _stored_dataclass_mapping(concrete)
+    if rebuilt is None:
+        return None
+    for name, exact in zip(fields, args):
+        current = rebuilt.get(name)
+        if type(current) is not type(exact) or current != exact:
+            return None
+    return concrete
+
+
+def _nested_registry_values_from_stored_fields(
+    stored: dict[str, Any],
+) -> tuple[tuple[Any, ...], Any] | None:
+    raw_enrollments = stored.get("enrollments")
+    if type(raw_enrollments) is not tuple:
+        return None
+    enrollments = []
+    for item in raw_enrollments:
+        exact = _exact_dataclass_from_stored_fields(item, admission.Enrollment)
+        if exact is None:
+            return None
+        enrollments.append(exact)
+    raw_marker = stored.get("legacy_xapi")
+    if raw_marker is None:
+        marker = None
+    else:
+        marker = _exact_dataclass_from_stored_fields(raw_marker, admission.LegacyXapiMarker)
+        if marker is None:
+            return None
+    return tuple(enrollments), marker
+
+
+def _registry_from_stored_fields(registry: Any) -> admission.Registry | None:
+    """Rebuild a base Registry from stored dataclass fields only.
+
+    Subclass methods, properties, and synthetic attributes cannot grant a
+    route. Nested Enrollment and optional LegacyXapiMarker values are
+    snapshotted from their own exact stored base-dataclass fields and
+    revalidated into exact base-class values. ``load_registry`` remains the
+    producer of those fields.
+    """
+    if not isinstance(registry, admission.Registry):
+        return None
+    stored = _stored_dataclass_mapping(registry)
+    if stored is None:
+        return None
+    fields = tuple(admission.Registry.__dataclass_fields__)
+    if set(stored) != set(fields):
+        return None
+    nested = _nested_registry_values_from_stored_fields(stored)
+    if nested is None:
+        return None
+    try:
+        concrete = admission.Registry(*nested)
+    except admission.AdmissionError:
+        return None
+    if type(concrete) is not admission.Registry:
+        return None
+    return concrete
+
+
+def trusted_enrollment_from_registry(
+    config: dict[str, Any],
+    registry: admission.Registry,
+    *,
+    core_config: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """Derive the trusted pair from the registry/admission result only.
+
+    Userland activation flags (``enabled`` / ``blockers``) are never consulted.
+    A matching registry enrollment is Review Conductor present. Absence of that
+    enrollment is unenrolled unless the loaded registry document names this
+    exact service profile in its optional ``legacy_xapi`` marker.     The marker
+    is consumed only from the validated Registry field after each nested
+    Enrollment and optional LegacyXapiMarker is reconstructed from its own
+    stored base-dataclass fields; subclass methods and attributes cannot
+    grant a status. The service-profile repository must be an exact
+    admitted-scope string before omitted-marker absence is treated as
+    legitimate none/legacy-absent. Identity, reviewer, or core
+    contradictions fail closed. A matching enrollment still requires a
+    valid enabled core ``review_policy`` and the exact registry reviewer
+    mapping before Conductor present; missing or non-dict policy or
+    core config is broken. Unmatched enrollment keeps the existing
+    absent/legacy result. Dual is Conductor present plus that same
+    registry-owned legacy marker for this profile.
+    """
+    broken = {"review_conductor": "broken", "legacy_xapi": "broken"}
+    snapshot = _registry_from_stored_fields(registry)
+    if snapshot is None:
+        return dict(broken)
+    app = config.get("github_app")
+    if not isinstance(app, dict):
+        return dict(broken)
+    repository = app.get("repository")
+    if type(repository) is not str or repository not in admission.INITIAL_ENROLLMENT_SCOPE:
+        return dict(broken)
+    try:
+        legacy = snapshot.legacy_status_for(repository)
+    except admission.AdmissionError:
+        return dict(broken)
+    if legacy not in admission.LEGACY_XAPI_STATUSES:
+        return dict(broken)
+    matches = [item for item in snapshot.enrollments if item.repository == repository]
+    if len(matches) != 1:
+        return {"review_conductor": "absent", "legacy_xapi": legacy} if not matches else dict(broken)
+    try:
+        enrolled = snapshot.lookup(
+            app.get("repository"),
+            app.get("repository_id"),
+            app.get("app_id"),
+            app.get("installation_id"),
+        )
+    except admission.AdmissionError:
+        return dict(broken)
+    if core_config is None and config.get("core_config"):
+        try:
+            core_config = core.load_config(Path(config["core_config"]))
+        except (OSError, core.ContractError):
+            return dict(broken)
+    if not isinstance(core_config, dict):
+        return dict(broken)
+    if (
+        core_config.get("repository") != enrolled.repository
+        or core_config.get("repository_id") != enrolled.repository_id
+    ):
+        return dict(broken)
+    review_policy = core_config.get("review_policy")
+    if not isinstance(review_policy, dict):
+        return dict(broken)
+    if review_policy.get("enabled") is not True:
+        return dict(broken)
+    if review_policy.get("reviewers") != enrolled.reviewers:
+        return dict(broken)
+    return {"review_conductor": "present", "legacy_xapi": legacy}
 
 
 def run_service_tick(

@@ -1,0 +1,25 @@
+{
+  "schema": "review-conductor.candidate-manifest.v1",
+  "base_sha": "b16e0c8bc3f32e997db31caa173b846b0e9041ce",
+  "starting_head_sha": "b08924779810b490573f619e5b1afa64839fc9be",
+  "captured_date": "2026-09-18",
+  "binding_scheme": "A commit cannot contain its own SHA. base_sha is the frozen origin/main integration base. starting_head_sha is the verified PR #18 core head this ordinary post-cap reviewer-binding repair starts from. Per-file sha256 values are of this repaired-core candidate source. The branch head after commit is the exact candidate SHA for hosted CI. The malformed-token packet remains the explanation of b089247; the ready-tuple packet remains the explanation of 7ee4184; the first post-cap packet remains the explanation of 009279c; the merge-forward packet remains the explanation of integrating exact main b16e0c8. This packet does not embed a receipt commit's own SHA. Live notification/delivery/runtime entry functions remain deferred to the stacked adapter. The 2/2 ledger is not reset. No Copilot, OpenClaw, or ClawSweeper review is requested from this packet.",
+  "files": {
+    "docs/architecture.md": "7a0318da151167eaf2d47011ba5f1f5599c0957850bfb91812e76c754b6642e4",
+    "docs/integration-contract.md": "5087fdb773e069144821fb321817bfe78a9f3ed320adedc515b313b014174c5a",
+    "docs/migration.md": "51a3627ee3ede7c9da3eb12b1354f67abef33189f9b91846952103385b38532d",
+    "docs/orchestration-decision-map.md": "ba3e7193eb7a19f398de2f4d12285fa10bd2e4b0c4165dcd2c4b9b728de963aa",
+    "docs/trusted-admission.md": "8dee489b02f10228ec7b0aabc39f4709266ec491de6336039305864e60d33f01",
+    "proof/issue-687-routing-core-merge-forward-20260918/PROOF.md": "86022aec88b6cb4231dbb7d9ecb3e916407452a2f37e41b386b03a55edcb8d7d",
+    "proof/issue-687-routing-core-merge-forward-20260918/candidate-manifest.json": "2d95fe3b896bd6dba4845ee3a703a6ab7069c3abc3ec4569a15a3d1963b1ea12",
+    "proof/issue-687-routing-core-post-cap-repair-20260918/PROOF.md": "33dfb0d8303f2e253d4f878a1e0e8e0ef19425870b804cd4de32ed5b54fcc27a",
+    "proof/issue-687-routing-core-post-cap-repair-20260918/candidate-manifest.json": "e4a520f184a58f12c129aba3bb81a6c0954113c3850dd06430361e583f790c26",
+    "proof/issue-687-routing-core-post-cap-repair-2-20260918/PROOF.md": "09614bb4bf443ca6239b2451f0790da61803d6b2c9ba3fdf1424e28508395650",
+    "proof/issue-687-routing-core-post-cap-repair-2-20260918/candidate-manifest.json": "9d2027ec49ad4e1919651439f463682656c696bf5d9d48a8511b63acf8feb91b",
+    "proof/issue-687-routing-core-post-cap-repair-3-20260918/PROOF.md": "1fe66e1857cd34058128e31977184501c0f93ca012853f1a499650fda70013ce",
+    "proof/issue-687-routing-core-post-cap-repair-3-20260918/candidate-manifest.json": "c3551e0913de06a2028de7b809de07dea87c160b6c45903e16fd1b3385661173",
+    "proof/issue-687-routing-core-post-cap-repair-4-20260918/PROOF.md": "25eab6afe003cf3be2385bd5d997494ec299c602a43fe1fee3ef668c5d81d01f",
+    "tests/test_service_runtime.py": "4f267323ac62a712578a04f3de994132fd323c83665ebe52d5c579ede95d1274",
+    "tools/service_runtime.py": "848da1349bb805f256392483b7d4fb8388e40c5a3e8564e86436ff406f9762e9"
+  }
+}
