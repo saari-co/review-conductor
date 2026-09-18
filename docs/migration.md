@@ -91,7 +91,8 @@ sending obsolete blocked/ready copy. The reserved send boundary holds
 a versioned service-owned registry/route lease through `notifier.send`
 so a cooperating replacement cannot occur between final validation
 and transport; the supported replace/lease contract fail-closes while
-that hold is active and does not claim a guarantee against arbitrary
+that hold is active; nested or overlapping holds reuse the already
+pinned generation and do not claim a guarantee against arbitrary
 OS-level writes. Public enum-like inputs require
 exact builtin strings and raise `OrchestrationError` instead of
 `TypeError`; persisted readiness/quality flags accept only integer

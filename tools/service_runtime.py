@@ -117,8 +117,10 @@ class RegistryRouteLease:
 
     Supported replacements go through ``replace`` and fail closed while any
     send hold is active. ``current`` re-reads the wrapped source unless a
-    send hold has pinned that generation. This contract does not claim a
-    guarantee against arbitrary nonconforming OS-level registry writes.
+    send hold has pinned that generation. Nested or overlapping holds reuse
+    that already pinned registry instead of resolving a later source
+    generation. This contract does not claim a guarantee against arbitrary
+    nonconforming OS-level registry writes.
     """
 
     schema = "review-conductor.registry-route-lease.v1"
@@ -159,10 +161,14 @@ class RegistryRouteLease:
     @contextmanager
     def hold_send(self):
         with self._lock:
-            pinned = _resolve_registry_source(self._source)
-            self._holds += 1
-            if self._holds == 1:
+            if self._holds:
+                if self._pinned is None:
+                    raise ServiceError("registry send lease is missing its pinned registry")
+                pinned = self._pinned
+            else:
+                pinned = _resolve_registry_source(self._source)
                 self._pinned = pinned
+            self._holds += 1
         try:
             yield pinned
         finally:

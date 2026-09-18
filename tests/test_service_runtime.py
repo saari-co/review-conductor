@@ -1565,6 +1565,42 @@ class AdmissionIngressTests(unittest.TestCase):
         with self.assertRaises(service.ServiceError):
             lease.replace(object())  # type: ignore[arg-type]
 
+    def test_nested_hold_send_reuses_already_pinned_generation(self):
+        first = self._load_route_registry(app_id=1)
+        second = self._load_route_registry(app_id=2)
+        third = self._load_route_registry(app_id=1)
+        self.assertEqual(first.enrollments[0].app_id, 1)
+        self.assertEqual(second.enrollments[0].app_id, 2)
+        self.assertEqual(third.enrollments[0].app_id, 1)
+        remaining = [first, second, third]
+
+        def provider():
+            if not remaining:
+                self.fail("nested hold_send resolved the provider after it was exhausted")
+            return remaining.pop(0)
+
+        lease = service.RegistryRouteLease(provider)
+        with lease.hold_send() as outer:
+            self.assertIs(outer, first)
+            self.assertEqual(outer.enrollments[0].app_id, 1)
+            with lease.hold_send() as inner:
+                current = lease.current()
+                self.assertIs(inner, outer)
+                self.assertIs(inner, current)
+                self.assertEqual(inner.enrollments[0].app_id, 1)
+                self.assertEqual(current.enrollments[0].app_id, 1)
+                self.assertNotEqual(inner.enrollments[0].app_id, 2)
+                self.assertIsNot(inner, second)
+                with self.assertRaises(service.ServiceError) as held:
+                    lease.replace(second)
+                self.assertIn("send lease is held", str(held.exception))
+                self.assertEqual(lease.generation(), 0)
+            self.assertIs(lease.current(), first)
+            self.assertEqual(lease.current().enrollments[0].app_id, 1)
+        self.assertEqual(lease.replace(third), 1)
+        self.assertIs(lease.current(), third)
+        self.assertEqual(remaining, [second, third])
+
     def test_tuple_guard_rejects_superseded_work_under_a_new_valid_binding(self):
         self.fx.ingest("initial", self.fx.payload())
         connection = core.open_database(self.fx.state, REPOSITORY)
@@ -5090,6 +5126,13 @@ MUTANTS = [
         "            connection.execute(\"BEGIN IMMEDIATE\")\n            with hold_registry_send_lease(registry_lease):\n",
         "            connection.execute(\"BEGIN IMMEDIATE\")\n            with contextlib.nullcontext():\n",
         "AdmissionIngressTests.test_supported_registry_replace_is_blocked_across_the_send_boundary",
+    ),
+    (
+        "re-resolve nested hold_send instead of reusing the pinned generation",
+        "tools/service_runtime.py",
+        "            if self._holds:\n                if self._pinned is None:\n                    raise ServiceError(\"registry send lease is missing its pinned registry\")\n                pinned = self._pinned\n            else:\n                pinned = _resolve_registry_source(self._source)\n                self._pinned = pinned\n            self._holds += 1\n",
+        "            pinned = _resolve_registry_source(self._source)\n            self._holds += 1\n            if self._holds == 1:\n                self._pinned = pinned\n",
+        "AdmissionIngressTests.test_nested_hold_send_reuses_already_pinned_generation",
     ),
 ]
 

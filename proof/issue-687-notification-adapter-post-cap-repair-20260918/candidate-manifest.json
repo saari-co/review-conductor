@@ -1,0 +1,23 @@
+{
+  "schema": "review-conductor.candidate-manifest.v1",
+  "base_sha": "b16e0c8bc3f32e997db31caa173b846b0e9041ce",
+  "starting_head_sha": "724c6a92584f73c8cf01f48f855c34186651e8a4",
+  "parent_candidate_sha": "009279c80314886f0bee6f314024e6e6e9a14769",
+  "retained_starting_head_sha": "a5ecee12a468ff62cd6f881a39f408f0f511995f",
+  "merge_parents": [
+    "a5ecee12a468ff62cd6f881a39f408f0f511995f",
+    "009279c80314886f0bee6f314024e6e6e9a14769"
+  ],
+  "captured_date": "2026-09-18",
+  "binding_scheme": "A commit cannot contain its own SHA. base_sha is the frozen origin/main integration base. starting_head_sha is the ordinary merge that made repaired PR #18 core 009279c an ancestor. parent_candidate_sha is that repaired core. retained_starting_head_sha is the verified pre-merge adapter head. merge_parents are that adapter head then repaired core. Per-file sha256 values are of this hold_send repair source. The merge-forward packet remains the explanation of integrating core 2e40ffd / main b16e0c8 and does not embed a later receipt commit SHA. Runtime queue/delivery/authority and Copilot 5243987118 repairs are preserved. The 2/2 ledger is not reset. No Copilot, OpenClaw, or ClawSweeper review is requested from this packet.",
+  "files": {
+    "docs/architecture.md": "431ece2510977474fe2378329893fbf1e79cb2c73c63a21d20621095172246ee",
+    "docs/integration-contract.md": "230c775e349f0ed1b956aac01c1a42b9aebd71d9c755dd66c5717876c9dbd530",
+    "docs/migration.md": "dc0bddbe28902fcd194174d1388002d4edbda8e88b174f53fdddda1a7fa5d16e",
+    "proof/issue-687-notification-adapter-merge-forward-20260918/PROOF.md": "ea983c92d67bc487391bb2fa5b76ac1c3dca6175c61d9a43d926ff9d2cb9d89c",
+    "proof/issue-687-notification-adapter-merge-forward-20260918/candidate-manifest.json": "8e6cf82253501b1bd11fd2a2152a24783fe5813cbbc6ab51ef35028990408a51",
+    "proof/issue-687-notification-adapter-post-cap-repair-20260918/PROOF.md": "777fdb9b604f8506fc0b0648c4ddd90fdf57d9a4993ff5563437d83b0347017d",
+    "tests/test_service_runtime.py": "812d5bca84f1a98ef24438468d55e562094d240e6658ae087f3dddc831735e50",
+    "tools/service_runtime.py": "81df0c5c9bdcdc0d62467054e0dc60d4fbb5544521c4cf25d42923ea51b1d952"
+  }
+}

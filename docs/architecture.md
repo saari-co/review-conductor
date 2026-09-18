@@ -95,7 +95,9 @@ The reserved send boundary also holds a versioned service-owned
 registry/route lease through `notifier.send`, so a cooperating
 registry replacement cannot occur between final validation and
 transport. The supported replace/lease contract fail-closes while
-that hold is active. This is not a guarantee against arbitrary
+that hold is active. Nested or overlapping `hold_send` calls reuse the
+already pinned registry generation rather than resolving a later
+source snapshot. This is not a guarantee against arbitrary
 nonconforming OS-level writes.
 Public enum-like inputs require exact builtin strings before
 membership checks and raise `OrchestrationError` for unhashable or
