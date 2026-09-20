@@ -881,7 +881,7 @@ def test_ci_readback_reconciliation_is_exact_and_idempotent(temp: Path) -> None:
         "--run-id", "5402",
     )
     assert preadmission_replay["result"] == "accepted"
-    assert len(status(late_state, 111)["actions"]) == 1
+    assert len(status(preadmission_state, 113)["actions"]) == 1
 
     mismatch = run(
         "reconcile-workflow-run",

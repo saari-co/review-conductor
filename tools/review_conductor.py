@@ -619,7 +619,7 @@ def open_database(state_root: Path, repository: str | None = None) -> sqlite3.Co
     ).fetchone() is None:
         for event_row in connection.execute(
             """
-            SELECT repository, pr_number, base_sha, head_sha, payload_json
+            SELECT repository, pr_number, base_sha, head_sha, stale, payload_json
             FROM events
             WHERE kind = 'ci.completed'
             """
@@ -657,9 +657,9 @@ def open_database(state_root: Path, repository: str | None = None) -> sqlite3.Co
                 INSERT OR IGNORE INTO ci_run_identities(
                   repository, workflow_run_id, pr_number, base_sha, head_sha,
                   conclusion, source_created_at, disposition
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'legacy_event')
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                identity,
+                (*identity, "stale" if event_row["stale"] else "legacy_event"),
             )
         connection.execute(
             "INSERT OR IGNORE INTO ci_run_identity_migrations(singleton, backfilled_at) VALUES (1, ?)",
