@@ -36,9 +36,10 @@ requires the exact repository/PR/base/head/run tuple, records a distinct
 `github-readback` receipt, and is idempotent if the original delivery was
 already processed. It never reruns CI, polls GitHub, dispatches either review
 rail, or changes GitHub state. Conflicting reuse of a workflow-run identity
-fails closed. On strict profiles the service admission hook is mandatory; the
-standalone source command is therefore not a production activation path. This
-is recovery evidence, not deployment or activation.
+fails closed. On strict profiles the service-owned hook must return a current
+binding matching the exact tuple; the standalone source command is therefore
+not a production activation path. This is recovery evidence, not deployment or
+activation.
 
 `tools/trusted_admission.py` implements the inert contract. The source-only
 `tools/service_runtime.py` authenticates before parsing, rejects unknown App /

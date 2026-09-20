@@ -1996,12 +1996,25 @@ def reconcile_workflow_run(
                 event,
                 payload,
             )
+        binding = None
         if admission_hook is not None:
             binding = admission_hook(connection, config, "workflow_run", payload, outcome)
-            if binding is not None:
-                outcome["admission_binding_id"] = require_text(
-                    binding.get("binding_id"), "admission binding id", 64
+        if config.get("review_policy"):
+            if binding is None:
+                raise ContractError(
+                    "strict workflow_run reconciliation requires an exact current binding"
                 )
+            binding = require_object(binding, "workflow_run reconciliation admission binding")
+            for key in ("repository", "pr_number", "base_sha", "head_sha"):
+                if binding.get(key) != event[key]:
+                    raise ContractError(
+                        "workflow_run reconciliation admission binding does not match the exact tuple"
+                    )
+        if binding is not None:
+            binding = require_object(binding, "workflow_run reconciliation admission binding")
+            outcome["admission_binding_id"] = require_text(
+                binding.get("binding_id"), "admission binding id", 64
+            )
         outcome.update(
             {
                 "schema": "smoky.review-conductor.reconciliation-receipt.v1",
