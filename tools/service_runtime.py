@@ -130,8 +130,8 @@ def resolve_registry(source: RegistrySource) -> admission.Registry:
     return value
 
 
-def _strict_payload(body: bytes) -> dict[str, Any]:
-    if len(body) > core.WORKFLOW_READBACK_MAX_BYTES:
+def _strict_payload(body: bytes, max_body_bytes: int) -> dict[str, Any]:
+    if len(body) > max_body_bytes:
         raise ServiceError("GitHub webhook payload is oversized")
     try:
         value = json.loads(body.decode("utf-8"), object_pairs_hook=unique_object)
@@ -486,7 +486,11 @@ def ingest_service_delivery(
     """Authenticate, admit and ingest one GitHub App delivery atomically."""
     # Authentication must precede JSON parsing, registry resolution, lookup and policy I/O.
     core.verify_github_signature(body, signature, secret)
-    payload = _strict_payload(body)
+    ingress = core.require_object(service_config.get("ingress"), "service ingress")
+    payload = _strict_payload(
+        body,
+        core.require_positive_int(ingress.get("max_body_bytes"), "service ingress max_body_bytes"),
+    )
     core_config = core.load_config(config_path)
     registry_source = registry
     # Early rejection only; the admission hook re-resolves the registry inside
@@ -538,7 +542,7 @@ def reconcile_service_workflow_run(
     """Authenticate and reconcile one CI read-back behind service authority."""
     verify_signature = core.verify_github_signature
     verify_signature(body, signature, secret)
-    payload = _strict_payload(body)
+    payload = _strict_payload(body, core.WORKFLOW_READBACK_MAX_BYTES)
     return core.reconcile_workflow_run(
         config_path=config_path,
         state_root=state_root,

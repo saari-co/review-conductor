@@ -2087,7 +2087,7 @@ def reconcile_workflow_run(
         raise ContractError("workflow_run read-back must be an object")
     try:
         canonical_payload = canonical_json(payload).encode("utf-8")
-    except (RecursionError, TypeError, ValueError) as exc:
+    except (RecursionError, TypeError, UnicodeError, ValueError) as exc:
         raise ContractError("workflow_run read-back is not safely canonicalizable") from exc
     if len(canonical_payload) > WORKFLOW_READBACK_MAX_BYTES:
         raise ContractError("workflow_run read-back is oversized")

@@ -2786,6 +2786,36 @@ class AdmissionIngressTests(unittest.TestCase):
         self.assertEqual(receipt["result"], "accepted")
         self.assertRegex(receipt["admission_binding_id"], r"^[0-9a-f]{64}$")
 
+        duplicate = service.reconcile_service_workflow_run(
+            config_path=self.fx.config_path,
+            state_root=self.fx.state,
+            body=body,
+            signature=signature,
+            secret=SECRET,
+            expected_pr_number=7,
+            expected_base_sha=BASE,
+            expected_head_sha=HEAD,
+            expected_run_id=3001,
+            registry=self.fx.registry(),
+            service_config=self.fx.app_config(),
+        )
+        self.assertEqual(duplicate["result"], "duplicate_reconciliation")
+
+        with self.assertRaises(core.ContractError):
+            service.reconcile_service_workflow_run(
+                config_path=self.fx.config_path,
+                state_root=self.fx.state,
+                body=body,
+                signature=signature,
+                secret=SECRET,
+                expected_pr_number=7,
+                expected_base_sha=BASE,
+                expected_head_sha="e" * 40,
+                expected_run_id=3001,
+                registry=self.fx.registry(),
+                service_config=self.fx.app_config(),
+            )
+
         tampered = copy.deepcopy(payload)
         tampered["installation"] = {"id": INSTALLATION_ID + 1}
         tampered["workflow_run"]["id"] = 3002
@@ -2802,6 +2832,42 @@ class AdmissionIngressTests(unittest.TestCase):
                 expected_head_sha=HEAD,
                 expected_run_id=3002,
                 registry=self.fx.registry(),
+                service_config=self.fx.app_config(),
+            )
+
+        missing_payload = copy.deepcopy(payload)
+        missing_payload["workflow_run"]["id"] = 3003
+        missing_body, missing_signature = self.fx.signed(missing_payload)
+        with self.assertRaises(service.ServiceError):
+            service.reconcile_service_workflow_run(
+                config_path=self.fx.config_path,
+                state_root=self.fx.state.parent / "missing-readback-state",
+                body=missing_body,
+                signature=missing_signature,
+                secret=SECRET,
+                expected_pr_number=7,
+                expected_base_sha=BASE,
+                expected_head_sha=HEAD,
+                expected_run_id=3003,
+                registry=self.fx.registry(),
+                service_config=self.fx.app_config(),
+            )
+
+        revoked_payload = copy.deepcopy(payload)
+        revoked_payload["workflow_run"]["id"] = 3004
+        revoked_body, revoked_signature = self.fx.signed(revoked_payload)
+        with self.assertRaises(service.ServiceError):
+            service.reconcile_service_workflow_run(
+                config_path=self.fx.config_path,
+                state_root=self.fx.state,
+                body=revoked_body,
+                signature=revoked_signature,
+                secret=SECRET,
+                expected_pr_number=7,
+                expected_base_sha=BASE,
+                expected_head_sha=HEAD,
+                expected_run_id=3004,
+                registry=self.fx.registry(policy=self.fx.policy + b"\n"),
                 service_config=self.fx.app_config(),
             )
 
