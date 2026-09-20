@@ -638,6 +638,20 @@ def open_database(state_root: Path, repository: str | None = None) -> sqlite3.Co
                 )
             except ContractError:
                 continue
+            identity = (
+                event_row["repository"], workflow_run_id, event_row["pr_number"],
+                event_row["base_sha"], event_row["head_sha"], conclusion, source_created_at,
+            )
+            prior = connection.execute(
+                """
+                SELECT pr_number, base_sha, head_sha, conclusion, source_created_at
+                FROM ci_run_identities
+                WHERE repository = ? AND workflow_run_id = ?
+                """,
+                identity[:2],
+            ).fetchone()
+            if prior is not None and tuple(prior) != identity[2:]:
+                raise ContractError("legacy CI workflow_run identities conflict")
             connection.execute(
                 """
                 INSERT OR IGNORE INTO ci_run_identities(
@@ -645,18 +659,10 @@ def open_database(state_root: Path, repository: str | None = None) -> sqlite3.Co
                   conclusion, source_created_at, disposition
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, 'legacy_event')
                 """,
-                (
-                    event_row["repository"],
-                    workflow_run_id,
-                    event_row["pr_number"],
-                    event_row["base_sha"],
-                    event_row["head_sha"],
-                    conclusion,
-                    source_created_at,
-                ),
+                identity,
             )
         connection.execute(
-            "INSERT INTO ci_run_identity_migrations(singleton, backfilled_at) VALUES (1, ?)",
+            "INSERT OR IGNORE INTO ci_run_identity_migrations(singleton, backfilled_at) VALUES (1, ?)",
             (utc_now(),),
         )
     connection.commit()
@@ -1396,7 +1402,7 @@ def _remember_ci_run_identity(
           repository, workflow_run_id, pr_number, base_sha, head_sha,
           conclusion, source_created_at, disposition
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(repository, workflow_run_id) DO UPDATE SET disposition = excluded.disposition
+        ON CONFLICT(repository, workflow_run_id) DO NOTHING
         """,
         (*identity, disposition),
     )
@@ -1414,7 +1420,7 @@ def _set_ci_run_disposition(
         """
         UPDATE ci_run_identities
         SET disposition = ?
-        WHERE repository = ? AND workflow_run_id = ?
+        WHERE repository = ? AND workflow_run_id = ? AND disposition = 'seen'
         """,
         (disposition, identity[0], identity[1]),
     )
@@ -2079,7 +2085,11 @@ def reconcile_workflow_run(
     require_enabled(config)
     if not isinstance(payload, dict):
         raise ContractError("workflow_run read-back must be an object")
-    if len(canonical_json(payload).encode("utf-8")) > WORKFLOW_READBACK_MAX_BYTES:
+    try:
+        canonical_payload = canonical_json(payload).encode("utf-8")
+    except (RecursionError, TypeError, ValueError) as exc:
+        raise ContractError("workflow_run read-back is not safely canonicalizable") from exc
+    if len(canonical_payload) > WORKFLOW_READBACK_MAX_BYTES:
         raise ContractError("workflow_run read-back is oversized")
     if config.get("review_policy") and admission_hook is None:
         raise ContractError("strict workflow_run reconciliation requires service admission")
@@ -2096,7 +2106,7 @@ def reconcile_workflow_run(
     ):
         raise ContractError("workflow_run read-back does not match the requested exact tuple")
     delivery_id = f"github-reconcile-workflow-run:{event['run_id']}"
-    payload_sha = hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+    payload_sha = hashlib.sha256(canonical_payload).hexdigest()
     connection = open_database(state_root, config["repository"])
     try:
         connection.execute("BEGIN IMMEDIATE")
@@ -2181,7 +2191,7 @@ def reconcile_workflow_run_command(args: argparse.Namespace) -> dict[str, Any]:
     verify_github_signature(body, args.signature, os.environ.get(args.secret_env, ""))
     try:
         payload = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (UnicodeDecodeError, RecursionError, ValueError) as exc:
         raise ContractError("cannot read workflow_run read-back JSON") from exc
     return reconcile_workflow_run(
         config_path=args.config,

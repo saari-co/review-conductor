@@ -448,7 +448,9 @@ def _reconciliation_admission_hook(
         if "ignored" in event or event.get("rail") == "clawsweeper":
             raise ServiceError("workflow reconciliation requires a terminal CI workflow_run")
         registry = resolve_registry(registry_source)
-        enrolled = require_profile_enrolled(service_config, registry, config)
+        enrolled = preflight_enrollment(
+            service_config, registry, payload, core_config=config
+        )
         if event["repository"] != enrolled.repository:
             raise ServiceError("workflow read-back repository contradicts service enrollment")
         binding = binding_for_current_head(
