@@ -1216,13 +1216,16 @@ def parse_workflow_run_event(config: dict[str, Any], payload: dict[str, Any]) ->
         workflow.get("name") == config["clawsweeper"]["workflow_name"]
         and workflow.get("path") == config["clawsweeper"]["workflow_path"]
     ):
+        workflow_run_id = require_positive_int(run.get("id"), "ClawSweeper workflow_run id")
         if run.get("event") != "workflow_dispatch" or run.get("status") != "completed":
-            return {"ignored": "ClawSweeper workflow_run is not terminal workflow_dispatch"}
+            return {
+                "ignored": "ClawSweeper workflow_run is not terminal workflow_dispatch",
+                "rail": "clawsweeper",
+                "workflow_run_id": workflow_run_id,
+            }
         return {
             "rail": "clawsweeper",
-            "workflow_run_id": str(
-                require_positive_int(run.get("id"), "ClawSweeper workflow_run id")
-            ),
+            "workflow_run_id": str(workflow_run_id),
             "workflow_name": config["clawsweeper"]["workflow_name"],
             "workflow_path": config["clawsweeper"]["workflow_path"],
             "workflow_head_sha": require_sha(
@@ -1246,22 +1249,34 @@ def parse_workflow_run_event(config: dict[str, Any], payload: dict[str, Any]) ->
     base = require_object(pull.get("base"), "workflow_run pull request base")
     head = require_object(pull.get("head"), "workflow_run pull request head")
     base_ref = require_text(base.get("ref"), "workflow_run pull request base ref", 200)
-    if base_ref != config["default_branch"]:
-        return {"ignored": f"workflow_run base ref {base_ref} is outside the configured pilot"}
     head_sha = require_sha(head.get("sha"), "workflow_run pull request head sha")
     if require_sha(run.get("head_sha"), "workflow_run head_sha") != head_sha:
         raise ContractError("workflow_run head_sha does not match pull request head sha")
+    run_id = require_positive_int(run.get("id"), "workflow_run id")
     conclusion = require_text(run.get("conclusion"), "workflow_run conclusion", 50)
+    source_created_at = require_github_timestamp(
+        run.get("created_at"), "workflow_run created_at"
+    )
+    if base_ref != config["default_branch"]:
+        return {
+            "ignored": f"workflow_run base ref {base_ref} is outside the configured pilot",
+            "workflow_run_id": run_id,
+            "pr_number": require_positive_int(
+                pull.get("number"), "workflow_run pull request number"
+            ),
+            "base_sha": require_sha(base.get("sha"), "workflow_run pull request base sha"),
+            "head_sha": head_sha,
+            "conclusion": conclusion,
+            "source_created_at": source_created_at,
+        }
     return {
         "repository": config["repository"],
         "pr_number": require_positive_int(pull.get("number"), "workflow_run pull request number"),
         "base_sha": require_sha(base.get("sha"), "workflow_run pull request base sha"),
         "head_sha": head_sha,
         "conclusion": conclusion,
-        "run_id": require_positive_int(run.get("id"), "workflow_run id"),
-        "source_created_at": require_github_timestamp(
-            run.get("created_at"), "workflow_run created_at"
-        ),
+        "run_id": run_id,
+        "source_created_at": source_created_at,
     }
 
 
@@ -1722,7 +1737,19 @@ def process_workflow_run(
     payload: dict[str, Any],
 ) -> dict[str, Any]:
     if "ignored" in event:
-        return {"result": "ignored", "reason": event["ignored"]}
+        outcome = {"result": "ignored", "reason": event["ignored"]}
+        for key in (
+            "rail",
+            "workflow_run_id",
+            "pr_number",
+            "base_sha",
+            "head_sha",
+            "conclusion",
+            "source_created_at",
+        ):
+            if key in event:
+                outcome[key] = event[key]
+        return outcome
     if event.get("rail") == "clawsweeper":
         prior_run = connection.execute(
             "SELECT * FROM rail_workflow_runs WHERE rail = ? AND workflow_run_id = ?",
@@ -1860,6 +1887,15 @@ def _recorded_ci_run(
     authoritative operation identity; conflicting facts for that id fail
     closed instead of creating a second event.
     """
+    delivery_rows = connection.execute(
+        "SELECT outcome_json FROM deliveries WHERE event_type = 'workflow_run'"
+    ).fetchall()
+    for row in delivery_rows:
+        outcome = json.loads(row["outcome_json"])
+        prior_run_id = outcome.get("workflow_run_id")
+        if prior_run_id is None or str(prior_run_id) != str(event["run_id"]):
+            continue
+        raise ContractError("workflow_run identity was previously recorded as ignored")
     rows = connection.execute(
         """
         SELECT pr_number, base_sha, head_sha, payload_json FROM events

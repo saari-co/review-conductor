@@ -743,6 +743,35 @@ def test_ci_readback_reconciliation_is_exact_and_idempotent(temp: Path) -> None:
     )
     assert "reconciliation id was reused with different content" in conflict["stderr"]
 
+    ignored_state = temp / "state-readback-ignored-reuse"
+    ignored_head = "d" * 40
+    github_event(temp, ignored_state, "pull_request", "delivery-ignored-reuse-pr", pr_payload(110, ignored_head))
+    ignored_delivery = github_event(
+        temp,
+        ignored_state,
+        "workflow_run",
+        "delivery-ignored-reuse-ci",
+        workflow_payload(110, ignored_head, "success", 5201, base_ref="release"),
+    )
+    assert ignored_delivery["result"] == "ignored"
+    ignored_replay_body = write_json(
+        temp,
+        "readback-ignored-reuse.json",
+        workflow_payload(110, ignored_head, "success", 5201),
+    )
+    ignored_replay = run(
+        "reconcile-workflow-run",
+        "--config", str(CONFIG),
+        "--state-root", str(ignored_state),
+        "--body-file", str(ignored_replay_body),
+        "--pr-number", "110",
+        "--base-sha", BASE,
+        "--head-sha", ignored_head,
+        "--run-id", "5201",
+        expected=2,
+    )
+    assert "previously recorded as ignored" in ignored_replay["stderr"]
+
     delivered_state = temp / "state-readback-already-delivered"
     github_event(temp, delivered_state, "pull_request", "delivery-original-pr", pr_payload(108, head))
     github_event(
