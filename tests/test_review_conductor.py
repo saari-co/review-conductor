@@ -848,6 +848,39 @@ def test_ci_readback_reconciliation_is_exact_and_idempotent(temp: Path) -> None:
         workflow_payload(111, late_head, "success", 5301),
     )
     assert late_delivery["result"] == "duplicate"
+
+    preadmission_state = temp / "state-readback-preadmission"
+    preadmission_head = "a" * 40
+    preadmission_payload = workflow_payload(113, preadmission_head, "success", 5402)
+    preadmission_delivery = github_event(
+        temp,
+        preadmission_state,
+        "workflow_run",
+        "delivery-preadmission-ci",
+        preadmission_payload,
+    )
+    assert preadmission_delivery["result"] == "stale"
+    github_event(
+        temp,
+        preadmission_state,
+        "pull_request",
+        "delivery-preadmission-pr",
+        pr_payload(113, preadmission_head),
+    )
+    preadmission_body = write_json(
+        temp, "readback-preadmission.json", preadmission_payload
+    )
+    preadmission_replay = run(
+        "reconcile-workflow-run",
+        "--config", str(CONFIG),
+        "--state-root", str(preadmission_state),
+        "--body-file", str(preadmission_body),
+        "--pr-number", "113",
+        "--base-sha", BASE,
+        "--head-sha", preadmission_head,
+        "--run-id", "5402",
+    )
+    assert preadmission_replay["result"] == "accepted"
     assert len(status(late_state, 111)["actions"]) == 1
 
     mismatch = run(

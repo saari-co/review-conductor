@@ -2890,6 +2890,72 @@ class AdmissionIngressTests(unittest.TestCase):
                 service_config=self.fx.app_config(),
             )
 
+    def test_service_reconciliation_http_operation_is_wired_to_strict_admission(self):
+        self.fx.ingest("reconcile-http-pr", self.fx.payload())
+        payload = copy.deepcopy(legacy.ci_payload(7, 3010, HEAD))
+        payload["repository"] = {"full_name": REPOSITORY, "id": REPOSITORY_ID}
+        payload["installation"] = {"id": INSTALLATION_ID}
+        core_config = json.loads(self.fx.config_path.read_text())
+        payload["workflow"] = {
+            "name": core_config["ci"]["workflow_name"],
+            "path": core_config["ci"]["workflow_path"],
+        }
+        payload["workflow_run"]["updated_at"] = "2026-08-29T20:20:00Z"
+        body, signature = self.fx.signed(payload)
+        handler = service.build_service_http_handler(
+            self.fx.app_config(),
+            secret=SECRET,
+            registry=self.fx.registry(),
+            read_policy=self.fx.read,
+        )
+        server = runtime.BoundedHTTPServer(
+            ("127.0.0.1", 0), handler, request_timeout_seconds=5
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def post(headers):
+            connection = http.client.HTTPConnection(
+                "127.0.0.1", server.server_port, timeout=5
+            )
+            try:
+                connection.request(
+                    "POST",
+                    service.WORKFLOW_READBACK_PATH,
+                    body,
+                    {"Content-Type": "application/json", **headers},
+                )
+                response = connection.getresponse()
+                return response.status, json.loads(response.read())
+            finally:
+                connection.close()
+
+        headers = {
+            "X-Hub-Signature-256": signature,
+            "X-Review-Conductor-PR-Number": "7",
+            "X-Review-Conductor-Base-SHA": BASE,
+            "X-Review-Conductor-Head-SHA": HEAD,
+            "X-Review-Conductor-Workflow-Run-ID": "3010",
+        }
+        try:
+            status, result = post(headers)
+            self.assertEqual(status, 202, result)
+            self.assertTrue(result.get("ok"), result)
+            self.assertEqual(
+                (status, result["ok"], result["result"]),
+                (202, True, "accepted"),
+            )
+            self.assertEqual(result["source"], "github-readback")
+            status, result = post(headers)
+            self.assertEqual((status, result["result"]), (202, "duplicate_reconciliation"))
+            mismatched = {**headers, "X-Review-Conductor-Head-SHA": "e" * 40}
+            status, result = post(mismatched)
+            self.assertEqual((status, result), (400, {"ok": False, "reason": "request_rejected"}))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
     def test_issue_comment_deliveries_never_create_bindings(self):
         self.fx.ingest("pr", self.fx.payload())
         first = self.fx.binding_rows()

@@ -1402,7 +1402,11 @@ def _remember_ci_run_identity(
           repository, workflow_run_id, pr_number, base_sha, head_sha,
           conclusion, source_created_at, disposition
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(repository, workflow_run_id) DO NOTHING
+        ON CONFLICT(repository, workflow_run_id) DO UPDATE SET
+            disposition = CASE
+                WHEN ci_run_identities.disposition = 'stale' THEN excluded.disposition
+                ELSE ci_run_identities.disposition
+            END
         """,
         (*identity, disposition),
     )
@@ -2060,6 +2064,11 @@ def _recorded_ci_run(
         raise ContractError("CI workflow_run identity was reused with conflicting terminal facts")
     if row["disposition"] == "ignored_scope":
         raise ContractError("workflow_run identity was previously recorded as ignored")
+    # A run may arrive before its PR head is admitted. Revisit that exact
+    # identity later, while accepted and ignored terminal identities remain
+    # durable idempotency fences.
+    if row["disposition"] == "stale":
+        return False
     return True
 
 
