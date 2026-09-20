@@ -2133,24 +2133,27 @@ def reconcile_workflow_run(
         prior = connection.execute(
             "SELECT * FROM deliveries WHERE delivery_id = ?", (delivery_id,)
         ).fetchone()
+        prior_stale = False
         if prior is not None:
             if prior["source"] != "github-readback" or prior["event_type"] != "workflow_run":
                 raise ContractError("workflow_run reconciliation id collided with another delivery")
             if prior["payload_sha256"] != payload_sha:
                 raise ContractError("workflow_run reconciliation id was reused with different content")
-            connection.rollback()
             outcome = json.loads(prior["outcome_json"])
-            outcome.update(
-                {
-                    "repository": event["repository"],
-                    "pr_number": event["pr_number"],
-                    "base_sha": event["base_sha"],
-                    "head_sha": event["head_sha"],
-                    "run_id": event["run_id"],
-                }
-            )
-            outcome["result"] = "duplicate_reconciliation"
-            return outcome
+            if outcome.get("result") != "stale":
+                connection.rollback()
+                outcome.update(
+                    {
+                        "repository": event["repository"],
+                        "pr_number": event["pr_number"],
+                        "base_sha": event["base_sha"],
+                        "head_sha": event["head_sha"],
+                        "run_id": event["run_id"],
+                    }
+                )
+                outcome["result"] = "duplicate_reconciliation"
+                return outcome
+            prior_stale = True
         if _recorded_ci_run(connection, event):
             outcome = {
                 "result": "already_processed",
@@ -2163,10 +2166,17 @@ def reconcile_workflow_run(
                 "merge_dispatched": False,
             }
         else:
+            event_id = event_id_from_delivery(delivery_id)
+            if prior_stale:
+                retry_count = connection.execute(
+                    "SELECT COUNT(*) FROM events WHERE event_id = ? OR event_id LIKE ?",
+                    (event_id, event_id + ":retry:%"),
+                ).fetchone()[0]
+                event_id = f"{event_id}:retry:{retry_count}"
             outcome = process_workflow_run(
                 connection,
                 config,
-                event_id_from_delivery(delivery_id),
+                event_id,
                 event,
                 payload,
             )
@@ -2207,10 +2217,16 @@ def reconcile_workflow_run(
                 "payload_sha256": payload_sha,
             }
         )
-        connection.execute(
-            "INSERT INTO deliveries(delivery_id, source, event_type, payload_sha256, received_at, outcome_json) VALUES (?, 'github-readback', 'workflow_run', ?, ?, ?)",
-            (delivery_id, payload_sha, utc_now(), canonical_json(outcome)),
-        )
+        if prior_stale:
+            connection.execute(
+                "UPDATE deliveries SET payload_sha256 = ?, received_at = ?, outcome_json = ? WHERE delivery_id = ?",
+                (payload_sha, utc_now(), canonical_json(outcome), delivery_id),
+            )
+        else:
+            connection.execute(
+                "INSERT INTO deliveries(delivery_id, source, event_type, payload_sha256, received_at, outcome_json) VALUES (?, 'github-readback', 'workflow_run', ?, ?, ?)",
+                (delivery_id, payload_sha, utc_now(), canonical_json(outcome)),
+            )
         connection.commit()
         return outcome
     except Exception:

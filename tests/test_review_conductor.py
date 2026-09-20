@@ -891,6 +891,43 @@ def test_ci_readback_reconciliation_is_exact_and_idempotent(temp: Path) -> None:
     assert preadmission_replay["result"] == "accepted"
     assert len(status(preadmission_state, 113)["actions"]) == 1
 
+    stale_receipt_state = temp / "state-readback-stale-receipt"
+    stale_receipt_head = "b" * 40
+    stale_receipt_payload = workflow_payload(114, stale_receipt_head, "success", 5403)
+    stale_receipt_body = write_json(
+        temp, "readback-stale-receipt.json", stale_receipt_payload
+    )
+    stale_receipt = run(
+        "reconcile-workflow-run",
+        "--config", str(CONFIG),
+        "--state-root", str(stale_receipt_state),
+        "--body-file", str(stale_receipt_body),
+        "--pr-number", "114",
+        "--base-sha", BASE,
+        "--head-sha", stale_receipt_head,
+        "--run-id", "5403",
+    )
+    assert stale_receipt["result"] == "stale"
+    github_event(
+        temp,
+        stale_receipt_state,
+        "pull_request",
+        "delivery-stale-receipt-pr",
+        pr_payload(114, stale_receipt_head),
+    )
+    stale_receipt_retry = run(
+        "reconcile-workflow-run",
+        "--config", str(CONFIG),
+        "--state-root", str(stale_receipt_state),
+        "--body-file", str(stale_receipt_body),
+        "--pr-number", "114",
+        "--base-sha", BASE,
+        "--head-sha", stale_receipt_head,
+        "--run-id", "5403",
+    )
+    assert stale_receipt_retry["result"] == "accepted"
+    assert len(status(stale_receipt_state, 114)["actions"]) == 1
+
     mismatch = run(
         "reconcile-workflow-run",
         "--config", str(CONFIG),
