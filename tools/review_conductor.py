@@ -2114,6 +2114,8 @@ def reconcile_workflow_run(
             "SELECT * FROM deliveries WHERE delivery_id = ?", (delivery_id,)
         ).fetchone()
         if prior is not None:
+            if prior["source"] != "github-readback" or prior["event_type"] != "workflow_run":
+                raise ContractError("workflow_run reconciliation id collided with another delivery")
             if prior["payload_sha256"] != payload_sha:
                 raise ContractError("workflow_run reconciliation id was reused with different content")
             connection.rollback()

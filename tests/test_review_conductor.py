@@ -748,6 +748,27 @@ def test_ci_readback_reconciliation_is_exact_and_idempotent(temp: Path) -> None:
     )
     assert "reconciliation id was reused with different content" in conflict["stderr"]
 
+    collision_state = temp / "state-readback-delivery-collision"
+    collision_head = "f" * 40
+    github_event(temp, collision_state, "pull_request", "github-reconcile-workflow-run:5401", pr_payload(112, collision_head))
+    collision_body = write_json(
+        temp,
+        "readback-delivery-collision.json",
+        workflow_payload(112, collision_head, "success", 5401),
+    )
+    collision = run(
+        "reconcile-workflow-run",
+        "--config", str(CONFIG),
+        "--state-root", str(collision_state),
+        "--body-file", str(collision_body),
+        "--pr-number", "112",
+        "--base-sha", BASE,
+        "--head-sha", collision_head,
+        "--run-id", "5401",
+        expected=2,
+    )
+    assert "collided with another delivery" in collision["stderr"]
+
     ignored_state = temp / "state-readback-ignored-reuse"
     ignored_head = "d" * 40
     github_event(temp, ignored_state, "pull_request", "delivery-ignored-reuse-pr", pr_payload(110, ignored_head))

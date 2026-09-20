@@ -2786,6 +2786,25 @@ class AdmissionIngressTests(unittest.TestCase):
         self.assertEqual(receipt["result"], "accepted")
         self.assertRegex(receipt["admission_binding_id"], r"^[0-9a-f]{64}$")
 
+        tampered = copy.deepcopy(payload)
+        tampered["installation"] = {"id": INSTALLATION_ID + 1}
+        tampered["workflow_run"]["id"] = 3002
+        tampered_body, tampered_signature = self.fx.signed(tampered)
+        with self.assertRaises(service.ServiceError):
+            service.reconcile_service_workflow_run(
+                config_path=self.fx.config_path,
+                state_root=self.fx.state,
+                body=tampered_body,
+                signature=tampered_signature,
+                secret=SECRET,
+                expected_pr_number=7,
+                expected_base_sha=BASE,
+                expected_head_sha=HEAD,
+                expected_run_id=3002,
+                registry=self.fx.registry(),
+                service_config=self.fx.app_config(),
+            )
+
         oversized = b"x" * (core.WORKFLOW_READBACK_MAX_BYTES + 1)
         oversized_signature = "sha256=" + hmac.new(
             SECRET.encode(), oversized, hashlib.sha256
