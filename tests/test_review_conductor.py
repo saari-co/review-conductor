@@ -779,6 +779,24 @@ def test_ci_readback_reconciliation_is_exact_and_idempotent(temp: Path) -> None:
     )
     assert "does not match the requested exact tuple" in mismatch["stderr"]
 
+    ignored_body = write_json(
+        temp,
+        "readback-ignored.json",
+        workflow_payload(107, head, "success", 5103, base_ref="release"),
+    )
+    ignored = run(
+        "reconcile-workflow-run",
+        "--config", str(CONFIG),
+        "--state-root", str(state),
+        "--body-file", str(ignored_body),
+        "--pr-number", "107",
+        "--base-sha", BASE,
+        "--head-sha", head,
+        "--run-id", "5103",
+        expected=2,
+    )
+    assert "workflow_run read-back is ignored" in ignored["stderr"]
+
 
 def test_default_branch_scope_and_atomic_dispatch_claim(temp: Path) -> None:
     out_of_scope = temp / "state-out-of-scope"

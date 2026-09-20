@@ -1915,6 +1915,8 @@ def reconcile_workflow_run(
     if config.get("review_policy") and admission_hook is None:
         raise ContractError("strict workflow_run reconciliation requires service admission")
     event = parse_workflow_run_event(config, payload)
+    if "ignored" in event:
+        raise ContractError(f"workflow_run read-back is ignored: {event['ignored']}")
     if event.get("rail") == "clawsweeper":
         raise ContractError("workflow_run reconciliation accepts CI only")
     if (
