@@ -32,7 +32,7 @@ credential selectors, reviewer identity overrides, or install/state roots.
 When an operator has an authoritative GitHub read-back for a completed CI
 `workflow_run` but cannot locate the original webhook receipt, the
 `reconcile-workflow-run` source command admits that one bounded read-back. It
-requires the exact repository/PR/base/head/run tuple, records a distinct
+requires a valid GitHub HMAC signature plus the exact repository/PR/base/head/run tuple, records a distinct
 `github-readback` receipt, and is idempotent if the original delivery was
 already processed. It never reruns CI, polls GitHub, dispatches either review
 rail, or changes GitHub state. Conflicting reuse of a workflow-run identity

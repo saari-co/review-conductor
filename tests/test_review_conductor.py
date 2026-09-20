@@ -29,8 +29,13 @@ def run(*args: str, env: dict[str, str] | None = None, expected: int = 0) -> dic
     command_env["SMOKY_REVIEW_CONDUCTOR_WEBHOOK_SECRET"] = SECRET
     if env:
         command_env.update(env)
+    command_args = list(args)
+    if command_args and command_args[0] == "reconcile-workflow-run":
+        body_index = command_args.index("--body-file") + 1
+        body_path = Path(command_args[body_index])
+        command_args.extend(("--signature", signature(body_path)))
     result = subprocess.run(
-        [sys.executable, str(CORE), *args],
+        [sys.executable, str(CORE), *command_args],
         cwd=ROOT,
         env=command_env,
         text=True,
@@ -794,6 +799,35 @@ def test_ci_readback_reconciliation_is_exact_and_idempotent(temp: Path) -> None:
     )
     assert already["result"] == "already_processed"
     assert len(status(delivered_state, 108)["actions"]) == 1
+
+    late_state = temp / "state-readback-late-original"
+    late_head = "e" * 40
+    github_event(temp, late_state, "pull_request", "delivery-late-original-pr", pr_payload(111, late_head))
+    late_body = write_json(
+        temp,
+        "readback-late-original.json",
+        workflow_payload(111, late_head, "success", 5301),
+    )
+    late = run(
+        "reconcile-workflow-run",
+        "--config", str(CONFIG),
+        "--state-root", str(late_state),
+        "--body-file", str(late_body),
+        "--pr-number", "111",
+        "--base-sha", BASE,
+        "--head-sha", late_head,
+        "--run-id", "5301",
+    )
+    assert late["result"] == "accepted"
+    late_delivery = github_event(
+        temp,
+        late_state,
+        "workflow_run",
+        "delivery-late-original-ci",
+        workflow_payload(111, late_head, "success", 5301),
+    )
+    assert late_delivery["result"] == "duplicate"
+    assert len(status(late_state, 111)["actions"]) == 1
 
     mismatch = run(
         "reconcile-workflow-run",

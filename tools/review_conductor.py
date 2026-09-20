@@ -2045,6 +2045,7 @@ def reconcile_workflow_run_command(args: argparse.Namespace) -> dict[str, Any]:
         raise ContractError("cannot read workflow_run read-back JSON") from exc
     if len(body) > WORKFLOW_READBACK_MAX_BYTES:
         raise ContractError("workflow_run read-back is oversized")
+    verify_github_signature(body, args.signature, os.environ.get(args.secret_env, ""))
     try:
         payload = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -2112,7 +2113,20 @@ def ingest_github_delivery(
             outcome = process_pull_request(connection, config, event_id, event, payload)
         elif event_type == "workflow_run":
             event = parse_workflow_run_event(config, payload)
-            outcome = process_workflow_run(connection, config, event_id, event, payload)
+            if "ignored" in event or event.get("rail") == "clawsweeper":
+                outcome = process_workflow_run(connection, config, event_id, event, payload)
+            elif _recorded_ci_run(connection, event):
+                outcome = {
+                    "result": "duplicate",
+                    "repository": event["repository"],
+                    "pr_number": event["pr_number"],
+                    "base_sha": event["base_sha"],
+                    "head_sha": event["head_sha"],
+                    "run_id": event["run_id"],
+                    "merge_dispatched": False,
+                }
+            else:
+                outcome = process_workflow_run(connection, config, event_id, event, payload)
         else:
             event = parse_issue_comment_event(config, payload)
             outcome = process_issue_comment(connection, config, event_id, event, payload)
@@ -3193,6 +3207,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reconcile.add_argument("--config", type=Path, required=True)
     reconcile.add_argument("--state-root", type=Path, required=True)
+    reconcile.add_argument("--signature", required=True)
+    reconcile.add_argument("--secret-env", default="SMOKY_REVIEW_CONDUCTOR_WEBHOOK_SECRET")
     reconcile.add_argument("--body-file", type=Path, required=True)
     reconcile.add_argument("--pr-number", type=int, required=True)
     reconcile.add_argument("--base-sha", required=True)
