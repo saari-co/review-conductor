@@ -2140,6 +2140,15 @@ def reconcile_workflow_run(
                 raise ContractError("workflow_run reconciliation id was reused with different content")
             connection.rollback()
             outcome = json.loads(prior["outcome_json"])
+            outcome.update(
+                {
+                    "repository": event["repository"],
+                    "pr_number": event["pr_number"],
+                    "base_sha": event["base_sha"],
+                    "head_sha": event["head_sha"],
+                    "run_id": event["run_id"],
+                }
+            )
             outcome["result"] = "duplicate_reconciliation"
             return outcome
         if _recorded_ci_run(connection, event):
@@ -2161,6 +2170,15 @@ def reconcile_workflow_run(
                 event,
                 payload,
             )
+        outcome.update(
+            {
+                "repository": event["repository"],
+                "pr_number": event["pr_number"],
+                "base_sha": event["base_sha"],
+                "head_sha": event["head_sha"],
+                "run_id": event["run_id"],
+            }
+        )
         binding = None
         if admission_hook is not None:
             binding = admission_hook(connection, config, "workflow_run", payload, outcome)

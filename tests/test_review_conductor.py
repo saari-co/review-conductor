@@ -22,6 +22,7 @@ CORE = ROOT / "tools" / "review_conductor.py"
 CONFIG = ROOT / "contracts" / "review-conductor" / "dinkuskit-blocks.json"
 SECRET = "review-conductor-fixture-secret"
 BASE = "1" * 40
+REPOSITORY = "dinkuskit/blocks"
 
 
 def run(*args: str, env: dict[str, str] | None = None, expected: int = 0) -> dict:
@@ -714,6 +715,11 @@ def test_ci_readback_reconciliation_is_exact_and_idempotent(temp: Path) -> None:
     )
     assert reconciled["result"] == "accepted"
     assert reconciled["source"] == "github-readback"
+    assert reconciled["repository"] == REPOSITORY
+    assert reconciled["pr_number"] == 107
+    assert reconciled["base_sha"] == BASE
+    assert reconciled["head_sha"] == head
+    assert reconciled["run_id"] == 5101
     assert status(state, 107)["head"]["state"] == "openclaw_queued"
     duplicate = run(
         "reconcile-workflow-run",
@@ -726,6 +732,8 @@ def test_ci_readback_reconciliation_is_exact_and_idempotent(temp: Path) -> None:
         "--run-id", "5101",
     )
     assert duplicate["result"] == "duplicate_reconciliation"
+    assert duplicate["run_id"] == 5101
+    assert duplicate["head_sha"] == head
     assert len(status(state, 107)["actions"]) == 1
 
     conflicting_head = "c" * 40
