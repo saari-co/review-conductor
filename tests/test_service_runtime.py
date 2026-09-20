@@ -2800,6 +2800,20 @@ class AdmissionIngressTests(unittest.TestCase):
             service_config=self.fx.app_config(),
         )
         self.assertEqual(duplicate["result"], "duplicate_reconciliation")
+        with self.assertRaises(service.ServiceError):
+            service.reconcile_service_workflow_run(
+                config_path=self.fx.config_path,
+                state_root=self.fx.state,
+                body=body,
+                signature=signature,
+                secret=SECRET,
+                expected_pr_number=7,
+                expected_base_sha=BASE,
+                expected_head_sha=HEAD,
+                expected_run_id=3001,
+                registry=self.fx.registry(policy=self.fx.policy + b"\n"),
+                service_config=self.fx.app_config(),
+            )
 
         with self.assertRaises(core.ContractError):
             service.reconcile_service_workflow_run(

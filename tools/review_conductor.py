@@ -2119,6 +2119,17 @@ def reconcile_workflow_run(
     connection = open_database(state_root, config["repository"])
     try:
         connection.execute("BEGIN IMMEDIATE")
+        # Revalidate service authority before consulting an existing receipt.
+        # Duplicate read-backs must not become a bypass around current
+        # enrollment or binding revocation.
+        if admission_hook is not None:
+            admission_hook(
+                connection,
+                config,
+                "workflow_run",
+                payload,
+                {"result": "preflight", "merge_dispatched": False},
+            )
         prior = connection.execute(
             "SELECT * FROM deliveries WHERE delivery_id = ?", (delivery_id,)
         ).fetchone()
