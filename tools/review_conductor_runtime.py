@@ -3171,21 +3171,44 @@ def write_wake(path: Path, reason: str) -> None:
 def handle_webhook_request(
     config: dict[str, Any], *, method: str, path: str, headers: dict[str, str], body: bytes,
     secret: str, ingestor: Callable[..., dict[str, Any]] | None = None,
+    reconciler: Callable[..., dict[str, Any]] | None = None,
+    reconciliation_path: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     ingress = config["ingress"]
     if method != "POST":
         return HTTPStatus.METHOD_NOT_ALLOWED, {"ok": False, "reason": "method_not_allowed"}
-    if path != ingress["path"]:
+    is_reconciliation = reconciliation_path is not None and path == reconciliation_path
+    if not is_reconciliation and path != ingress["path"]:
+        return HTTPStatus.NOT_FOUND, {"ok": False, "reason": "not_found"}
+    if is_reconciliation and reconciler is None:
         return HTTPStatus.NOT_FOUND, {"ok": False, "reason": "not_found"}
     content_type = headers.get("content-type", "").split(";", 1)[0].strip().lower()
     if content_type != "application/json":
         return HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"ok": False, "reason": "unsupported_content_type"}
     if len(body) > ingress["max_body_bytes"]:
         return HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"ok": False, "reason": "body_too_large"}
-    event_type = headers.get("x-github-event", "")
-    delivery_id = headers.get("x-github-delivery", "")
-    signature = headers.get("x-hub-signature-256", "")
     try:
+        if is_reconciliation:
+            receipt = reconciler(
+                config_path=Path(config["core_config"]),
+                state_root=Path(config["paths"]["state_root"]),
+                headers=headers,
+                body=body,
+                secret=secret,
+            )
+            write_wake(Path(config["paths"]["action_wake"]), "github-workflow-readback")
+            write_wake(Path(config["paths"]["projection_wake"]), "github-workflow-readback")
+            return HTTPStatus.ACCEPTED, {
+                "ok": True,
+                "schema": "smoky.review-conductor.workflow-readback-receipt.v1",
+                "result": receipt["result"],
+                "workflow_run_id": receipt["run_id"],
+                "source": receipt["source"],
+                "merge_dispatched": False,
+            }
+        event_type = headers.get("x-github-event", "")
+        delivery_id = headers.get("x-github-delivery", "")
+        signature = headers.get("x-hub-signature-256", "")
         receipt = (ingestor or core.ingest_github_delivery)(
             config_path=Path(config["core_config"]),
             state_root=Path(config["paths"]["state_root"]),
@@ -3216,6 +3239,8 @@ def handle_webhook_request(
 def build_http_handler(
     config: dict[str, Any], secret: str,
     *, ingestor: Callable[..., dict[str, Any]] | None = None,
+    reconciler: Callable[..., dict[str, Any]] | None = None,
+    reconciliation_path: str | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         server_version = "SmokyReviewConductor/1"
@@ -3252,7 +3277,8 @@ def build_http_handler(
             headers = {key.lower(): value for key, value in self.headers.items()}
             status, payload = handle_webhook_request(
                 config, method="POST", path=self.path, headers=headers, body=body,
-                secret=secret, ingestor=ingestor,
+                secret=secret, ingestor=ingestor, reconciler=reconciler,
+                reconciliation_path=reconciliation_path,
             )
             self._write(status, payload)
 

@@ -23,6 +23,7 @@ from target_manifest import unique_object, validate_manifest
 BINDING_TABLE_SCHEMA = "review-conductor.service-policy-binding.v1"
 PROFILE_DIGEST_SCHEMA = "review-conductor.engine-profile-digest.v1"
 MAX_STAGED_POLICIES = 8
+WORKFLOW_READBACK_PATH = "/github/workflow-readback"
 
 # Approved policy bytes keyed by (repository, commit, sha256). Content is
 # immutable under that key and is hash-verified before it is stored, so a hit
@@ -130,7 +131,9 @@ def resolve_registry(source: RegistrySource) -> admission.Registry:
     return value
 
 
-def _strict_payload(body: bytes) -> dict[str, Any]:
+def _strict_payload(body: bytes, max_body_bytes: int) -> dict[str, Any]:
+    if len(body) > max_body_bytes:
+        raise ServiceError("GitHub webhook payload is oversized")
     try:
         value = json.loads(body.decode("utf-8"), object_pairs_hook=unique_object)
     except (UnicodeError, RecursionError, ValueError) as exc:
@@ -428,6 +431,46 @@ def _admission_hook(
     return hook
 
 
+def _reconciliation_admission_hook(
+    registry_source: RegistrySource,
+    service_config: dict[str, Any],
+) -> Callable[[sqlite3.Connection, dict[str, Any], str, dict[str, Any], dict[str, Any]], dict[str, Any] | None]:
+    """Revalidate the current approved-policy binding for one CI read-back."""
+    def hook(
+        connection: sqlite3.Connection,
+        config: dict[str, Any],
+        event_type: str,
+        payload: dict[str, Any],
+        outcome: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if event_type != "workflow_run":
+            raise ServiceError("workflow reconciliation hook received an unexpected event")
+        event = core.parse_workflow_run_event(config, payload)
+        if "ignored" in event or event.get("rail") == "clawsweeper":
+            raise ServiceError("workflow reconciliation requires a terminal CI workflow_run")
+        registry = resolve_registry(registry_source)
+        enrolled = preflight_enrollment(
+            service_config, registry, payload, core_config=config
+        )
+        if event["repository"] != enrolled.repository:
+            raise ServiceError("workflow read-back repository contradicts service enrollment")
+        binding = binding_for_current_head(
+            connection,
+            registry,
+            event["repository"],
+            event["pr_number"],
+            config,
+            service_config,
+        )
+        if binding is None:
+            raise ServiceError("workflow read-back tuple lacks a current approved-policy binding")
+        if any(binding[key] != event[key] for key in ("repository", "pr_number", "base_sha", "head_sha")):
+            raise ServiceError("workflow read-back binding does not match the exact tuple")
+        return binding
+
+    return hook
+
+
 def ingest_service_delivery(
     *,
     config_path: Path,
@@ -444,7 +487,11 @@ def ingest_service_delivery(
     """Authenticate, admit and ingest one GitHub App delivery atomically."""
     # Authentication must precede JSON parsing, registry resolution, lookup and policy I/O.
     core.verify_github_signature(body, signature, secret)
-    payload = _strict_payload(body)
+    ingress = core.require_object(service_config.get("ingress"), "service ingress")
+    payload = _strict_payload(
+        body,
+        core.require_positive_int(ingress.get("max_body_bytes"), "service ingress max_body_bytes"),
+    )
     core_config = core.load_config(config_path)
     registry_source = registry
     # Early rejection only; the admission hook re-resolves the registry inside
@@ -479,6 +526,92 @@ def ingest_service_delivery(
     raise runtime.RetryableIngestError("approved policy staging raced registry or cache changes")
 
 
+def reconcile_service_workflow_run(
+    *,
+    config_path: Path,
+    state_root: Path,
+    body: bytes,
+    signature: str,
+    secret: str,
+    expected_pr_number: int,
+    expected_base_sha: str,
+    expected_head_sha: str,
+    expected_run_id: int,
+    registry: RegistrySource,
+    service_config: dict[str, Any],
+) -> dict[str, Any]:
+    """Authenticate and reconcile one CI read-back behind service authority."""
+    verify_signature = core.verify_github_signature
+    verify_signature(body, signature, secret)
+    ingress = core.require_object(service_config.get("ingress"), "service ingress")
+    ingress_limit = core.require_positive_int(
+        ingress.get("max_body_bytes"), "service ingress max_body_bytes"
+    )
+    payload = _strict_payload(
+        body, min(ingress_limit, core.WORKFLOW_READBACK_MAX_BYTES)
+    )
+    return core.reconcile_workflow_run(
+        config_path=config_path,
+        state_root=state_root,
+        payload=payload,
+        expected_pr_number=expected_pr_number,
+        expected_base_sha=expected_base_sha,
+        expected_head_sha=expected_head_sha,
+        expected_run_id=expected_run_id,
+        admission_hook=_reconciliation_admission_hook(registry, service_config),
+    )
+
+
+def _reconcile_workflow_request(
+    *,
+    config_path: Path,
+    state_root: Path,
+    headers: dict[str, str],
+    body: bytes,
+    secret: str,
+    registry: RegistrySource,
+    service_config: dict[str, Any],
+) -> dict[str, Any]:
+    """Adapt the authenticated loopback read-back request to the typed boundary."""
+    def header_positive_int(name: str, label: str) -> int:
+        text = core.require_text(headers.get(name), label, 20)
+        if not text.isascii() or not text.isdecimal():
+            raise ServiceError(f"{label} must be a positive decimal integer")
+        return core.require_positive_int(int(text), label)
+
+    try:
+        expected_pr_number = header_positive_int(
+            "x-review-conductor-pr-number", "workflow read-back PR number"
+        )
+        expected_base_sha = core.require_sha(
+            headers.get("x-review-conductor-base-sha"),
+            "workflow read-back base SHA",
+        )
+        expected_head_sha = core.require_sha(
+            headers.get("x-review-conductor-head-sha"),
+            "workflow read-back head SHA",
+        )
+        expected_run_id = header_positive_int(
+            "x-review-conductor-workflow-run-id", "workflow read-back run id"
+        )
+    except (core.ContractError, TypeError, ValueError) as exc:
+        raise ServiceError("workflow read-back exact tuple headers are invalid") from exc
+    receipt = reconcile_service_workflow_run(
+        config_path=config_path,
+        state_root=state_root,
+        body=body,
+        signature=headers.get("x-hub-signature-256", ""),
+        secret=secret,
+        expected_pr_number=expected_pr_number,
+        expected_base_sha=expected_base_sha,
+        expected_head_sha=expected_head_sha,
+        expected_run_id=expected_run_id,
+        registry=registry,
+        service_config=service_config,
+    )
+    return {**receipt, "run_id": expected_run_id}
+
+
 def build_service_http_handler(
     config: dict[str, Any],
     *,
@@ -493,7 +626,18 @@ def build_service_http_handler(
             service_config=config,
         )
 
-    return runtime.build_http_handler(config, secret, ingestor=ingestor)
+    def reconciler(**kwargs: Any) -> dict[str, Any]:
+        return _reconcile_workflow_request(
+            **kwargs, registry=registry, service_config=config,
+        )
+
+    return runtime.build_http_handler(
+        config,
+        secret,
+        ingestor=ingestor,
+        reconciler=reconciler,
+        reconciliation_path=WORKFLOW_READBACK_PATH,
+    )
 
 
 def binding_for_current_head(

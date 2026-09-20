@@ -2758,6 +2758,234 @@ class AdmissionIngressTests(unittest.TestCase):
         self.assertEqual(self.fx.binding_rows(), first)
         service.require_current_bindings(self.fx.app_config(), promoted_registry)
 
+    def test_service_reconciliation_is_authenticated_bounded_and_binding_checked(self):
+        self.fx.ingest("reconcile-pr", self.fx.payload())
+        payload = copy.deepcopy(legacy.ci_payload(7, 3001, HEAD))
+        payload["repository"] = {"full_name": REPOSITORY, "id": REPOSITORY_ID}
+        payload["installation"] = {"id": INSTALLATION_ID}
+        core_config = json.loads(self.fx.config_path.read_text())
+        payload["workflow"] = {
+            "name": core_config["ci"]["workflow_name"],
+            "path": core_config["ci"]["workflow_path"],
+        }
+        payload["workflow_run"]["updated_at"] = "2026-08-29T20:20:00Z"
+        body, signature = self.fx.signed(payload)
+        receipt = service.reconcile_service_workflow_run(
+            config_path=self.fx.config_path,
+            state_root=self.fx.state,
+            body=body,
+            signature=signature,
+            secret=SECRET,
+            expected_pr_number=7,
+            expected_base_sha=BASE,
+            expected_head_sha=HEAD,
+            expected_run_id=3001,
+            registry=self.fx.registry(),
+            service_config=self.fx.app_config(),
+        )
+        self.assertEqual(receipt["result"], "accepted")
+        self.assertRegex(receipt["admission_binding_id"], r"^[0-9a-f]{64}$")
+
+        duplicate = service.reconcile_service_workflow_run(
+            config_path=self.fx.config_path,
+            state_root=self.fx.state,
+            body=body,
+            signature=signature,
+            secret=SECRET,
+            expected_pr_number=7,
+            expected_base_sha=BASE,
+            expected_head_sha=HEAD,
+            expected_run_id=3001,
+            registry=self.fx.registry(),
+            service_config=self.fx.app_config(),
+        )
+        self.assertEqual(duplicate["result"], "duplicate_reconciliation")
+        with self.assertRaises(service.ServiceError):
+            service.reconcile_service_workflow_run(
+                config_path=self.fx.config_path,
+                state_root=self.fx.state,
+                body=body,
+                signature=signature,
+                secret=SECRET,
+                expected_pr_number=7,
+                expected_base_sha=BASE,
+                expected_head_sha=HEAD,
+                expected_run_id=3001,
+                registry=self.fx.registry(policy=self.fx.policy + b"\n"),
+                service_config=self.fx.app_config(),
+            )
+        limited_config = copy.deepcopy(self.fx.app_config())
+        limited_config["ingress"]["max_body_bytes"] = len(body) - 1
+        with self.assertRaises(service.ServiceError):
+            service.reconcile_service_workflow_run(
+                config_path=self.fx.config_path,
+                state_root=self.fx.state,
+                body=body,
+                signature=signature,
+                secret=SECRET,
+                expected_pr_number=7,
+                expected_base_sha=BASE,
+                expected_head_sha=HEAD,
+                expected_run_id=3001,
+                registry=self.fx.registry(),
+                service_config=limited_config,
+            )
+
+        with self.assertRaises(core.ContractError):
+            service.reconcile_service_workflow_run(
+                config_path=self.fx.config_path,
+                state_root=self.fx.state,
+                body=body,
+                signature=signature,
+                secret=SECRET,
+                expected_pr_number=7,
+                expected_base_sha=BASE,
+                expected_head_sha="e" * 40,
+                expected_run_id=3001,
+                registry=self.fx.registry(),
+                service_config=self.fx.app_config(),
+            )
+
+        tampered = copy.deepcopy(payload)
+        tampered["installation"] = {"id": INSTALLATION_ID + 1}
+        tampered["workflow_run"]["id"] = 3002
+        tampered_body, tampered_signature = self.fx.signed(tampered)
+        with self.assertRaises(service.ServiceError):
+            service.reconcile_service_workflow_run(
+                config_path=self.fx.config_path,
+                state_root=self.fx.state,
+                body=tampered_body,
+                signature=tampered_signature,
+                secret=SECRET,
+                expected_pr_number=7,
+                expected_base_sha=BASE,
+                expected_head_sha=HEAD,
+                expected_run_id=3002,
+                registry=self.fx.registry(),
+                service_config=self.fx.app_config(),
+            )
+
+        missing_payload = copy.deepcopy(payload)
+        missing_payload["workflow_run"]["id"] = 3003
+        missing_body, missing_signature = self.fx.signed(missing_payload)
+        with self.assertRaises(service.ServiceError):
+            service.reconcile_service_workflow_run(
+                config_path=self.fx.config_path,
+                state_root=self.fx.state.parent / "missing-readback-state",
+                body=missing_body,
+                signature=missing_signature,
+                secret=SECRET,
+                expected_pr_number=7,
+                expected_base_sha=BASE,
+                expected_head_sha=HEAD,
+                expected_run_id=3003,
+                registry=self.fx.registry(),
+                service_config=self.fx.app_config(),
+            )
+
+        revoked_payload = copy.deepcopy(payload)
+        revoked_payload["workflow_run"]["id"] = 3004
+        revoked_body, revoked_signature = self.fx.signed(revoked_payload)
+        with self.assertRaises(service.ServiceError):
+            service.reconcile_service_workflow_run(
+                config_path=self.fx.config_path,
+                state_root=self.fx.state,
+                body=revoked_body,
+                signature=revoked_signature,
+                secret=SECRET,
+                expected_pr_number=7,
+                expected_base_sha=BASE,
+                expected_head_sha=HEAD,
+                expected_run_id=3004,
+                registry=self.fx.registry(policy=self.fx.policy + b"\n"),
+                service_config=self.fx.app_config(),
+            )
+
+        oversized = b"x" * (core.WORKFLOW_READBACK_MAX_BYTES + 1)
+        oversized_signature = "sha256=" + hmac.new(
+            SECRET.encode(), oversized, hashlib.sha256
+        ).hexdigest()
+        with self.assertRaises(service.ServiceError):
+            service.reconcile_service_workflow_run(
+                config_path=self.fx.config_path,
+                state_root=self.fx.state,
+                body=oversized,
+                signature=oversized_signature,
+                secret=SECRET,
+                expected_pr_number=7,
+                expected_base_sha=BASE,
+                expected_head_sha=HEAD,
+                expected_run_id=3002,
+                registry=self.fx.registry(),
+                service_config=self.fx.app_config(),
+            )
+
+    def test_service_reconciliation_http_operation_is_wired_to_strict_admission(self):
+        self.fx.ingest("reconcile-http-pr", self.fx.payload())
+        payload = copy.deepcopy(legacy.ci_payload(7, 3010, HEAD))
+        payload["repository"] = {"full_name": REPOSITORY, "id": REPOSITORY_ID}
+        payload["installation"] = {"id": INSTALLATION_ID}
+        core_config = json.loads(self.fx.config_path.read_text())
+        payload["workflow"] = {
+            "name": core_config["ci"]["workflow_name"],
+            "path": core_config["ci"]["workflow_path"],
+        }
+        payload["workflow_run"]["updated_at"] = "2026-08-29T20:20:00Z"
+        body, signature = self.fx.signed(payload)
+        handler = service.build_service_http_handler(
+            self.fx.app_config(),
+            secret=SECRET,
+            registry=self.fx.registry(),
+            read_policy=self.fx.read,
+        )
+        server = runtime.BoundedHTTPServer(
+            ("127.0.0.1", 0), handler, request_timeout_seconds=5
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def post(headers):
+            connection = http.client.HTTPConnection(
+                "127.0.0.1", server.server_port, timeout=5
+            )
+            try:
+                connection.request(
+                    "POST",
+                    service.WORKFLOW_READBACK_PATH,
+                    body,
+                    {"Content-Type": "application/json", **headers},
+                )
+                response = connection.getresponse()
+                return response.status, json.loads(response.read())
+            finally:
+                connection.close()
+
+        headers = {
+            "X-Hub-Signature-256": signature,
+            "X-Review-Conductor-PR-Number": "7",
+            "X-Review-Conductor-Base-SHA": BASE,
+            "X-Review-Conductor-Head-SHA": HEAD,
+            "X-Review-Conductor-Workflow-Run-ID": "3010",
+        }
+        try:
+            status, result = post(headers)
+            self.assertEqual(status, 202, result)
+            self.assertTrue(result.get("ok"), result)
+            self.assertEqual(
+                (status, result["ok"], result["result"]),
+                (202, True, "accepted"),
+            )
+            self.assertEqual(result["source"], "github-readback")
+            status, result = post(headers)
+            self.assertEqual((status, result["result"]), (202, "duplicate_reconciliation"))
+            mismatched = {**headers, "X-Review-Conductor-Head-SHA": "e" * 40}
+            status, result = post(mismatched)
+            self.assertEqual((status, result), (400, {"ok": False, "reason": "request_rejected"}))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
     def test_issue_comment_deliveries_never_create_bindings(self):
         self.fx.ingest("pr", self.fx.payload())
         first = self.fx.binding_rows()
