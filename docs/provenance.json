@@ -70,7 +70,7 @@
       "source_path": "tonight-lab/tests/test_review_conductor.py",
       "destination_path": "tests/test_review_conductor.py",
       "source_sha256": "716e3db7443c58e9947a53ee16854f1aa8c8b4c459f87ee70a801676118e8947",
-      "destination_sha256": "0213f1fae8456e174be68aec924e6bf53ef46cc12c7fcb6210e049c8b4165c3c",
+      "destination_sha256": "35cb285d9fe5d0a2eeec4da3bdae5fd97f5d8866eb508bddc388f48753ab42e7",
       "adaptation": "test root and archived lane location; OpenClaw queue exact-tuple contract flags gated on adapter capability, legacy Spark fixture-parser argv, fail-closed unbound payload epoch, and precise disposable-copy mutants; exact-head ClawSweeper human_gate owner adjudication reaches ready_for_human_merge without rerun, with stale/mismatched tuple/epoch/request/rail/actor and unsupported-classification negatives, findings-origin waiting_human provenance refusals, OpenClaw human_gate fail-closed, and precise mutants that drop the clawsweeper rail fence, admit required_fix from waiting_human, or skip the human_gate terminal check; matching clawsweeper_quality still reaches ready, mismatched quality workflow_run_id fails closed, and a precise mutant that drops that bind is killed; repair_cycle saturates at 2 so required_fix still creates a scoped repair.route, later findings stay in adjudication, and mutants that restore the old ceiling or increment past two are killed; exact CI workflow_run read-back reconciliation is tested for acceptance, duplicate recovery, already-processed delivery, and tuple mismatch rejection"
     },
     {
