@@ -543,7 +543,13 @@ def reconcile_service_workflow_run(
     """Authenticate and reconcile one CI read-back behind service authority."""
     verify_signature = core.verify_github_signature
     verify_signature(body, signature, secret)
-    payload = _strict_payload(body, core.WORKFLOW_READBACK_MAX_BYTES)
+    ingress = core.require_object(service_config.get("ingress"), "service ingress")
+    ingress_limit = core.require_positive_int(
+        ingress.get("max_body_bytes"), "service ingress max_body_bytes"
+    )
+    payload = _strict_payload(
+        body, min(ingress_limit, core.WORKFLOW_READBACK_MAX_BYTES)
+    )
     return core.reconcile_workflow_run(
         config_path=config_path,
         state_root=state_root,

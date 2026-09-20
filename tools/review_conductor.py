@@ -623,7 +623,7 @@ def open_database(state_root: Path, repository: str | None = None) -> sqlite3.Co
             FROM events
             WHERE kind = 'ci.completed'
             """
-        ).fetchall():
+        ):
             payload = json.loads(event_row["payload_json"])
             workflow_run = payload.get("workflow_run")
             if not isinstance(workflow_run, dict):
