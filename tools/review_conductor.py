@@ -27,6 +27,7 @@ GENERATION_FD_ENV = "REVIEW_CONDUCTOR_GENERATION_FD"
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 OPENCLAW_EXACT_TUPLE_CONTRACT = "review-conductor-openclaw-v1"
 OPENCLAW_REPORT_MAX_BYTES = 24 * 1024
+WORKFLOW_READBACK_MAX_BYTES = 1024 * 1024
 OPENCLAW_REPORT_UNAVAILABLE = {"missing", "oversized", "invalid_text"}
 GITHUB_EVENT_TYPES = ("pull_request", "workflow_run", "issue_comment")
 REREVIEW_COMMAND_RE = re.compile(
@@ -1848,6 +1849,165 @@ def process_workflow_run(
     }
 
 
+def _recorded_ci_run(
+    connection: sqlite3.Connection,
+    event: dict[str, Any],
+) -> bool:
+    """Return whether this exact CI run was already admitted.
+
+    Reconciliation may be invoked after GitHub delivered the original event but
+    before the operator could observe the local receipt.  The run id is the
+    authoritative operation identity; conflicting facts for that id fail
+    closed instead of creating a second event.
+    """
+    rows = connection.execute(
+        """
+        SELECT pr_number, base_sha, head_sha, payload_json FROM events
+        WHERE kind = 'ci.completed' AND repository = ?
+        """,
+        (event["repository"],),
+    ).fetchall()
+    for row in rows:
+        payload = json.loads(row["payload_json"])
+        workflow_run = payload.get("workflow_run")
+        if not isinstance(workflow_run, dict) or str(workflow_run.get("id")) != str(event["run_id"]):
+            continue
+        if (
+            row["pr_number"] != event["pr_number"]
+            or row["base_sha"] != event["base_sha"]
+            or row["head_sha"] != event["head_sha"]
+            or workflow_run.get("conclusion") != event["conclusion"]
+            or require_github_timestamp(
+                workflow_run.get("created_at"),
+                "recorded CI workflow_run created_at",
+            )
+            != event["source_created_at"]
+        ):
+            raise ContractError("CI workflow_run identity was reused with conflicting terminal facts")
+        return True
+    return False
+
+
+def reconcile_workflow_run(
+    *,
+    config_path: Path,
+    state_root: Path,
+    payload: dict[str, Any],
+    expected_pr_number: int,
+    expected_base_sha: str,
+    expected_head_sha: str,
+    expected_run_id: int,
+    admission_hook: Callable[[sqlite3.Connection, dict[str, Any], str, dict[str, Any], dict[str, Any]], dict[str, Any] | None] | None = None,
+) -> dict[str, Any]:
+    """Admit one authoritative read-back of a completed CI workflow run.
+
+    This is an operator recovery boundary for a missing or unobservable
+    webhook delivery.  It never polls, reruns CI, dispatches either review
+    rail, or trusts a caller-provided tuple: the GitHub payload is parsed and
+    the supplied identity is compared to the parsed exact values.
+    """
+    config = load_config(config_path)
+    require_enabled(config)
+    if not isinstance(payload, dict):
+        raise ContractError("workflow_run read-back must be an object")
+    if len(canonical_json(payload).encode("utf-8")) > WORKFLOW_READBACK_MAX_BYTES:
+        raise ContractError("workflow_run read-back is oversized")
+    if config.get("review_policy") and admission_hook is None:
+        raise ContractError("strict workflow_run reconciliation requires service admission")
+    event = parse_workflow_run_event(config, payload)
+    if event.get("rail") == "clawsweeper":
+        raise ContractError("workflow_run reconciliation accepts CI only")
+    if (
+        event["pr_number"] != require_positive_int(expected_pr_number, "expected PR number")
+        or event["base_sha"] != require_sha(expected_base_sha, "expected base sha")
+        or event["head_sha"] != require_sha(expected_head_sha, "expected head sha")
+        or event["run_id"] != require_positive_int(expected_run_id, "expected workflow_run id")
+    ):
+        raise ContractError("workflow_run read-back does not match the requested exact tuple")
+    delivery_id = f"github-reconcile-workflow-run:{event['run_id']}"
+    payload_sha = hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+    connection = open_database(state_root, config["repository"])
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        prior = connection.execute(
+            "SELECT * FROM deliveries WHERE delivery_id = ?", (delivery_id,)
+        ).fetchone()
+        if prior is not None:
+            if prior["payload_sha256"] != payload_sha:
+                raise ContractError("workflow_run reconciliation id was reused with different content")
+            connection.rollback()
+            outcome = json.loads(prior["outcome_json"])
+            outcome["result"] = "duplicate_reconciliation"
+            return outcome
+        if _recorded_ci_run(connection, event):
+            outcome = {
+                "result": "already_processed",
+                "repository": event["repository"],
+                "pr_number": event["pr_number"],
+                "base_sha": event["base_sha"],
+                "head_sha": event["head_sha"],
+                "run_id": event["run_id"],
+                "review_invoked": False,
+                "merge_dispatched": False,
+            }
+        else:
+            outcome = process_workflow_run(
+                connection,
+                config,
+                event_id_from_delivery(delivery_id),
+                event,
+                payload,
+            )
+        if admission_hook is not None:
+            binding = admission_hook(connection, config, "workflow_run", payload, outcome)
+            if binding is not None:
+                outcome["admission_binding_id"] = require_text(
+                    binding.get("binding_id"), "admission binding id", 64
+                )
+        outcome.update(
+            {
+                "schema": "smoky.review-conductor.reconciliation-receipt.v1",
+                "delivery_id": delivery_id,
+                "event_type": "workflow_run",
+                "source": "github-readback",
+                "payload_sha256": payload_sha,
+            }
+        )
+        connection.execute(
+            "INSERT INTO deliveries(delivery_id, source, event_type, payload_sha256, received_at, outcome_json) VALUES (?, 'github-readback', 'workflow_run', ?, ?, ?)",
+            (delivery_id, payload_sha, utc_now(), canonical_json(outcome)),
+        )
+        connection.commit()
+        return outcome
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def reconcile_workflow_run_command(args: argparse.Namespace) -> dict[str, Any]:
+    try:
+        body = args.body_file.read_bytes()
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ContractError("cannot read workflow_run read-back JSON") from exc
+    if len(body) > WORKFLOW_READBACK_MAX_BYTES:
+        raise ContractError("workflow_run read-back is oversized")
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ContractError("cannot read workflow_run read-back JSON") from exc
+    return reconcile_workflow_run(
+        config_path=args.config,
+        state_root=args.state_root,
+        payload=payload,
+        expected_pr_number=args.pr_number,
+        expected_base_sha=args.base_sha,
+        expected_head_sha=args.head_sha,
+        expected_run_id=args.run_id,
+    )
+
+
 def verify_github_signature(body: bytes, signature: str, secret: str) -> None:
     if not secret:
         raise ContractError("webhook secret is empty")
@@ -2974,6 +3134,19 @@ def build_parser() -> argparse.ArgumentParser:
     github.add_argument("--secret-env", default="SMOKY_REVIEW_CONDUCTOR_WEBHOOK_SECRET")
     github.add_argument("--body-file", type=Path, required=True)
     github.set_defaults(func=github_delivery)
+
+    reconcile = sub.add_parser(
+        "reconcile-workflow-run",
+        help="admit one exact completed CI workflow_run read-back without dispatching reviews",
+    )
+    reconcile.add_argument("--config", type=Path, required=True)
+    reconcile.add_argument("--state-root", type=Path, required=True)
+    reconcile.add_argument("--body-file", type=Path, required=True)
+    reconcile.add_argument("--pr-number", type=int, required=True)
+    reconcile.add_argument("--base-sha", required=True)
+    reconcile.add_argument("--head-sha", required=True)
+    reconcile.add_argument("--run-id", type=int, required=True)
+    reconcile.set_defaults(func=reconcile_workflow_run_command)
 
     internal = sub.add_parser("internal-event", help="ingest one typed review/adjudication event")
     internal.add_argument("--config", type=Path, required=True)

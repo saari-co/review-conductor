@@ -691,6 +691,95 @@ def test_ci_gate_dedupe_and_openclaw_dispatch(temp: Path) -> None:
     assert "--queue-request-id" in queue_call
 
 
+def test_ci_readback_reconciliation_is_exact_and_idempotent(temp: Path) -> None:
+    head = "b" * 40
+    state = temp / "state-readback"
+    github_event(temp, state, "pull_request", "delivery-readback-pr", pr_payload(107, head))
+    payload = workflow_payload(107, head, "success", 5101)
+    body = write_json(temp, "readback.json", payload)
+    reconciled = run(
+        "reconcile-workflow-run",
+        "--config", str(CONFIG),
+        "--state-root", str(state),
+        "--body-file", str(body),
+        "--pr-number", "107",
+        "--base-sha", BASE,
+        "--head-sha", head,
+        "--run-id", "5101",
+    )
+    assert reconciled["result"] == "accepted"
+    assert reconciled["source"] == "github-readback"
+    assert status(state, 107)["head"]["state"] == "openclaw_queued"
+    duplicate = run(
+        "reconcile-workflow-run",
+        "--config", str(CONFIG),
+        "--state-root", str(state),
+        "--body-file", str(body),
+        "--pr-number", "107",
+        "--base-sha", BASE,
+        "--head-sha", head,
+        "--run-id", "5101",
+    )
+    assert duplicate["result"] == "duplicate_reconciliation"
+    assert len(status(state, 107)["actions"]) == 1
+
+    conflicting_head = "c" * 40
+    github_event(temp, state, "pull_request", "delivery-readback-conflict-pr", pr_payload(109, conflicting_head))
+    conflicting_body = write_json(
+        temp,
+        "readback-conflict.json",
+        workflow_payload(109, conflicting_head, "success", 5101),
+    )
+    conflict = run(
+        "reconcile-workflow-run",
+        "--config", str(CONFIG),
+        "--state-root", str(state),
+        "--body-file", str(conflicting_body),
+        "--pr-number", "109",
+        "--base-sha", BASE,
+        "--head-sha", conflicting_head,
+        "--run-id", "5101",
+        expected=2,
+    )
+    assert "reconciliation id was reused with different content" in conflict["stderr"]
+
+    delivered_state = temp / "state-readback-already-delivered"
+    github_event(temp, delivered_state, "pull_request", "delivery-original-pr", pr_payload(108, head))
+    github_event(
+        temp,
+        delivered_state,
+        "workflow_run",
+        "delivery-original-ci",
+        workflow_payload(108, head, "success", 5102),
+    )
+    delivered_body = write_json(temp, "readback-already-delivered.json", workflow_payload(108, head, "success", 5102))
+    already = run(
+        "reconcile-workflow-run",
+        "--config", str(CONFIG),
+        "--state-root", str(delivered_state),
+        "--body-file", str(delivered_body),
+        "--pr-number", "108",
+        "--base-sha", BASE,
+        "--head-sha", head,
+        "--run-id", "5102",
+    )
+    assert already["result"] == "already_processed"
+    assert len(status(delivered_state, 108)["actions"]) == 1
+
+    mismatch = run(
+        "reconcile-workflow-run",
+        "--config", str(CONFIG),
+        "--state-root", str(state),
+        "--body-file", str(body),
+        "--pr-number", "107",
+        "--base-sha", BASE,
+        "--head-sha", "c" * 40,
+        "--run-id", "5101",
+        expected=2,
+    )
+    assert "does not match the requested exact tuple" in mismatch["stderr"]
+
+
 def test_default_branch_scope_and_atomic_dispatch_claim(temp: Path) -> None:
     out_of_scope = temp / "state-out-of-scope"
     ignored_pr = github_event(
@@ -2024,6 +2113,7 @@ def main() -> int:
     named = {
         "test_official_hmac_vector": lambda _temp: test_official_hmac_vector(),
         "test_ci_gate_dedupe_and_openclaw_dispatch": test_ci_gate_dedupe_and_openclaw_dispatch,
+        "test_ci_readback_reconciliation_is_exact_and_idempotent": test_ci_readback_reconciliation_is_exact_and_idempotent,
         "test_default_branch_scope_and_atomic_dispatch_claim": test_default_branch_scope_and_atomic_dispatch_claim,
         "test_old_head_terminal_is_historical_only": test_old_head_terminal_is_historical_only,
         "test_closed_pr_obsoletes_pending_review_and_ignores_late_ci": test_closed_pr_obsoletes_pending_review_and_ignores_late_ci,
