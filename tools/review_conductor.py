@@ -2026,8 +2026,9 @@ def reconcile_workflow_run(
 
 def reconcile_workflow_run_command(args: argparse.Namespace) -> dict[str, Any]:
     try:
-        body = args.body_file.read_bytes()
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        with args.body_file.open("rb") as body_file:
+            body = body_file.read(WORKFLOW_READBACK_MAX_BYTES + 1)
+    except OSError as exc:
         raise ContractError("cannot read workflow_run read-back JSON") from exc
     if len(body) > WORKFLOW_READBACK_MAX_BYTES:
         raise ContractError("workflow_run read-back is oversized")
