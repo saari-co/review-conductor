@@ -1895,7 +1895,8 @@ def _recorded_ci_run(
         prior_run_id = outcome.get("workflow_run_id")
         if prior_run_id is None or str(prior_run_id) != str(event["run_id"]):
             continue
-        raise ContractError("workflow_run identity was previously recorded as ignored")
+        if outcome.get("result") == "ignored":
+            raise ContractError("workflow_run identity was previously recorded as ignored")
     rows = connection.execute(
         """
         SELECT pr_number, base_sha, head_sha, payload_json FROM events
