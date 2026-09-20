@@ -2758,6 +2758,53 @@ class AdmissionIngressTests(unittest.TestCase):
         self.assertEqual(self.fx.binding_rows(), first)
         service.require_current_bindings(self.fx.app_config(), promoted_registry)
 
+    def test_service_reconciliation_is_authenticated_bounded_and_binding_checked(self):
+        self.fx.ingest("reconcile-pr", self.fx.payload())
+        payload = copy.deepcopy(legacy.ci_payload(7, 3001, HEAD))
+        payload["repository"] = {"full_name": REPOSITORY, "id": REPOSITORY_ID}
+        payload["installation"] = {"id": INSTALLATION_ID}
+        core_config = json.loads(self.fx.config_path.read_text())
+        payload["workflow"] = {
+            "name": core_config["ci"]["workflow_name"],
+            "path": core_config["ci"]["workflow_path"],
+        }
+        payload["workflow_run"]["updated_at"] = "2026-08-29T20:20:00Z"
+        body, signature = self.fx.signed(payload)
+        receipt = service.reconcile_service_workflow_run(
+            config_path=self.fx.config_path,
+            state_root=self.fx.state,
+            body=body,
+            signature=signature,
+            secret=SECRET,
+            expected_pr_number=7,
+            expected_base_sha=BASE,
+            expected_head_sha=HEAD,
+            expected_run_id=3001,
+            registry=self.fx.registry(),
+            service_config=self.fx.app_config(),
+        )
+        self.assertEqual(receipt["result"], "accepted")
+        self.assertRegex(receipt["admission_binding_id"], r"^[0-9a-f]{64}$")
+
+        oversized = b"x" * (core.WORKFLOW_READBACK_MAX_BYTES + 1)
+        oversized_signature = "sha256=" + hmac.new(
+            SECRET.encode(), oversized, hashlib.sha256
+        ).hexdigest()
+        with self.assertRaises(service.ServiceError):
+            service.reconcile_service_workflow_run(
+                config_path=self.fx.config_path,
+                state_root=self.fx.state,
+                body=oversized,
+                signature=oversized_signature,
+                secret=SECRET,
+                expected_pr_number=7,
+                expected_base_sha=BASE,
+                expected_head_sha=HEAD,
+                expected_run_id=3002,
+                registry=self.fx.registry(),
+                service_config=self.fx.app_config(),
+            )
+
     def test_issue_comment_deliveries_never_create_bindings(self):
         self.fx.ingest("pr", self.fx.payload())
         first = self.fx.binding_rows()

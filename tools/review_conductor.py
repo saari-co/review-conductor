@@ -488,6 +488,21 @@ def open_database(state_root: Path, repository: str | None = None) -> sqlite3.Co
           proof_ref TEXT,
           PRIMARY KEY (rail, workflow_run_id)
         );
+        CREATE TABLE IF NOT EXISTS ci_run_identities (
+          repository TEXT NOT NULL,
+          workflow_run_id TEXT NOT NULL,
+          pr_number INTEGER NOT NULL,
+          base_sha TEXT NOT NULL,
+          head_sha TEXT NOT NULL,
+          conclusion TEXT NOT NULL,
+          source_created_at TEXT NOT NULL,
+          disposition TEXT NOT NULL,
+          PRIMARY KEY (repository, workflow_run_id)
+        );
+        CREATE TABLE IF NOT EXISTS ci_run_identity_migrations (
+          singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+          backfilled_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS projections (
           repository TEXT NOT NULL,
           pr_number INTEGER NOT NULL,
@@ -599,6 +614,51 @@ def open_database(state_root: Path, repository: str | None = None) -> sqlite3.Co
             )
     if "is_draft" not in {row[1] for row in connection.execute("PRAGMA table_info(heads)")}:
         connection.execute("ALTER TABLE heads ADD COLUMN is_draft INTEGER NOT NULL DEFAULT 0")
+    if connection.execute(
+        "SELECT 1 FROM ci_run_identity_migrations WHERE singleton = 1"
+    ).fetchone() is None:
+        for event_row in connection.execute(
+            """
+            SELECT repository, pr_number, base_sha, head_sha, payload_json
+            FROM events
+            WHERE kind = 'ci.completed'
+            """
+        ).fetchall():
+            payload = json.loads(event_row["payload_json"])
+            workflow_run = payload.get("workflow_run")
+            if not isinstance(workflow_run, dict):
+                continue
+            try:
+                workflow_run_id = str(require_positive_int(workflow_run.get("id"), "workflow_run id"))
+                source_created_at = require_github_timestamp(
+                    workflow_run.get("created_at"), "workflow_run created_at"
+                )
+                conclusion = require_text(
+                    workflow_run.get("conclusion"), "workflow_run conclusion", 50
+                )
+            except ContractError:
+                continue
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO ci_run_identities(
+                  repository, workflow_run_id, pr_number, base_sha, head_sha,
+                  conclusion, source_created_at, disposition
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'legacy_event')
+                """,
+                (
+                    event_row["repository"],
+                    workflow_run_id,
+                    event_row["pr_number"],
+                    event_row["base_sha"],
+                    event_row["head_sha"],
+                    conclusion,
+                    source_created_at,
+                ),
+            )
+        connection.execute(
+            "INSERT INTO ci_run_identity_migrations(singleton, backfilled_at) VALUES (1, ?)",
+            (utc_now(),),
+        )
     connection.commit()
     return connection
 
@@ -1260,6 +1320,7 @@ def parse_workflow_run_event(config: dict[str, Any], payload: dict[str, Any]) ->
     if base_ref != config["default_branch"]:
         return {
             "ignored": f"workflow_run base ref {base_ref} is outside the configured pilot",
+            "repository": config["repository"],
             "workflow_run_id": run_id,
             "pr_number": require_positive_int(
                 pull.get("number"), "workflow_run pull request number"
@@ -1278,6 +1339,85 @@ def parse_workflow_run_event(config: dict[str, Any], payload: dict[str, Any]) ->
         "run_id": run_id,
         "source_created_at": source_created_at,
     }
+
+
+def _ci_run_identity(event: dict[str, Any]) -> tuple[str, str, int, str, str, str, str] | None:
+    workflow_run_id = event.get("run_id", event.get("workflow_run_id"))
+    fields = (
+        event.get("repository"),
+        workflow_run_id,
+        event.get("pr_number"),
+        event.get("base_sha"),
+        event.get("head_sha"),
+        event.get("conclusion"),
+        event.get("source_created_at"),
+    )
+    if any(value is None for value in fields):
+        return None
+    return (
+        str(fields[0]),
+        str(workflow_run_id),
+        int(fields[2]),
+        str(fields[3]),
+        str(fields[4]),
+        str(fields[5]),
+        str(fields[6]),
+    )
+
+
+def _remember_ci_run_identity(
+    connection: sqlite3.Connection,
+    event: dict[str, Any],
+    disposition: str,
+) -> None:
+    identity = _ci_run_identity(event)
+    if identity is None:
+        return
+    repository, workflow_run_id, pr_number, base_sha, head_sha, conclusion, source_created_at = identity
+    prior = connection.execute(
+        """
+        SELECT pr_number, base_sha, head_sha, conclusion, source_created_at
+        FROM ci_run_identities
+        WHERE repository = ? AND workflow_run_id = ?
+        """,
+        (repository, workflow_run_id),
+    ).fetchone()
+    if prior is not None and (
+        prior["pr_number"] != pr_number
+        or prior["base_sha"] != base_sha
+        or prior["head_sha"] != head_sha
+        or prior["conclusion"] != conclusion
+        or prior["source_created_at"] != source_created_at
+    ):
+        raise ContractError("CI workflow_run identity was reused with conflicting terminal facts")
+    connection.execute(
+        """
+        INSERT INTO ci_run_identities(
+          repository, workflow_run_id, pr_number, base_sha, head_sha,
+          conclusion, source_created_at, disposition
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(repository, workflow_run_id) DO UPDATE SET disposition = excluded.disposition
+        """,
+        (*identity, disposition),
+    )
+
+
+def _set_ci_run_disposition(
+    connection: sqlite3.Connection,
+    event: dict[str, Any],
+    disposition: str,
+) -> None:
+    identity = _ci_run_identity(event)
+    if identity is None:
+        return
+    connection.execute(
+        """
+        UPDATE ci_run_identities
+        SET disposition = ?
+        WHERE repository = ? AND workflow_run_id = ?
+        """,
+        (disposition, identity[0], identity[1]),
+    )
 
 
 def parse_issue_comment_event(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
@@ -1736,6 +1876,8 @@ def process_workflow_run(
     event: dict[str, Any],
     payload: dict[str, Any],
 ) -> dict[str, Any]:
+    if event.get("rail") != "clawsweeper":
+        _remember_ci_run_identity(connection, event, "seen")
     if "ignored" in event:
         outcome = {"result": "ignored", "reason": event["ignored"]}
         for key in (
@@ -1749,6 +1891,7 @@ def process_workflow_run(
         ):
             if key in event:
                 outcome[key] = event[key]
+        _set_ci_run_disposition(connection, event, "ignored_scope")
         return outcome
     if event.get("rail") == "clawsweeper":
         prior_run = connection.execute(
@@ -1799,6 +1942,7 @@ def process_workflow_run(
     row = exact_current_head(connection, **identity)
     if row is None:
         insert_event(connection, event_id=event_id, kind="ci.completed", stale=True, payload=payload, **identity)
+        _set_ci_run_disposition(connection, event, "stale")
         return {"result": "stale", "reason": "CI tuple is not the current PR head", "merge_dispatched": False}
     if row["state"] in {"closed", "closed_merged"}:
         insert_event(
@@ -1809,6 +1953,7 @@ def process_workflow_run(
             payload=payload,
             **identity,
         )
+        _set_ci_run_disposition(connection, event, "ignored_terminal")
         return {
             "result": "ignored",
             "state": row["state"],
@@ -1825,6 +1970,7 @@ def process_workflow_run(
             payload=payload,
             **identity,
         )
+        _set_ci_run_disposition(connection, event, "ignored_old")
         return {
             "result": "ignored",
             "state": row["state"],
@@ -1866,6 +2012,7 @@ def process_workflow_run(
                 (conclusion, f"CI concluded {conclusion}; Review Rails were not invoked", utc_now(), *identity.values()),
             )
     insert_event(connection, event_id=event_id, kind="ci.completed", stale=False, payload=payload, **identity)
+    _set_ci_run_disposition(connection, event, "accepted")
     return {
         "result": "accepted",
         "state": "openclaw_queued" if conclusion == "success" else "ci_failed",
@@ -1887,42 +2034,27 @@ def _recorded_ci_run(
     authoritative operation identity; conflicting facts for that id fail
     closed instead of creating a second event.
     """
-    delivery_rows = connection.execute(
-        "SELECT outcome_json FROM deliveries WHERE event_type = 'workflow_run'"
-    ).fetchall()
-    for row in delivery_rows:
-        outcome = json.loads(row["outcome_json"])
-        prior_run_id = outcome.get("workflow_run_id")
-        if prior_run_id is None or str(prior_run_id) != str(event["run_id"]):
-            continue
-        if outcome.get("result") == "ignored":
-            raise ContractError("workflow_run identity was previously recorded as ignored")
-    rows = connection.execute(
+    row = connection.execute(
         """
-        SELECT pr_number, base_sha, head_sha, payload_json FROM events
-        WHERE kind = 'ci.completed' AND repository = ?
+        SELECT pr_number, base_sha, head_sha, conclusion, source_created_at, disposition
+        FROM ci_run_identities
+        WHERE repository = ? AND workflow_run_id = ?
         """,
-        (event["repository"],),
-    ).fetchall()
-    for row in rows:
-        payload = json.loads(row["payload_json"])
-        workflow_run = payload.get("workflow_run")
-        if not isinstance(workflow_run, dict) or str(workflow_run.get("id")) != str(event["run_id"]):
-            continue
-        if (
-            row["pr_number"] != event["pr_number"]
-            or row["base_sha"] != event["base_sha"]
-            or row["head_sha"] != event["head_sha"]
-            or workflow_run.get("conclusion") != event["conclusion"]
-            or require_github_timestamp(
-                workflow_run.get("created_at"),
-                "recorded CI workflow_run created_at",
-            )
-            != event["source_created_at"]
-        ):
-            raise ContractError("CI workflow_run identity was reused with conflicting terminal facts")
-        return True
-    return False
+        (event["repository"], str(event["run_id"])),
+    ).fetchone()
+    if row is None:
+        return False
+    if (
+        row["pr_number"] != event["pr_number"]
+        or row["base_sha"] != event["base_sha"]
+        or row["head_sha"] != event["head_sha"]
+        or row["conclusion"] != event["conclusion"]
+        or row["source_created_at"] != event["source_created_at"]
+    ):
+        raise ContractError("CI workflow_run identity was reused with conflicting terminal facts")
+    if row["disposition"] == "ignored_scope":
+        raise ContractError("workflow_run identity was previously recorded as ignored")
+    return True
 
 
 def reconcile_workflow_run(

@@ -131,6 +131,8 @@ def resolve_registry(source: RegistrySource) -> admission.Registry:
 
 
 def _strict_payload(body: bytes) -> dict[str, Any]:
+    if len(body) > core.WORKFLOW_READBACK_MAX_BYTES:
+        raise ServiceError("GitHub webhook payload is oversized")
     try:
         value = json.loads(body.decode("utf-8"), object_pairs_hook=unique_object)
     except (UnicodeError, RecursionError, ValueError) as exc:
