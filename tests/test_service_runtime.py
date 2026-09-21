@@ -2697,6 +2697,25 @@ class AdmissionIngressTests(unittest.TestCase):
             {"review_conductor": "broken", "legacy_xapi": "broken"},
         )
 
+        enrolled = self._load_route_registry()
+        core_config = self.fx.core_config()
+        malformed_core_configs = []
+        for invalid_policy in (None, [], "invalid"):
+            candidate = copy.deepcopy(core_config)
+            candidate["review_policy"] = invalid_policy
+            malformed_core_configs.append(candidate)
+        missing_reviewers = copy.deepcopy(core_config)
+        del missing_reviewers["review_policy"]["reviewers"]
+        malformed_core_configs.append(missing_reviewers)
+        for candidate in malformed_core_configs:
+            with self.subTest(core_config=candidate):
+                self.assertEqual(
+                    service.trusted_enrollment_from_registry(
+                        self.fx.app_config(), enrolled, core_config=candidate
+                    ),
+                    {"review_conductor": "broken", "legacy_xapi": "broken"},
+                )
+
     def test_complete_event_identity_prevents_retired_keys_from_suppressing_current(self):
         legacy.test_complete_event_identity_prevents_retired_keys_from_suppressing_current()
 

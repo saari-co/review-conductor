@@ -974,18 +974,21 @@ def trusted_enrollment_from_registry(
     if core_config is None and config.get("core_config"):
         try:
             core_config = core.load_config(Path(config["core_config"]))
-        except (OSError, core.ContractError):
+        except (OSError, TypeError, ValueError, core.ContractError):
             return dict(broken)
-    if isinstance(core_config, dict):
-        if (
-            core_config.get("repository") != enrolled.repository
-            or core_config.get("repository_id") != enrolled.repository_id
-        ):
-            return dict(broken)
-        review_policy = core_config.get("review_policy")
-        if isinstance(review_policy, dict) and "reviewers" in review_policy:
-            if review_policy.get("reviewers") != enrolled.reviewers:
-                return dict(broken)
+    if not isinstance(core_config, dict):
+        return dict(broken)
+    if (
+        core_config.get("repository") != enrolled.repository
+        or core_config.get("repository_id") != enrolled.repository_id
+    ):
+        return dict(broken)
+    review_policy = core_config.get("review_policy")
+    if not isinstance(review_policy, dict):
+        return dict(broken)
+    reviewers = review_policy.get("reviewers")
+    if not isinstance(reviewers, dict) or reviewers != enrolled.reviewers:
+        return dict(broken)
     return {"review_conductor": "present", "legacy_xapi": legacy}
 
 
