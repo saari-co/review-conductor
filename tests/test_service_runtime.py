@@ -1323,6 +1323,49 @@ class AdmissionIngressTests(unittest.TestCase):
 
         def fake_tick(config, tick_client, notifier, *, dry_run):
             self.fx.ingest("superseding-notification", newer, registry=registry)
+            connection = core.open_database(self.fx.state, REPOSITORY)
+            try:
+                current_head = connection.execute(
+                    "SELECT * FROM heads WHERE repository=? AND is_current=1",
+                    (REPOSITORY,),
+                ).fetchone()
+                current_payload = {
+                    "schema": userland.NOTIFICATION_SCHEMA,
+                    "event_key": "current-review",
+                    "repository": current_head["repository"],
+                    "pr_number": current_head["pr_number"],
+                    "base_sha": current_head["base_sha"],
+                    "head_sha": current_head["head_sha"],
+                    "review_epoch": current_head["review_epoch"],
+                    "state": current_head["state"],
+                    "repair_cycle": current_head["repair_cycle"],
+                    "message": "current review result",
+                    "merge_authorized": False,
+                }
+                connection.execute(
+                    """
+                    INSERT INTO notification_deliveries(
+                      event_key, channel, repository, pr_number, base_sha, head_sha,
+                      review_epoch, state, payload_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        current_payload["event_key"],
+                        "discord",
+                        current_payload["repository"],
+                        current_payload["pr_number"],
+                        current_payload["base_sha"],
+                        current_payload["head_sha"],
+                        current_payload["review_epoch"],
+                        current_payload["state"],
+                        core.canonical_json(current_payload),
+                        core.utc_now(),
+                        core.utc_now(),
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
             return userland.deliver_notifications(
                 config,
                 notifier,
@@ -1332,19 +1375,131 @@ class AdmissionIngressTests(unittest.TestCase):
 
         with patch.object(userland, "run_tick", fake_tick), patch.object(
             userland, "queue_notifications", lambda _config: 0
-        ):
+        ), patch.object(client, "assert_authority", wraps=client.assert_authority) as fence:
+            result = service.run_service_tick(
+                self.fx.app_config(), registry, client, Notifier(), dry_run=False
+            )
+        self.assertEqual([channel for channel, _message in sent], ["discord"])
+        self.assertEqual(
+            {item["event_key"]: item["result"] for item in result["deliveries"]},
+            {"stale-review": "obsolete", "current-review": "sent"},
+        )
+        self.assertEqual(
+            {call.args[0] for call in fence.call_args_list},
+            {
+                "notification:stale-review:discord",
+                "notification:current-review:discord",
+            },
+        )
+        connection = core.open_database(self.fx.state, REPOSITORY)
+        try:
+            self.assertEqual(
+                tuple(
+                    connection.execute(
+                        "SELECT status, attempts, last_error FROM notification_deliveries WHERE event_key='stale-review'"
+                    ).fetchone()
+                ),
+                ("obsolete", 1, "superseded before delivery"),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT status FROM notification_deliveries WHERE event_key='current-review'"
+                ).fetchone()[0],
+                "sent",
+            )
+        finally:
+            connection.close()
+
+    def test_current_review_notification_authority_denial_stays_pending(self):
+        self.fx.ingest("current-notification", self.fx.payload())
+        connection = core.open_database(self.fx.state, REPOSITORY)
+        try:
+            userland.ensure_userland_tables(connection)
+            current_head = connection.execute(
+                "SELECT * FROM heads WHERE repository=? AND is_current=1",
+                (REPOSITORY,),
+            ).fetchone()
+            payload = {
+                "schema": userland.NOTIFICATION_SCHEMA,
+                "event_key": "current-denied",
+                "repository": current_head["repository"],
+                "pr_number": current_head["pr_number"],
+                "base_sha": current_head["base_sha"],
+                "head_sha": current_head["head_sha"],
+                "review_epoch": current_head["review_epoch"],
+                "state": current_head["state"],
+                "repair_cycle": current_head["repair_cycle"],
+                "message": "current review result",
+                "merge_authorized": False,
+            }
+            connection.execute(
+                """
+                INSERT INTO notification_deliveries(
+                  event_key, channel, repository, pr_number, base_sha, head_sha,
+                  review_epoch, state, payload_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payload["event_key"],
+                    "discord",
+                    payload["repository"],
+                    payload["pr_number"],
+                    payload["base_sha"],
+                    payload["head_sha"],
+                    payload["review_epoch"],
+                    payload["state"],
+                    core.canonical_json(payload),
+                    core.utc_now(),
+                    core.utc_now(),
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        calls = []
+
+        class RevokedClient:
+            def set_authority_guard(self, _guard):
+                pass
+
+            def assert_authority(self, operation, authority):
+                calls.append((operation, authority))
+                raise service.ServiceError("current binding revoked")
+
+        sent = []
+
+        class Notifier:
+            def send(self, channel, message):
+                sent.append((channel, message))
+
+        with patch.object(userland, "queue_notifications", lambda _config: 0):
             with self.assertRaises(core.AuthorityDenied):
-                service.run_service_tick(
-                    self.fx.app_config(), registry, client, Notifier(), dry_run=False
+                userland.deliver_notifications(
+                    self.fx.app_config(),
+                    Notifier(),
+                    dry_run=False,
+                    authority_client=RevokedClient(),
                 )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "notification:current-denied:discord")
+        self.assertEqual(calls[0][1], {
+            "repository": REPOSITORY,
+            "pr_number": 7,
+            "base_sha": BASE,
+            "head_sha": HEAD,
+            "review_epoch": 0,
+        })
         self.assertEqual(sent, [])
         connection = core.open_database(self.fx.state, REPOSITORY)
         try:
             self.assertEqual(
-                connection.execute(
-                    "SELECT status FROM notification_deliveries WHERE event_key='stale-review'"
-                ).fetchone()[0],
-                "pending",
+                tuple(
+                    connection.execute(
+                        "SELECT status, attempts FROM notification_deliveries WHERE event_key='current-denied'"
+                    ).fetchone()
+                ),
+                ("pending", 0),
             )
         finally:
             connection.close()
