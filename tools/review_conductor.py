@@ -633,59 +633,64 @@ def open_database(state_root: Path, repository: str | None = None) -> sqlite3.Co
     if connection.execute(
         "SELECT 1 FROM ci_run_identity_migrations WHERE singleton = 1"
     ).fetchone() is None:
-        for event_row in connection.execute(
-            """
-            SELECT repository, pr_number, base_sha, head_sha, stale, payload_json
-            FROM events
-            WHERE kind = 'ci.completed'
-            """
-        ):
-            try:
-                payload = json.loads(event_row["payload_json"])
-            except (TypeError, ValueError, RecursionError):
-                continue
-            if not isinstance(payload, dict):
-                continue
-            workflow_run = payload.get("workflow_run")
-            if not isinstance(workflow_run, dict):
-                continue
-            try:
-                workflow_run_id = str(require_positive_int(workflow_run.get("id"), "workflow_run id"))
-                source_created_at = require_github_timestamp(
-                    workflow_run.get("created_at"), "workflow_run created_at"
-                )
-                conclusion = require_text(
-                    workflow_run.get("conclusion"), "workflow_run conclusion", 50
-                )
-            except ContractError:
-                continue
-            identity = (
-                event_row["repository"], workflow_run_id, event_row["pr_number"],
-                event_row["base_sha"], event_row["head_sha"], conclusion, source_created_at,
-            )
-            prior = connection.execute(
+        try:
+            for event_row in connection.execute(
                 """
-                SELECT pr_number, base_sha, head_sha, conclusion, source_created_at
-                FROM ci_run_identities
-                WHERE repository = ? AND workflow_run_id = ?
-                """,
-                identity[:2],
-            ).fetchone()
-            if prior is not None and tuple(prior) != identity[2:]:
-                raise ContractError("legacy CI workflow_run identities conflict")
+                SELECT repository, pr_number, base_sha, head_sha, stale, payload_json
+                FROM events
+                WHERE kind = 'ci.completed'
+                """
+            ):
+                try:
+                    payload = json.loads(event_row["payload_json"])
+                except (TypeError, ValueError, RecursionError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                workflow_run = payload.get("workflow_run")
+                if not isinstance(workflow_run, dict):
+                    continue
+                try:
+                    workflow_run_id = str(require_positive_int(workflow_run.get("id"), "workflow_run id"))
+                    source_created_at = require_github_timestamp(
+                        workflow_run.get("created_at"), "workflow_run created_at"
+                    )
+                    conclusion = require_text(
+                        workflow_run.get("conclusion"), "workflow_run conclusion", 50
+                    )
+                except ContractError:
+                    continue
+                identity = (
+                    event_row["repository"], workflow_run_id, event_row["pr_number"],
+                    event_row["base_sha"], event_row["head_sha"], conclusion, source_created_at,
+                )
+                prior = connection.execute(
+                    """
+                    SELECT pr_number, base_sha, head_sha, conclusion, source_created_at
+                    FROM ci_run_identities
+                    WHERE repository = ? AND workflow_run_id = ?
+                    """,
+                    identity[:2],
+                ).fetchone()
+                if prior is not None and tuple(prior) != identity[2:]:
+                    raise ContractError("legacy CI workflow_run identities conflict")
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO ci_run_identities(
+                      repository, workflow_run_id, pr_number, base_sha, head_sha,
+                      conclusion, source_created_at, disposition
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (*identity, "stale" if event_row["stale"] else "legacy_event"),
+                )
             connection.execute(
-                """
-                INSERT OR IGNORE INTO ci_run_identities(
-                  repository, workflow_run_id, pr_number, base_sha, head_sha,
-                  conclusion, source_created_at, disposition
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (*identity, "stale" if event_row["stale"] else "legacy_event"),
+                "INSERT OR IGNORE INTO ci_run_identity_migrations(singleton, backfilled_at) VALUES (1, ?)",
+                (utc_now(),),
             )
-        connection.execute(
-            "INSERT OR IGNORE INTO ci_run_identity_migrations(singleton, backfilled_at) VALUES (1, ?)",
-            (utc_now(),),
-        )
+        except Exception:
+            connection.rollback()
+            connection.close()
+            raise
     connection.commit()
     return connection
 
