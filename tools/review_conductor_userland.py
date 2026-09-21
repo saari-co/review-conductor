@@ -2215,6 +2215,7 @@ def pending_review_notification_still_eligible(
     connection: sqlite3.Connection,
     row: sqlite3.Row,
     trusted_enrollment: Mapping[str, str],
+    payload: Mapping[str, Any] | None = None,
 ) -> bool:
     """Return whether a pending review-result row may still be claimed.
 
@@ -2264,7 +2265,8 @@ def pending_review_notification_still_eligible(
         return False
     if current_notification_event_key(connection, head, decision) != row["event_key"]:
         return False
-    payload = json.loads(row["payload_json"])
+    if payload is None:
+        payload = json.loads(row["payload_json"])
     return pending_decision_matches_current(
         payload.get("orchestration_outcome"), decision
     )
@@ -2274,6 +2276,7 @@ def claimed_notification_still_current(
     connection: sqlite3.Connection,
     row: sqlite3.Row,
     trusted_enrollment: Mapping[str, str],
+    payload: Mapping[str, Any] | None = None,
 ) -> bool:
     """Revalidate a claimed row against the current state and complete decision.
 
@@ -2287,7 +2290,7 @@ def claimed_notification_still_current(
     cannot change that route between this check and transport.
     """
     return pending_review_notification_still_eligible(
-        connection, row, trusted_enrollment
+        connection, row, trusted_enrollment, payload
     )
 
 
@@ -2510,7 +2513,7 @@ def deliver_notifications(
         for row in rows:
             payload = json.loads(row["payload_json"])
             if not pending_review_notification_still_eligible(
-                connection, row, live_trusted_enrollment()
+                connection, row, live_trusted_enrollment(), payload
             ):
                 if dry_run:
                     outcomes.append(
@@ -2611,7 +2614,7 @@ def deliver_notifications(
             # Bind the claim/send fence to the expected current state and
             # complete canonical decision immediately before transport.
             if not claimed_notification_still_current(
-                connection, row, live_trusted_enrollment()
+                connection, row, live_trusted_enrollment(), payload
             ):
                 if retire_notification(
                     connection, row, required_status="uncertain"
@@ -2637,7 +2640,7 @@ def deliver_notifications(
             connection.execute("BEGIN IMMEDIATE")
             with hold_registry_send_lease(registry_lease):
                 if not claimed_notification_still_current(
-                    connection, row, live_trusted_enrollment()
+                    connection, row, live_trusted_enrollment(), payload
                 ):
                     if retire_notification(
                         connection, row, required_status="uncertain"

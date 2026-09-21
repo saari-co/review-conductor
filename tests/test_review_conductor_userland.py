@@ -1564,8 +1564,8 @@ def test_webhook_state_change_after_final_predicate_retires_stale_notification()
         original = userland.claimed_notification_still_current
         seen = {"count": 0}
 
-        def after_predicate(connection, row, trusted_enrollment):
-            still = original(connection, row, trusted_enrollment)
+        def after_predicate(connection, row, trusted_enrollment, payload=None):
+            still = original(connection, row, trusted_enrollment, payload)
             seen["count"] += 1
             if still and seen["count"] == 1:
                 set_head(
@@ -1712,8 +1712,8 @@ def test_enrollment_route_change_at_reserved_send_retires_stale_notification() -
         original = userland.claimed_notification_still_current
         seen = {"count": 0}
 
-        def after_predicate(connection, row, trusted_enrollment):
-            still = original(connection, row, trusted_enrollment)
+        def after_predicate(connection, row, trusted_enrollment, payload=None):
+            still = original(connection, row, trusted_enrollment, payload)
             seen["count"] += 1
             if still and seen["count"] == 1:
                 set_trusted_enrollment(config, "broken", "absent")

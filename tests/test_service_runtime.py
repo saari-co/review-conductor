@@ -1336,8 +1336,8 @@ class AdmissionIngressTests(unittest.TestCase):
         original = userland.claimed_notification_still_current
         seen = {"count": 0}
 
-        def after_predicate(connection, row, trusted_enrollment):
-            still = original(connection, row, trusted_enrollment)
+        def after_predicate(connection, row, trusted_enrollment, payload=None):
+            still = original(connection, row, trusted_enrollment, payload)
             seen["count"] += 1
             if still and seen["count"] == 1:
                 state["registry"] = conductor
@@ -3264,8 +3264,8 @@ class AdmissionIngressTests(unittest.TestCase):
             original = userland.claimed_notification_still_current
             seen = {"count": 0}
 
-            def after_predicate(connection, row, trusted_enrollment):
-                still = original(connection, row, trusted_enrollment)
+            def after_predicate(connection, row, trusted_enrollment, payload=None):
+                still = original(connection, row, trusted_enrollment, payload)
                 seen["count"] += 1
                 if still and seen["count"] == 1:
                     legacy.set_head(
@@ -3355,8 +3355,8 @@ class AdmissionIngressTests(unittest.TestCase):
             thread_holder = {"thread": None}
             sent = []
 
-            def count_reserved(connection, row, trusted_enrollment):
-                still = original(connection, row, trusted_enrollment)
+            def count_reserved(connection, row, trusted_enrollment, payload=None):
+                still = original(connection, row, trusted_enrollment, payload)
                 reserved_checks["count"] += 1
                 return still
 
@@ -4841,8 +4841,8 @@ MUTANTS = [
     (
         "skip pending notification revalidation before send",
         "tools/review_conductor_userland.py",
-        "            if not pending_review_notification_still_eligible(\n                connection, row, live_trusted_enrollment()\n            ):\n",
-        "            if False and not pending_review_notification_still_eligible(\n                connection, row, live_trusted_enrollment()\n            ):\n",
+        "            if not pending_review_notification_still_eligible(\n                connection, row, live_trusted_enrollment(), payload\n            ):\n",
+        "            if False and not pending_review_notification_still_eligible(\n                connection, row, live_trusted_enrollment(), payload\n            ):\n",
         "AdmissionIngressTests.test_superseded_review_notification_cannot_use_the_new_heads_binding",
     ),
     (
@@ -5177,8 +5177,8 @@ MUTANTS = [
     (
         "skip the claim/send notification fence",
         "tools/review_conductor_userland.py",
-        "            # Bind the claim/send fence to the expected current state and\n            # complete canonical decision immediately before transport.\n            if not claimed_notification_still_current(\n                connection, row, live_trusted_enrollment()\n            ):\n                if retire_notification(\n                    connection, row, required_status=\"uncertain\"\n                ):\n                    connection.commit()\n                    outcomes.append(\n                        {\n                            \"event_key\": row[\"event_key\"],\n                            \"channel\": row[\"channel\"],\n                            \"result\": \"retired\",\n                        }\n                    )\n                else:\n                    connection.rollback()\n                continue\n            # The uncertain claim is already committed. Reserve writes across\n            # the last current-decision check and transport so a webhook\n            # cannot commit a new state in that gap. A transition visible\n            # after the unlocked predicate retires under this reservation.\n            # Hold the cooperating registry/route lease through send so a\n            # supported replacement cannot change the route in that window.\n            connection.commit()\n            connection.execute(\"BEGIN IMMEDIATE\")\n            with hold_registry_send_lease(registry_lease):\n                if not claimed_notification_still_current(\n                    connection, row, live_trusted_enrollment()\n                ):\n",
-        "            if False and not claimed_notification_still_current(\n                connection, row, live_trusted_enrollment()\n            ):\n                if retire_notification(\n                    connection, row, required_status=\"uncertain\"\n                ):\n                    connection.commit()\n                    outcomes.append(\n                        {\n                            \"event_key\": row[\"event_key\"],\n                            \"channel\": row[\"channel\"],\n                            \"result\": \"retired\",\n                        }\n                    )\n                else:\n                    connection.rollback()\n                continue\n            connection.commit()\n            connection.execute(\"BEGIN IMMEDIATE\")\n            with hold_registry_send_lease(registry_lease):\n                if False and not claimed_notification_still_current(\n                    connection, row, live_trusted_enrollment()\n                ):\n",
+        "            # Bind the claim/send fence to the expected current state and\n            # complete canonical decision immediately before transport.\n            if not claimed_notification_still_current(\n                connection, row, live_trusted_enrollment(), payload\n            ):\n                if retire_notification(\n                    connection, row, required_status=\"uncertain\"\n                ):\n                    connection.commit()\n                    outcomes.append(\n                        {\n                            \"event_key\": row[\"event_key\"],\n                            \"channel\": row[\"channel\"],\n                            \"result\": \"retired\",\n                        }\n                    )\n                else:\n                    connection.rollback()\n                continue\n            # The uncertain claim is already committed. Reserve writes across\n            # the last current-decision check and transport so a webhook\n            # cannot commit a new state in that gap. A transition visible\n            # after the unlocked predicate retires under this reservation.\n            # Hold the cooperating registry/route lease through send so a\n            # supported replacement cannot change the route in that window.\n            connection.commit()\n            connection.execute(\"BEGIN IMMEDIATE\")\n            with hold_registry_send_lease(registry_lease):\n                if not claimed_notification_still_current(\n                    connection, row, live_trusted_enrollment(), payload\n                ):\n",
+        "            if False and not claimed_notification_still_current(\n                connection, row, live_trusted_enrollment(), payload\n            ):\n                if retire_notification(\n                    connection, row, required_status=\"uncertain\"\n                ):\n                    connection.commit()\n                    outcomes.append(\n                        {\n                            \"event_key\": row[\"event_key\"],\n                            \"channel\": row[\"channel\"],\n                            \"result\": \"retired\",\n                        }\n                    )\n                else:\n                    connection.rollback()\n                continue\n            connection.commit()\n            connection.execute(\"BEGIN IMMEDIATE\")\n            with hold_registry_send_lease(registry_lease):\n                if False and not claimed_notification_still_current(\n                    connection, row, live_trusted_enrollment(), payload\n                ):\n",
         "AdmissionIngressTests.test_webhook_state_change_between_eligibility_and_send_retires_stale_notification",
     ),
     (
@@ -5191,22 +5191,22 @@ MUTANTS = [
     (
         "skip the reserved claim/send revalidation",
         "tools/review_conductor_userland.py",
-        "            connection.commit()\n            connection.execute(\"BEGIN IMMEDIATE\")\n            with hold_registry_send_lease(registry_lease):\n                if not claimed_notification_still_current(\n                    connection, row, live_trusted_enrollment()\n                ):\n",
-        "            connection.commit()\n            connection.execute(\"BEGIN IMMEDIATE\")\n            with hold_registry_send_lease(registry_lease):\n                if False and not claimed_notification_still_current(\n                    connection, row, live_trusted_enrollment()\n                ):\n",
+        "            connection.commit()\n            connection.execute(\"BEGIN IMMEDIATE\")\n            with hold_registry_send_lease(registry_lease):\n                if not claimed_notification_still_current(\n                    connection, row, live_trusted_enrollment(), payload\n                ):\n",
+        "            connection.commit()\n            connection.execute(\"BEGIN IMMEDIATE\")\n            with hold_registry_send_lease(registry_lease):\n                if False and not claimed_notification_still_current(\n                    connection, row, live_trusted_enrollment(), payload\n                ):\n",
         "AdmissionIngressTests.test_webhook_state_change_after_final_predicate_retires_stale_notification",
     ),
     (
         "weaken the reserved claim/send write reservation",
         "tools/review_conductor_userland.py",
-        "            connection.commit()\n            connection.execute(\"BEGIN IMMEDIATE\")\n            with hold_registry_send_lease(registry_lease):\n                if not claimed_notification_still_current(\n                    connection, row, live_trusted_enrollment()\n                ):\n",
-        "            connection.commit()\n            connection.execute(\"BEGIN\")\n            with hold_registry_send_lease(registry_lease):\n                if not claimed_notification_still_current(\n                    connection, row, live_trusted_enrollment()\n                ):\n",
+        "            connection.commit()\n            connection.execute(\"BEGIN IMMEDIATE\")\n            with hold_registry_send_lease(registry_lease):\n                if not claimed_notification_still_current(\n                    connection, row, live_trusted_enrollment(), payload\n                ):\n",
+        "            connection.commit()\n            connection.execute(\"BEGIN\")\n            with hold_registry_send_lease(registry_lease):\n                if not claimed_notification_still_current(\n                    connection, row, live_trusted_enrollment(), payload\n                ):\n",
         "AdmissionIngressTests.test_reserved_send_blocks_competing_state_write_until_reservation_releases",
     ),
     (
         "reuse the admission snapshot at the reserved claim/send boundary",
         "tools/review_conductor_userland.py",
-        "            connection.commit()\n            connection.execute(\"BEGIN IMMEDIATE\")\n            with hold_registry_send_lease(registry_lease):\n                if not claimed_notification_still_current(\n                    connection, row, live_trusted_enrollment()\n                ):\n",
-        "            connection.commit()\n            connection.execute(\"BEGIN IMMEDIATE\")\n            with hold_registry_send_lease(registry_lease):\n                if not claimed_notification_still_current(\n                    connection, row, trusted_enrollment\n                ):\n",
+        "            connection.commit()\n            connection.execute(\"BEGIN IMMEDIATE\")\n            with hold_registry_send_lease(registry_lease):\n                if not claimed_notification_still_current(\n                    connection, row, live_trusted_enrollment(), payload\n                ):\n",
+        "            connection.commit()\n            connection.execute(\"BEGIN IMMEDIATE\")\n            with hold_registry_send_lease(registry_lease):\n                if not claimed_notification_still_current(\n                    connection, row, trusted_enrollment, payload\n                ):\n",
         "AdmissionIngressTests.test_registry_route_change_at_reserved_send_retires_stale_notification",
     ),
     (

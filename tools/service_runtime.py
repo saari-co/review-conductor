@@ -183,7 +183,9 @@ RegistrySource = Union[admission.Registry, Callable[[], admission.Registry], Reg
 
 def _resolve_registry_source(source: RegistrySource) -> admission.Registry:
     if isinstance(source, RegistryRouteLease):
-        raise ServiceError("registry route lease cannot wrap another lease")
+        raise ServiceError(
+            "registry route lease must be resolved through resolve_registry"
+        )
     if isinstance(source, admission.Registry):
         return source
     if not callable(source):
