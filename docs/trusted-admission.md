@@ -215,10 +215,13 @@ repository/PR/base/head/review-epoch tuple that owns the side effect, using a
 fresh read-only view of the engine database. A newer valid binding cannot clear
 superseded work selected for an older tuple. Superseded-check cleanup and
 unbound operator alerts remain repository-level maintenance and still require
-all live tuples to be bound. A denial
-before transport is a distinct recoverable outcome: the claim is released and
-left pending, rather than being terminalized as a failed or uncertain external
-side effect.
+all live tuples to be bound. A denial before transport is recoverable for a
+current review-bound notification or an unbound operator alert: the claim is
+released and left pending, rather than being terminalized as a failed or
+uncertain external side effect. If a review-bound notification's exact tuple
+is no longer current, including a closed or merged head, the denial instead
+durably marks that notification obsolete with an audit reason and continues
+the worker without transport.
 
 That source is inactive until an external
 service registry (mode exactly 0600, single link, non-writable same-user parent,

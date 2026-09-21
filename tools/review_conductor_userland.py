@@ -2163,6 +2163,24 @@ class OpenClawNotifier:
             raise UserlandError("OpenClaw notification receipt is empty")
 
 
+def _notification_tuple_is_stale(
+    connection: sqlite3.Connection, row: sqlite3.Row
+) -> bool:
+    """Return whether a bound notification no longer names a live review tuple."""
+    head = core.exact_current_head(
+        connection,
+        row["repository"],
+        int(row["pr_number"]),
+        row["base_sha"],
+        row["head_sha"],
+    )
+    return (
+        head is None
+        or int(head["review_epoch"]) != int(row["review_epoch"])
+        or head["state"] in {"closed", "closed_merged"}
+    )
+
+
 def deliver_notifications(
     config: dict[str, Any],
     notifier: OpenClawNotifier | Any,
@@ -2218,6 +2236,33 @@ def deliver_notifications(
                     authority,
                 )
             except core.AuthorityDenied as exc:
+                if authority is not None and _notification_tuple_is_stale(connection, row):
+                    obsoleted = connection.execute(
+                        """
+                        UPDATE notification_deliveries
+                        SET status = 'obsolete', last_error = ?, updated_at = ?
+                        WHERE event_key = ? AND channel = ? AND status = 'uncertain'
+                        """,
+                        (
+                            "superseded before delivery",
+                            core.utc_now(),
+                            row["event_key"],
+                            row["channel"],
+                        ),
+                    )
+                    connection.commit()
+                    if obsoleted.rowcount != 1:
+                        raise UserlandError(
+                            "notification obsolescence changed during recovery"
+                        ) from exc
+                    outcomes.append(
+                        {
+                            "event_key": row["event_key"],
+                            "channel": row["channel"],
+                            "result": "obsolete",
+                        }
+                    )
+                    continue
                 restored = connection.execute(
                     """
                     UPDATE notification_deliveries
