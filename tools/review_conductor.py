@@ -2086,9 +2086,11 @@ def reconcile_workflow_run(
     """Admit one authoritative read-back of a completed CI workflow run.
 
     This is an operator recovery boundary for a missing or unobservable
-    webhook delivery.  It never polls, reruns CI, dispatches either review
-    rail, or trusts a caller-provided tuple: the GitHub payload is parsed and
-    the supplied identity is compared to the parsed exact values.
+    webhook delivery.  It never polls or reruns CI, and queues any normal
+    follow-on review action for the durable dispatcher rather than invoking a
+    review rail inline.  It also never trusts a caller-provided tuple: the
+    GitHub payload is parsed and the supplied identity is compared to the
+    parsed exact values.
     """
     config = load_config(config_path)
     require_enabled(config)
@@ -3402,7 +3404,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     reconcile = sub.add_parser(
         "reconcile-workflow-run",
-        help="admit one exact completed CI workflow_run read-back without dispatching reviews",
+        help="admit one exact completed CI workflow_run read-back and queue follow-on review work",
     )
     reconcile.add_argument("--config", type=Path, required=True)
     reconcile.add_argument("--state-root", type=Path, required=True)
