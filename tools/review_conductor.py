@@ -582,7 +582,23 @@ def open_database(state_root: Path, repository: str | None = None) -> sqlite3.Co
         FROM actions
         """
     ).fetchall():
-        payload = json.loads(action["payload_json"])
+        try:
+            payload = json.loads(action["payload_json"])
+        except (TypeError, ValueError, RecursionError):
+            payload = None
+        if not isinstance(payload, dict):
+            if action["status"] in {"pending", "failed", "dispatching"}:
+                connection.execute(
+                    """
+                    UPDATE actions
+                    SET status = 'obsolete',
+                        last_error = 'legacy action payload is invalid JSON',
+                        updated_at = ?
+                    WHERE action_id = ? AND status IN ('pending', 'failed', 'dispatching')
+                    """,
+                    (utc_now(), action["action_id"]),
+                )
+            continue
         if "review_epoch" not in payload:
             payload["review_epoch"] = int(action["review_epoch"])
             connection.execute(
@@ -624,7 +640,12 @@ def open_database(state_root: Path, repository: str | None = None) -> sqlite3.Co
             WHERE kind = 'ci.completed'
             """
         ):
-            payload = json.loads(event_row["payload_json"])
+            try:
+                payload = json.loads(event_row["payload_json"])
+            except (TypeError, ValueError, RecursionError):
+                continue
+            if not isinstance(payload, dict):
+                continue
             workflow_run = payload.get("workflow_run")
             if not isinstance(workflow_run, dict):
                 continue
