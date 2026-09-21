@@ -578,8 +578,6 @@ def _consistent_state_rail_results(
             "clean",
             "effectively_clean",
             "findings",
-            "human_gate",
-            "failed",
         }
     if state in SILENT_INTERNAL_STATES | {"waiting_human"}:
         expected = "human_gate" if state == "waiting_human" else "findings"

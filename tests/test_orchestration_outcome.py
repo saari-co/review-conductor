@@ -581,6 +581,25 @@ class FailClosedTests(unittest.TestCase):
                 self.assertEqual(
                     ready["reason"], "inconsistent_state_rail_result_fail_closed"
                 )
+        for clawsweeper_result in ("human_gate", "failed"):
+            with self.subTest(clawsweeper_result=clawsweeper_result):
+                ready_with_blocker = notify(
+                    enrolled(
+                        state="ready_for_human_merge",
+                        rail="clawsweeper",
+                        openclaw_result="clean",
+                        clawsweeper_result=clawsweeper_result,
+                        ready_qualified=True,
+                    )
+                )
+                self.assertEqual(ready_with_blocker["route"], "fail_closed")
+                self.assertFalse(ready_with_blocker["review_dispatch"])
+                self.assertFalse(ready_with_blocker["merge_ready_eligible"])
+                self.assertEqual(ready_with_blocker["notification"]["eligibility"], "blocked")
+                self.assertEqual(
+                    ready_with_blocker["reason"],
+                    "inconsistent_state_rail_result_fail_closed",
+                )
         gated_missing_rail = notify(
             enrolled(
                 state="waiting_human",
