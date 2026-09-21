@@ -1504,6 +1504,102 @@ class AdmissionIngressTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def test_closed_review_notification_is_obsoleted_without_transport(self):
+        self.fx.ingest("closed-notification", self.fx.payload())
+        connection = core.open_database(self.fx.state, REPOSITORY)
+        try:
+            userland.ensure_userland_tables(connection)
+            current_head = connection.execute(
+                "SELECT * FROM heads WHERE repository=? AND is_current=1",
+                (REPOSITORY,),
+            ).fetchone()
+            payload = {
+                "schema": userland.NOTIFICATION_SCHEMA,
+                "event_key": "closed-review",
+                "repository": current_head["repository"],
+                "pr_number": current_head["pr_number"],
+                "base_sha": current_head["base_sha"],
+                "head_sha": current_head["head_sha"],
+                "review_epoch": current_head["review_epoch"],
+                "state": current_head["state"],
+                "repair_cycle": current_head["repair_cycle"],
+                "message": "closed review result",
+                "merge_authorized": False,
+            }
+            connection.execute(
+                """
+                INSERT INTO notification_deliveries(
+                  event_key, channel, repository, pr_number, base_sha, head_sha,
+                  review_epoch, state, payload_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payload["event_key"],
+                    "discord",
+                    payload["repository"],
+                    payload["pr_number"],
+                    payload["base_sha"],
+                    payload["head_sha"],
+                    payload["review_epoch"],
+                    payload["state"],
+                    core.canonical_json(payload),
+                    core.utc_now(),
+                    core.utc_now(),
+                ),
+            )
+            connection.execute(
+                "UPDATE heads SET state='closed', updated_at=? WHERE repository=? AND is_current=1",
+                (core.utc_now(), REPOSITORY),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        calls = []
+
+        class ClosedClient:
+            def set_authority_guard(self, _guard):
+                pass
+
+            def assert_authority(self, operation, authority):
+                calls.append((operation, authority))
+                raise service.ServiceError("closed review tuple")
+
+        sent = []
+
+        class Notifier:
+            def send(self, channel, message):
+                sent.append((channel, message))
+
+        with patch.object(userland, "queue_notifications", lambda _config: 0):
+            result = userland.deliver_notifications(
+                self.fx.app_config(),
+                Notifier(),
+                dry_run=False,
+                authority_client=ClosedClient(),
+            )
+        self.assertEqual(result["deliveries"], [
+            {
+                "event_key": "closed-review",
+                "channel": "discord",
+                "result": "obsolete",
+            }
+        ])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(sent, [])
+        connection = core.open_database(self.fx.state, REPOSITORY)
+        try:
+            self.assertEqual(
+                tuple(
+                    connection.execute(
+                        "SELECT status, attempts, last_error FROM notification_deliveries WHERE event_key='closed-review'"
+                    ).fetchone()
+                ),
+                ("obsolete", 1, "superseded before delivery"),
+            )
+        finally:
+            connection.close()
+
     # --- Invariant 1: enrollment/profile identity -------------------------------
 
     def _load_route_registry(self, *, enroll=True, legacy=None, app_id=APP_ID):
