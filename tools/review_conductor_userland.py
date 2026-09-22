@@ -19,7 +19,7 @@ import tempfile
 import threading
 import zipfile
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 
 TOOLS = Path(__file__).resolve().parent
@@ -30,11 +30,14 @@ import review_conductor as core  # noqa: E402
 import review_conductor_runtime as runtime  # noqa: E402
 import review_conductor_profiles as profiles  # noqa: E402
 import review_result_projection as projection  # noqa: E402
+import orchestration_outcome as orchestration  # noqa: E402
 
 
 USERLAND_SCHEMA = "smoky.review-conductor.userland.v1"
 NOTIFICATION_SCHEMA = "smoky.review-conductor.notification.v1"
 DEFAULT_CONFIG = ROOT / "contracts/review-conductor/dinkuskit-blocks-userland.json"
+# Engine terminal states. Notification eligibility is decided by
+# orchestration_outcome, not by membership in this set.
 TERMINAL_STATES = {
     "ci_failed",
     "awaiting_adjudication",
@@ -1415,31 +1418,47 @@ def collect_clawsweeper_terminals(
     return outcomes
 
 
-def notification_message(row: sqlite3.Row, quality: sqlite3.Row | None) -> str:
+CONCISE_BLOCKED_REASONS = {
+    "unknown_state_fail_closed": "unknown state",
+    "unknown_rail_result_fail_closed": "unknown rail result",
+    "inconsistent_state_rail_result_fail_closed": "inconsistent state rail result",
+    "unknown_outcome_fail_closed": "unknown orchestration state",
+    "ambiguous_or_broken_enrollment": "ambiguous or broken enrollment",
+    "human_action_required": "human gate",
+    "ci_failed": "CI failed",
+    "openclaw_failed": "OpenClaw failed",
+    "clawsweeper_failed": "ClawSweeper failed",
+    "waiting_human": "human gate",
+}
+
+
+def notification_message(
+    row: sqlite3.Row,
+    quality: sqlite3.Row | None,
+    decision: dict[str, Any] | None = None,
+) -> str:
+    repo_pr = f"{row['repository']}#{row['pr_number']}"
     url = f"https://github.com/{row['repository']}/pull/{row['pr_number']}"
-    short = row["head_sha"][:12]
-    if row["state"] == "ready_for_human_merge":
-        return (
-            f"Review Conductor: {row['repository']}#{row['pr_number']} is ready for Bobby's merge decision at {short}. "
-            f"CI, Spark-2 OpenClaw, and ClawSweeper are exact-head clean; overall tier {quality['overall_tier']}, "
-            f"proof {quality['proof_status']}. No merge was attempted. {url}"
+    eligibility = None if decision is None else decision["notification"]["eligibility"]
+    if eligibility == "merge_ready" or (
+        eligibility is None and row["state"] == "ready_for_human_merge"
+    ):
+        return f"{repo_pr} ready to merge {url}"
+    if decision is not None and decision.get("route") == "fail_closed":
+        reason = CONCISE_BLOCKED_REASONS.get(
+            decision["reason"], decision["reason"].replace("_", " ")
         )
-    if row["state"] == "repair_required":
-        return (
-            f"Review Conductor: {row['repository']}#{row['pr_number']} needs repair cycle "
-            f"{int(row['repair_cycle']) + 1}/2 from {row['repair_owner'] or row['mutation_owner']} after "
-            f"{row['rail']} review at {short}. A new head must restart CI and both rails. {url}"
-        )
-    if row["state"] == "awaiting_adjudication":
-        return (
-            f"Review Conductor: {row['repository']}#{row['pr_number']} has {row['rail']} findings awaiting "
-            f"bounded adjudication at {short}; the reviewer cannot patch its own findings. {url}"
-        )
-    return (
-        f"Review Conductor needs Bobby: {row['repository']}#{row['pr_number']} is {row['state']} at {short}. "
-        f"Reason: {row['blocker'] or 'operator attention required'}. Repair cycle {row['repair_cycle']}/2. "
-        f"No merge was attempted. {url}"
-    )
+    else:
+        blocker = str(row["blocker"] or "").strip()
+        if blocker:
+            reason = blocker
+        elif decision is not None:
+            reason = CONCISE_BLOCKED_REASONS.get(
+                decision["reason"], decision["reason"].replace("_", " ")
+            )
+        else:
+            reason = CONCISE_BLOCKED_REASONS.get(row["state"], "operator attention required")
+    return f"{repo_pr} blocked — {reason} {url}"
 
 
 def checkout_fingerprint(path: Path) -> tuple[int, int, int, int, int]:
@@ -1996,7 +2015,73 @@ def reconcile_uncertain_notification(
         connection.close()
 
 
-def queue_notifications(config: dict[str, Any]) -> int:
+def notification_event_identity(
+    row: Mapping[str, Any],
+    decision: Mapping[str, Any],
+    *,
+    failure_attempt: int = 0,
+) -> str:
+    """Canonical queue identity: exact tuple plus complete decision identity."""
+    notification = decision["notification"]
+    kind = notification["kind"] or ""
+    channels = ",".join(notification["channels"])
+    eligibility = notification["eligibility"]
+    identity = (
+        f"{row['repository']}|{row['pr_number']}|{row['base_sha']}|"
+        f"{row['head_sha']}|{row['review_epoch']}|{row['state']}|{row['repair_cycle']}|"
+        f"{decision['schema']}|{decision['route']}|{decision['reason']}|"
+        f"{kind}|{channels}|{eligibility}"
+    )
+    if row["state"] == "openclaw_failed":
+        identity += f"|{failure_attempt}"
+    return identity
+
+
+def notification_failure_attempt(
+    connection: sqlite3.Connection,
+    row: Mapping[str, Any],
+) -> int:
+    """Current OpenClaw failure attempt that belongs in the event key."""
+    if row["state"] != "openclaw_failed":
+        return 0
+    failed_action = core.tuple_action(
+        connection,
+        {
+            "repository": row["repository"],
+            "pr_number": row["pr_number"],
+            "base_sha": row["base_sha"],
+            "head_sha": row["head_sha"],
+        },
+        "openclaw.enqueue",
+        int(row["review_epoch"]),
+    )
+    return int(failed_action["attempts"]) if failed_action else 0
+
+
+def current_notification_event_key(
+    connection: sqlite3.Connection,
+    row: Mapping[str, Any],
+    decision: Mapping[str, Any],
+) -> str:
+    """Hash the complete current event key, including retry attempt."""
+    return hashlib.sha256(
+        notification_event_identity(
+            row,
+            decision,
+            failure_attempt=notification_failure_attempt(connection, row),
+        ).encode()
+    ).hexdigest()
+
+
+def queue_notifications(
+    config: dict[str, Any],
+    enrollment: Mapping[str, str] | None = None,
+    *,
+    authoritative: bool = False,
+) -> int:
+    trusted_enrollment = orchestration.effective_trusted_enrollment(
+        config, enrollment, authoritative=authoritative
+    )
     connection = core.open_database(Path(config["paths"]["state_root"]), config["github_app"]["repository"])
     created = 0
     try:
@@ -2005,8 +2090,6 @@ def queue_notifications(config: dict[str, Any]) -> int:
             "SELECT * FROM heads WHERE is_current = 1 ORDER BY pr_number"
         ).fetchall()
         for row in rows:
-            if row["state"] not in TERMINAL_STATES:
-                continue
             quality = connection.execute(
                 """
                 SELECT * FROM clawsweeper_quality
@@ -2018,36 +2101,20 @@ def queue_notifications(config: dict[str, Any]) -> int:
                     row["head_sha"], row["review_epoch"],
                 ),
             ).fetchone()
-            failure_attempt = 0
-            if row["state"] == "openclaw_failed":
-                failed_action = core.tuple_action(
-                    connection,
-                    {
-                        "repository": row["repository"],
-                        "pr_number": row["pr_number"],
-                        "base_sha": row["base_sha"],
-                        "head_sha": row["head_sha"],
-                    },
-                    "openclaw.enqueue",
-                    int(row["review_epoch"]),
+            decision = orchestration.decide_orchestration_outcome(
+                orchestration.outcome_from_review_row(
+                    row, quality, enrollment=trusted_enrollment
                 )
-                failure_attempt = int(failed_action["attempts"]) if failed_action else 0
-            if row["state"] == "ready_for_human_merge" and (
-                quality is None or not bool(quality["ready_qualified"])
-            ):
+            )
+            eligibility = decision["notification"]["eligibility"]
+            if eligibility in {"silent", "none"}:
                 continue
-            channels = (
-                ["openclaw_context", "discord"]
-                if row["state"] in {"awaiting_adjudication", "repair_required"}
-                else ["openclaw_context", "discord", "signal"]
-            )
-            event_identity = (
-                f"{row['repository']}|{row['pr_number']}|{row['base_sha']}|"
-                f"{row['head_sha']}|{row['review_epoch']}|{row['state']}|{row['repair_cycle']}"
-            )
-            if row["state"] == "openclaw_failed":
-                event_identity += f"|{failure_attempt}"
-            event_key = hashlib.sha256(event_identity.encode()).hexdigest()
+            if eligibility not in {"merge_ready", "blocked"}:
+                raise orchestration.OrchestrationError(
+                    decision["reason"] or "notification eligibility is not actionable"
+                )
+            channels = decision["notification"]["channels"]
+            event_key = current_notification_event_key(connection, row, decision)
             payload = {
                 "schema": NOTIFICATION_SCHEMA,
                 "event_key": event_key,
@@ -2058,8 +2125,14 @@ def queue_notifications(config: dict[str, Any]) -> int:
                 "review_epoch": row["review_epoch"],
                 "state": row["state"],
                 "repair_cycle": row["repair_cycle"],
-                "message": notification_message(row, quality),
+                "message": notification_message(row, quality, decision),
                 "merge_authorized": False,
+                "orchestration_outcome": {
+                    "schema": decision["schema"],
+                    "route": decision["route"],
+                    "notification": decision["notification"],
+                    "reason": decision["reason"],
+                },
             }
             for channel in channels:
                 inserted = connection.execute(
@@ -2081,6 +2154,221 @@ def queue_notifications(config: dict[str, Any]) -> int:
         return created
     finally:
         connection.close()
+
+
+NOTIFICATION_RETIRE_REASON = (
+    "no longer eligible after close, supersession, or enrollment route change"
+)
+CURRENT_DECISION_IDENTITY_KEYS = ("schema", "route", "reason", "notification")
+CURRENT_NOTIFICATION_IDENTITY_KEYS = ("eligibility", "kind", "channels")
+
+
+def current_notification_decision_identity(
+    decision: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Exact current schema/route/reason/notification identity for queue rows."""
+    notification = decision["notification"]
+    return {
+        "schema": decision["schema"],
+        "route": decision["route"],
+        "reason": decision["reason"],
+        "notification": {
+            "eligibility": notification["eligibility"],
+            "kind": notification["kind"],
+            "channels": list(notification["channels"]),
+        },
+    }
+
+
+def pending_decision_matches_current(
+    prior: Any, decision: Mapping[str, Any]
+) -> bool:
+    """Return whether a stored decision is the exact current identity.
+
+    Missing, partial, or legacy identities retire fail-closed. Only an exact
+    current schema, route, reason, and notification may remain eligible.
+    """
+    expected = current_notification_decision_identity(decision)
+    if not isinstance(prior, dict) or set(prior) != set(CURRENT_DECISION_IDENTITY_KEYS):
+        return False
+    if (
+        prior.get("schema") != expected["schema"]
+        or prior.get("route") != expected["route"]
+        or prior.get("reason") != expected["reason"]
+    ):
+        return False
+    notification = prior.get("notification")
+    expected_notification = expected["notification"]
+    if (
+        not isinstance(notification, dict)
+        or set(notification) != set(CURRENT_NOTIFICATION_IDENTITY_KEYS)
+    ):
+        return False
+    return (
+        notification.get("eligibility") == expected_notification["eligibility"]
+        and notification.get("kind") == expected_notification["kind"]
+        and notification.get("channels") == expected_notification["channels"]
+    )
+
+
+def pending_review_notification_still_eligible(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row,
+    trusted_enrollment: Mapping[str, str],
+    payload: Mapping[str, Any] | None = None,
+) -> bool:
+    """Return whether a pending review-result row may still be claimed.
+
+    Operator alerts stay unbound. Review-result rows must still match the
+    current head tuple and a currently eligible trusted decision, including
+    the live enrollment/route revalidated at this boundary.
+    """
+    if int(row["pr_number"]) == 0:
+        return True
+    head = connection.execute(
+        """
+        SELECT * FROM heads
+        WHERE repository = ? AND pr_number = ? AND is_current = 1
+        """,
+        (row["repository"], row["pr_number"]),
+    ).fetchone()
+    if head is None:
+        return False
+    if (
+        head["base_sha"] != row["base_sha"]
+        or head["head_sha"] != row["head_sha"]
+        or int(head["review_epoch"]) != int(row["review_epoch"])
+        or head["state"] != row["state"]
+    ):
+        return False
+    quality = connection.execute(
+        """
+        SELECT * FROM clawsweeper_quality
+        WHERE repository = ? AND pr_number = ? AND base_sha = ?
+          AND head_sha = ? AND review_epoch = ?
+        """,
+        (
+            head["repository"],
+            head["pr_number"],
+            head["base_sha"],
+            head["head_sha"],
+            head["review_epoch"],
+        ),
+    ).fetchone()
+    decision = orchestration.decide_orchestration_outcome(
+        orchestration.outcome_from_review_row(
+            head, quality, enrollment=trusted_enrollment
+        )
+    )
+    eligibility = decision["notification"]["eligibility"]
+    if eligibility not in {"merge_ready", "blocked"}:
+        return False
+    if current_notification_event_key(connection, head, decision) != row["event_key"]:
+        return False
+    if payload is None:
+        payload = json.loads(row["payload_json"])
+    return pending_decision_matches_current(
+        payload.get("orchestration_outcome"), decision
+    )
+
+
+def claimed_notification_still_current(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row,
+    trusted_enrollment: Mapping[str, str],
+    payload: Mapping[str, Any] | None = None,
+) -> bool:
+    """Revalidate a claimed row against the current state and complete decision.
+
+    The claim/send fence binds the expected head state, trusted
+    enrollment/route, and canonical orchestration identity immediately
+    before transport. A write reservation then serializes the last
+    current-decision check with send so a webhook that advances the
+    same tuple, or a route change visible after this predicate, retires
+    the stale row. A service-owned registry/route lease, when supplied,
+    is held through ``notifier.send`` so a cooperating replacement
+    cannot change that route between this check and transport.
+    """
+    return pending_review_notification_still_eligible(
+        connection, row, trusted_enrollment, payload
+    )
+
+
+def hold_registry_send_lease(registry_lease: Any):
+    """Hold a cooperating registry/route lease through notifier.send.
+
+    The supported versioned replacement contract fail-closes while this
+    hold is active. Absence of a lease preserves the userland path.
+    This is not a guarantee against arbitrary OS-level registry writes.
+    """
+    if registry_lease is None:
+        return contextlib.nullcontext()
+    hold = getattr(registry_lease, "hold_send", None)
+    if not callable(hold):
+        raise UserlandError("registry send lease is invalid")
+    return hold()
+
+
+def retire_notification(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    required_status: str = "pending",
+) -> bool:
+    updated = connection.execute(
+        """
+        UPDATE notification_deliveries
+        SET status = 'retired', last_error = ?, updated_at = ?
+        WHERE event_key = ? AND channel = ? AND status = ?
+        """,
+        (
+            NOTIFICATION_RETIRE_REASON,
+            core.utc_now(),
+            row["event_key"],
+            row["channel"],
+            required_status,
+        ),
+    )
+    return updated.rowcount == 1
+
+
+def retire_pending_notification(
+    connection: sqlite3.Connection, row: sqlite3.Row
+) -> bool:
+    return retire_notification(connection, row, required_status="pending")
+
+
+def suppressed_review_stages() -> dict[str, Any]:
+    """Empty tick stages used when trusted enrollment is not Review Conductor."""
+    skipped_bridge = {
+        "schema": "smoky.review-conductor.bridge-drain.v1",
+        "result": "skipped",
+        "artifacts": [],
+        "agent_polling": False,
+        "merge_dispatched": False,
+    }
+    return {
+        "bridges_before": skipped_bridge,
+        "hydration": [],
+        "worker": {
+            "schema": "smoky.review-conductor.worker-wake.v1",
+            "result": "skipped",
+            "recovered": [],
+            "actions": [],
+            "failed_actions": [],
+            "github_ci_polled": False,
+            "merge_dispatched": False,
+        },
+        "openclaw": [],
+        "clawsweeper": [],
+        "bridges_after": skipped_bridge,
+        "projection": {
+            "schema": "smoky.review-conductor.projection.v1",
+            "result": "skipped",
+            "projected": [],
+            "merge_authorized": False,
+        },
+    }
 
 
 class OpenClawNotifier:
@@ -2186,9 +2474,30 @@ def deliver_notifications(
     notifier: OpenClawNotifier | Any,
     *,
     dry_run: bool,
+    enrollment: Mapping[str, str] | None = None,
     authority_client: Any | None = None,
+    authoritative: bool = False,
+    enrollment_resolver: Any | None = None,
+    registry_lease: Any | None = None,
 ) -> dict[str, Any]:
-    queue_notifications(config)
+    trusted_enrollment = orchestration.effective_trusted_enrollment(
+        config, enrollment, authoritative=authoritative
+    )
+
+    def live_trusted_enrollment() -> dict[str, str]:
+        if enrollment_resolver is not None:
+            return orchestration.require_trusted_pair(enrollment_resolver())
+        if not authoritative:
+            return orchestration.effective_trusted_enrollment(
+                config, enrollment, authoritative=False
+            )
+        return trusted_enrollment
+
+    routed = dict(config)
+    owned = dict(routed.get("enrollment") or {})
+    owned.update(trusted_enrollment)
+    routed["enrollment"] = owned
+    queue_notifications(routed, enrollment=trusted_enrollment, authoritative=True)
     connection = core.open_database(Path(config["paths"]["state_root"]), config["github_app"]["repository"])
     outcomes: list[dict[str, Any]] = []
     try:
@@ -2203,6 +2512,30 @@ def deliver_notifications(
         ).fetchall()
         for row in rows:
             payload = json.loads(row["payload_json"])
+            if not pending_review_notification_still_eligible(
+                connection, row, live_trusted_enrollment(), payload
+            ):
+                if dry_run:
+                    outcomes.append(
+                        {
+                            "event_key": row["event_key"],
+                            "channel": row["channel"],
+                            "result": "retired",
+                        }
+                    )
+                    continue
+                if retire_pending_notification(connection, row):
+                    connection.commit()
+                    outcomes.append(
+                        {
+                            "event_key": row["event_key"],
+                            "channel": row["channel"],
+                            "result": "retired",
+                        }
+                    )
+                else:
+                    connection.rollback()
+                continue
             if dry_run:
                 outcomes.append({"event_key": row["event_key"], "channel": row["channel"], "result": "planned"})
                 continue
@@ -2278,42 +2611,87 @@ def deliver_notifications(
                         "notification authority denial changed during recovery"
                     ) from exc
                 raise
-            try:
-                notifier.send(row["channel"], payload["message"])
-            except NotificationUnavailable as exc:
-                connection.execute(
-                    """
-                    UPDATE notification_deliveries
-                    SET status = 'pending', last_error = ?, updated_at = ?
-                    WHERE event_key = ? AND channel = ? AND status = 'uncertain'
-                    """,
-                    (str(exc)[:300], core.utc_now(), row["event_key"], row["channel"]),
-                )
-                connection.commit()
-                outcomes.append({"event_key": row["event_key"], "channel": row["channel"], "result": "not_ready"})
+            # Bind the claim/send fence to the expected current state and
+            # complete canonical decision immediately before transport.
+            if not claimed_notification_still_current(
+                connection, row, live_trusted_enrollment(), payload
+            ):
+                if retire_notification(
+                    connection, row, required_status="uncertain"
+                ):
+                    connection.commit()
+                    outcomes.append(
+                        {
+                            "event_key": row["event_key"],
+                            "channel": row["channel"],
+                            "result": "retired",
+                        }
+                    )
+                else:
+                    connection.rollback()
                 continue
-            except core.ContractError as exc:
-                connection.execute(
-                    """
-                    UPDATE notification_deliveries
-                    SET last_error = ?, updated_at = ?
-                    WHERE event_key = ? AND channel = ? AND status = 'uncertain'
-                    """,
-                    (str(exc)[:300], core.utc_now(), row["event_key"], row["channel"]),
-                )
-                connection.commit()
-                outcomes.append({"event_key": row["event_key"], "channel": row["channel"], "result": "uncertain"})
-                continue
-            connection.execute(
-                """
-                UPDATE notification_deliveries
-                SET status = 'sent', last_error = NULL, updated_at = ?
-                WHERE event_key = ? AND channel = ? AND status = 'uncertain'
-                """,
-                (core.utc_now(), row["event_key"], row["channel"]),
-            )
+            # The uncertain claim is already committed. Reserve writes across
+            # the last current-decision check and transport so a webhook
+            # cannot commit a new state in that gap. A transition visible
+            # after the unlocked predicate retires under this reservation.
+            # Hold the cooperating registry/route lease through send so a
+            # supported replacement cannot change the route in that window.
             connection.commit()
-            outcomes.append({"event_key": row["event_key"], "channel": row["channel"], "result": "sent"})
+            connection.execute("BEGIN IMMEDIATE")
+            with hold_registry_send_lease(registry_lease):
+                if not claimed_notification_still_current(
+                    connection, row, live_trusted_enrollment(), payload
+                ):
+                    if retire_notification(
+                        connection, row, required_status="uncertain"
+                    ):
+                        connection.commit()
+                        outcomes.append(
+                            {
+                                "event_key": row["event_key"],
+                                "channel": row["channel"],
+                                "result": "retired",
+                            }
+                        )
+                    else:
+                        connection.rollback()
+                    continue
+                try:
+                    notifier.send(row["channel"], payload["message"])
+                except NotificationUnavailable as exc:
+                    connection.execute(
+                        """
+                        UPDATE notification_deliveries
+                        SET status = 'pending', last_error = ?, updated_at = ?
+                        WHERE event_key = ? AND channel = ? AND status = 'uncertain'
+                        """,
+                        (str(exc)[:300], core.utc_now(), row["event_key"], row["channel"]),
+                    )
+                    connection.commit()
+                    outcomes.append({"event_key": row["event_key"], "channel": row["channel"], "result": "not_ready"})
+                    continue
+                except core.ContractError as exc:
+                    connection.execute(
+                        """
+                        UPDATE notification_deliveries
+                        SET last_error = ?, updated_at = ?
+                        WHERE event_key = ? AND channel = ? AND status = 'uncertain'
+                        """,
+                        (str(exc)[:300], core.utc_now(), row["event_key"], row["channel"]),
+                    )
+                    connection.commit()
+                    outcomes.append({"event_key": row["event_key"], "channel": row["channel"], "result": "uncertain"})
+                    continue
+                connection.execute(
+                    """
+                    UPDATE notification_deliveries
+                    SET status = 'sent', last_error = NULL, updated_at = ?
+                    WHERE event_key = ? AND channel = ? AND status = 'uncertain'
+                    """,
+                    (core.utc_now(), row["event_key"], row["channel"]),
+                )
+                connection.commit()
+                outcomes.append({"event_key": row["event_key"], "channel": row["channel"], "result": "sent"})
         return {
             "schema": "smoky.review-conductor.notifications.v1",
             "result": "planned" if dry_run else "processed",
@@ -2330,30 +2708,52 @@ def run_tick(
     notifier: OpenClawNotifier | Any | None,
     *,
     dry_run: bool,
+    enrollment: Mapping[str, str] | None = None,
+    enrollment_resolver: Any | None = None,
+    registry_lease: Any | None = None,
 ) -> dict[str, Any]:
     profiles.require_enabled(config)
-    first_bridge = (
-        {"schema": "smoky.review-conductor.bridge-drain.v1", "result": "planned", "artifacts": []}
-        if dry_run
-        else runtime.drain_bridge_inboxes(config)
-    )
-    hydration = hydrate_pending_openclaw_heads(
-        config, dry_run=dry_run, authority_client=client
-    )
-    worker = runtime.drain_actions(config, client, dry_run=dry_run)
-    openclaw = collect_openclaw_terminals(config, dry_run=dry_run)
-    clawsweeper = collect_clawsweeper_terminals(config, client, dry_run=dry_run)
-    second_bridge = (
-        {"schema": "smoky.review-conductor.bridge-drain.v1", "result": "planned", "artifacts": []}
-        if dry_run
-        else runtime.drain_bridge_inboxes(config)
-    )
-    projection = runtime.reconcile_projection(config, client, dry_run=dry_run)
+    if enrollment is None:
+        trusted_enrollment = orchestration.resolve_trusted_enrollment(config)
+    else:
+        trusted_enrollment = orchestration.require_trusted_pair(enrollment)
+    route, _reason = orchestration.enrollment_route(trusted_enrollment)
+    if route == "review_conductor":
+        first_bridge = (
+            {"schema": "smoky.review-conductor.bridge-drain.v1", "result": "planned", "artifacts": []}
+            if dry_run
+            else runtime.drain_bridge_inboxes(config)
+        )
+        hydration = hydrate_pending_openclaw_heads(
+            config, dry_run=dry_run, authority_client=client
+        )
+        worker = runtime.drain_actions(config, client, dry_run=dry_run)
+        openclaw = collect_openclaw_terminals(config, dry_run=dry_run)
+        clawsweeper = collect_clawsweeper_terminals(config, client, dry_run=dry_run)
+        second_bridge = (
+            {"schema": "smoky.review-conductor.bridge-drain.v1", "result": "planned", "artifacts": []}
+            if dry_run
+            else runtime.drain_bridge_inboxes(config)
+        )
+        projection = runtime.reconcile_projection(config, client, dry_run=dry_run)
+    else:
+        skipped = suppressed_review_stages()
+        first_bridge = skipped["bridges_before"]
+        hydration = skipped["hydration"]
+        worker = skipped["worker"]
+        openclaw = skipped["openclaw"]
+        clawsweeper = skipped["clawsweeper"]
+        second_bridge = skipped["bridges_after"]
+        projection = skipped["projection"]
     notifications = deliver_notifications(
         config,
         notifier,
         dry_run=dry_run,
+        enrollment=trusted_enrollment,
         authority_client=client,
+        authoritative=True,
+        enrollment_resolver=enrollment_resolver,
+        registry_lease=registry_lease,
     )
     return {
         "schema": "smoky.review-conductor.userland-tick.v1",

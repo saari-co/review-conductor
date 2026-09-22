@@ -52,15 +52,12 @@ Conductor does not import, encode, or dispatch the x-api conveyor
 (`legacy_dispatch` stays false). Dual enrollment selects Review
 Conductor and forbids duplicate legacy dispatch. Neither enrollment ends the
 process with no review and no notification. Ambiguous or broken enrollment
-fails closed and is never treated as unenrolled. This routing/admission
-core publishes that pair through
-[`trusted_enrollment_from_registry`](../tools/service_runtime.py) and
-[`decide_orchestration_outcome`](../tools/orchestration_outcome.py). It
-does not change live `run_service_tick`, `run_tick`,
-`queue_notifications`, `deliver_notifications`, or
-`service_entrypoint.registry_provider`. Live queue, delivery, GitHub
-dispatch, and notifier behavior stay on the approved-base path until the
-stacked adapter. The v2 service-owned registry may carry an
+fails closed and is never treated as unenrolled. `run_service_tick`
+resolves that pair from the authoritative registry/admission result and
+passes it into `run_tick`. `service_entrypoint.registry_provider` loads
+the external registry document without applying Conductor enrollment
+admission, so the production worker can represent every trusted route
+while webhook ingress remains enrolled-only. The v2 service-owned registry may carry an
 optional exact-profile `legacy_xapi` marker; omitted documents remain
 legacy absent. `trusted_enrollment_from_registry` snapshots and
 revalidates the exact base Registry dataclass fields and each nested
@@ -75,39 +72,60 @@ broken routing. The service-profile `github_app.repository` must be
 an exact admitted-scope string before omitted-marker absence is treated
 as legitimate none. Userland activation flags (`enabled` /
 `blockers`) do not select legacy, none, dual, or broken routes.
-A matching enrollment still requires a valid enabled core
-`review_policy` and the exact registry reviewer mapping before
-Conductor present; missing or non-dict policy or core config is
-broken. Unmatched enrollment keeps the existing absent/legacy
-result.
-An explicit
+Hydration, action draining, result collection, and review stages run
+only when the trusted route is `review_conductor`. Dual enrollment
+selects Review Conductor; legacy-only, unenrolled, and broken routes
+stay real runtime behavior and never dispatch x-api. An explicit
 `human_gate=true` takes precedence over merge-ready and silent
 nonterminal progression: no structurally valid gated input may become
-`merge_ready` or continue review dispatch silently. Outcome eligibility
-is `silent`/`none` for internal progression and `merge_ready` or
-`blocked` for notify-eligible terminals. Live queue consumption, send
-leases, reserved claim/send fencing, route-freshness guards used only for
-delivery, route-suppressed review stages, and complete current-event
-revalidation are stacked adapter work, not this routing/admission core.
+`merge_ready` or continue review dispatch silently. The existing
+notification queue still consumes the current-head decision; event
+identity includes canonical route, reason, and eligibility so a stale
+pending row can retire while the current blocked decision enqueues and
+delivers once. Pending rows are revalidated against the current head
+and trusted enrollment before claim, and the claim/send fence is bound
+to the expected current state, live trusted enrollment/route, and
+complete canonical decision immediately before transport. A write
+reservation serializes that final current-decision check with send. A
+webhook that advances the same tuple between eligibility and send, or
+after the unlocked predicate returns, retires the stale row. A route
+change between service admission/snapshot and delivery retires the
+stale notification rather than sending obsolete blocked/ready copy.
+The reserved send boundary also holds a versioned service-owned
+registry/route lease through `notifier.send`, so a cooperating
+registry replacement cannot occur between final validation and
+transport. The supported replace/lease contract fail-closes while
+that hold is active. Nested or overlapping `hold_send` calls reuse the
+already pinned registry generation rather than resolving a later
+source snapshot. This is not a guarantee against arbitrary
+nonconforming OS-level writes.
 Public enum-like inputs require exact builtin strings before
 membership checks and raise `OrchestrationError` for unhashable or
 subclass tokens; persisted readiness/quality flags accept only stored
-integer `0`/`1` and otherwise map to unknown rail results. Exact
-binding checks remain Conductor-only. Caller payloads cannot grant
-Conductor authority. Identical current eligibility decisions stay
-deduped by route, reason, and eligibility. `closed` and
+integer `0`/`1` and otherwise map to unknown rail results. A
+long-lived GitHub App client keeps a route-freshness guard on every
+live route, re-resolves and compares the trusted pair, and adds exact
+binding checks only for the Conductor route so a Conductor-to-broken
+tick delivers the fail-closed alert instead of restoring it with a
+stale Conductor guard. Missing, partial, or
+legacy decision identities retire fail-closed; only an exact current
+schema, route, reason, and notification may remain eligible, and
+identical current decisions stay deduped. Notification event identity
+includes complete canonical schema, kind, channels, and decision
+identity so a retired key cannot suppress the current notification.
+Retry-attempt changes revalidate that complete current event key so
+attempt 1 and attempt 2 cannot both send. Malformed persisted rail or
+state tokens notify blocked once instead of aborting the queue.
+Caller payloads cannot grant Conductor authority. `closed` and
 `closed_merged` are terminal silent non-dispatchable states on every
 direct and service-loop path, including when trusted enrollment is
 broken; closed-state handling precedes enrollment short-circuits.
-Unknown state, unknown rail results, state/rail/result
-incoherence, and contradictory `ready_for_human_merge`
-`required_fix` / `human_gate` dispositions are validated after that
-closed exception and before any unenrolled, legacy, or broken
-enrollment short-circuit.
+Unknown state, unknown rail results, and state/rail/result
+incoherence are validated after that closed exception and before any
+unenrolled, legacy, or broken enrollment short-circuit.
 
-The existing notification queue remains the later consumer of that
-outcome. This core does not invent a second sender and does not change
-the live queue. `repair_required` and `awaiting_adjudication` without a genuine
+The existing notification queue consumes that outcome. It does not invent a
+second sender. `repair_required` and `awaiting_adjudication` without a genuine
 human gate are silent internal progression, including the first two automatic
 repair rounds. At ledger cycle 2, `required_fix` may still create a scoped
 repair route, change the head, and rerun exact-head rails while preserving
@@ -122,13 +140,8 @@ and no explicit `human_gate`. `ready_for_human_merge` is compatible with
 no `adjudication_dispositions` or only the allowed `defer` /
 `reject_false_positive` set; `required_fix` or `human_gate` dispositions
 on that state are contradictory and use canonical fail-closed blocked
-handling instead of becoming merge-ready, silently clearing the
-disposition, or taking an unenrolled/legacy `none` short-circuit.
-`ready_for_human_merge` with `clawsweeper_result=failed` or
-`human_gate` is an impossible terminal tuple: the engine would have
-moved to `clawsweeper_failed` or `waiting_human`, so the outcome
-fail-closes to the blocked path instead of silently returning
-`merge_ready_suppressed`. Only merge-ready or
+handling instead of becoming merge-ready or silently clearing the
+disposition. Only merge-ready or
 genuinely blocked/human-action-required outcomes notify. Terminal copy is
 `<repo>#<pr> ready to merge` or `<repo>#<pr> blocked — <specific reason>`,
 optionally with the PR URL, and carries no transcript, progress, cycle, tier,
@@ -136,14 +149,10 @@ or proof prose. A changed head preserves the 2/2 repair ledger. Representable
 fail-closed enrollment, unknown state/result, inconsistent
 state/rail/result tuples, mismatched rails, and equivalent invalid
 orchestration states keep routing and dispatch suppressed and stay
-eligible for the blocked notification path. The persisted-row adapter
-applies the same rail-aware validation and maps inconsistent or
-malformed stored state/rail tokens such as rail='spark' to typed
-unknown results and exact builtin state/rail values so the canonical
-decision can fail closed to blocked instead of raising. Direct public
-contract inputs remain strict. Delivering one concise blocked
-notification for every malformed persisted rail/state token is
-stacked adapter work.
+eligible for the blocked notification path; the queue must not raise or
+silently pass them. The persisted-row adapter applies the same
+rail-aware validation and maps inconsistent stored state/rail data to
+typed unknown results so a malformed current row still notifies once.
 Impossible contradictions, including a blocked or running state with
 the wrong rail, are rejected before any review_dispatch or
 notification eligibility is calculated. Fail-closed copy uses the

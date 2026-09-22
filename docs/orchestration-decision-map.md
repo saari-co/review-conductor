@@ -17,10 +17,10 @@ activation, x-api removal, or a second notification system.
 Canonical function: [`decide_orchestration_outcome`](../tools/orchestration_outcome.py).
 Canonical schema: [`orchestration-outcome.schema.json`](../contracts/orchestration-outcome.schema.json).
 Trusted enrollment resolver: [`resolve_trusted_enrollment`](../tools/orchestration_outcome.py).
-Inert registry helper: [`trusted_enrollment_from_registry`](../tools/service_runtime.py).
-Live queue, delivery, `run_tick` route suppression, and
-`run_service_tick` enrollment wiring are stacked adapter work; this
-core does not change those runtime entry functions. The v2 registry may carry an optional
+Queue consumer: [`queue_notifications`](../tools/review_conductor_userland.py).
+`run_service_tick` must resolve trusted enrollment from the
+registry/admission result and pass that pair into `run_tick` before
+review stages and the queue. The v2 registry may carry an optional
 exact-profile `legacy_xapi` marker; omitted means legacy absent.
 `trusted_enrollment_from_registry` snapshots and revalidates exact
 base Registry dataclass fields and each nested Enrollment and optional
@@ -37,15 +37,22 @@ non-dict policy or core config is broken. Unmatched enrollment keeps
 the existing absent/legacy result. Userland
 `enabled` / `blockers` flags do not select the route. External
 registry document validation/loading is separate from strict
-Conductor ingress admission. Public
+Conductor ingress admission. Pending rows are revalidated before
+claim, and the claim/send fence binds the expected current state,
+live trusted enrollment/route, and complete canonical decision
+immediately before transport under a write reservation that
+serializes the last current-decision check with send. Public
 enum-like inputs require exact builtin strings; persisted
-readiness/quality flags accept only integer `0`/`1`. A long-lived
-GitHub App client resets or replaces its admission authority guard on
-every route transition. Identical current eligibility decisions stay
-deduped by route, reason, and eligibility. Notification send leases,
-reserved claim/send fencing, complete current-event identity, and
-route-freshness guards used only for delivery are stacked adapter
-work. `human_gate=true` precedes merge-ready and silent
+readiness/quality flags accept only integer `0`/`1`. The service tick
+keeps a route-freshness guard on every live route. Event
+identity includes route, reason, and
+eligibility. A long-lived GitHub App client resets or replaces its
+admission authority guard on every route transition. Missing, partial, or legacy decision identities retire
+fail-closed; only an exact current schema, route, reason, kind,
+channels, and notification may deliver, and identical current
+decisions stay deduped. Retry-attempt changes revalidate that
+complete current event key. Malformed persisted rail or state tokens
+notify blocked once. `human_gate=true` precedes merge-ready and silent
 nonterminal dispatch. `openclaw_clean_draft` keeps
 `clawsweeper_eligible` false. `ready_for_human_merge` may carry no
 `adjudication_dispositions` or only `defer` / `reject_false_positive`;

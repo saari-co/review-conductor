@@ -1,0 +1,21 @@
+{
+  "schema": "review-conductor.candidate-manifest.v1",
+  "base_sha": "b16e0c8bc3f32e997db31caa173b846b0e9041ce",
+  "starting_head_sha": "596d8bbbfaaac9f32bc5fbe2a52f9419c64d8330",
+  "parent_candidate_sha": "7ee4184b5bb6cbf4082055d08cdb0105c2688fb4",
+  "retained_starting_head_sha": "d3362b5a5b1acc0934c5e9f9127cbc8ffb209112",
+  "merge_parents": [
+    "d3362b5a5b1acc0934c5e9f9127cbc8ffb209112",
+    "7ee4184b5bb6cbf4082055d08cdb0105c2688fb4"
+  ],
+  "captured_date": "2026-09-18",
+  "binding_scheme": "A commit cannot contain its own SHA. base_sha is the frozen origin/main integration base. starting_head_sha is the ordinary merge that made repaired PR #18 core 7ee4184 an ancestor. parent_candidate_sha is that repaired core. retained_starting_head_sha is the verified pre-merge adapter head. merge_parents are that adapter head then repaired core. Per-file sha256 values are of this restack proof source. Historical packets remain the explanations of merging core 2e40ffd / main b16e0c8 and the hold_send repair on 009279c. Runtime queue/delivery/authority, Copilot 5243987118 repairs, and Copilot 5247753159 deferrals are preserved. The 2/2 ledger is not reset. No Copilot, OpenClaw, or ClawSweeper review is requested from this packet.",
+  "files": {
+    "docs/migration.md": "3f7f9248d7d66f9761b12cd1d6e38089fa9da4993818aa58f213f76514703b02",
+    "proof/issue-687-notification-adapter-merge-forward-20260918/PROOF.md": "ea983c92d67bc487391bb2fa5b76ac1c3dca6175c61d9a43d926ff9d2cb9d89c",
+    "proof/issue-687-notification-adapter-merge-forward-20260918/candidate-manifest.json": "8e6cf82253501b1bd11fd2a2152a24783fe5813cbbc6ab51ef35028990408a51",
+    "proof/issue-687-notification-adapter-post-cap-repair-20260918/PROOF.md": "777fdb9b604f8506fc0b0648c4ddd90fdf57d9a4993ff5563437d83b0347017d",
+    "proof/issue-687-notification-adapter-post-cap-repair-20260918/candidate-manifest.json": "508e3a1770e6b7bb4d96fa5c5c37afb74cfc8e060f0b8c03296915a7e5b17a2f",
+    "proof/issue-687-notification-adapter-core-restack-20260918/PROOF.md": "b263ea2c5db51786637ceb2eeaa488d7a9836478565b4e0072a04c9c51e2e772"
+  }
+}

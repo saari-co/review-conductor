@@ -29,18 +29,6 @@ credential selectors, reviewer identity overrides, or install/state roots.
    comprehensive ClawSweeper only while that exact head is ready. A missing or
    skipped rail is not PASS; no result authorizes merge.
 
-When an operator has an authoritative GitHub read-back for a completed CI
-`workflow_run` but cannot locate the original webhook receipt, the
-`reconcile-workflow-run` source command admits that one bounded read-back. It
-requires a valid GitHub HMAC signature plus the exact repository/PR/base/head/run tuple, records a distinct
-`github-readback` receipt, and is idempotent if the original delivery was
-already processed. It never reruns CI, polls GitHub, dispatches either review
-rail, or changes GitHub state. Conflicting reuse of a workflow-run identity
-fails closed. On strict profiles the service-owned hook must return a current
-binding matching the exact tuple; the standalone source command is therefore
-not a production activation path. This is recovery evidence, not deployment or
-activation.
-
 `tools/trusted_admission.py` implements the inert contract. The source-only
 `tools/service_runtime.py` authenticates before parsing, rejects unknown App /
 installation / numeric repository tuples, retrieves only the approved manifest
@@ -65,17 +53,17 @@ exact base values so a str subclass cannot synthesize repository, ID,
 or legacy authority. `Registry.lookup` also requires those exact
 builtin types at the lookup boundary. The service-profile repository
 must be an exact admitted-scope string before omitted-marker absence
-is treated as legitimate none. A matching enrollment still requires
-a valid enabled core `review_policy` and the exact registry reviewer
-mapping before Conductor present; missing or non-dict policy or
-core config is broken. Unmatched enrollment keeps the existing
-absent/legacy result. Inert registry document
-validation/loading stays available here; live
-`registry_provider` document-only worker ticks, `run_service_tick`
-enrollment wiring, and queue/delivery consumption are stacked adapter
-work. Notification send leases, reserved claim/send
-fencing, and route-freshness guards used only for delivery are stacked
-adapter work, not this routing/admission core.
+is treated as legitimate none. External registry document
+validation/loading is separate from strict Conductor ingress
+admission, so the production worker can represent Conductor,
+legacy-only, none, dual, and broken routes while webhook ingress
+remains enrolled-only. The reserved notification send boundary holds
+a versioned service-owned registry/route lease through transport so a
+cooperating registry replacement cannot change the trusted route
+between final validation and `notifier.send`. The supported
+replace/lease contract fail-closes while that hold is active; nested
+or overlapping holds reuse the already pinned generation. This is
+not a guarantee against arbitrary nonconforming OS-level writes.
 See [trusted admission](trusted-admission.md).
 No live registry, credential, HTTPS edge or deployment exists, so this is
 qualified source behavior, not live admission.
