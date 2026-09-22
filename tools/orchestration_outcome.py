@@ -8,16 +8,12 @@ existing notification queue consumes this outcome; this is not a second
 notification system and it does not import, invoke, or dispatch x-api.
 Representable fail-closed states suppress routing and keep
 legacy_dispatch false, but they remain eligible for the blocked
-notification path. Impossible state/rail/result tuples, including mismatched rails and
-ready_for_human_merge with a failed or human_gate ClawSweeper result,
+notification path. Impossible state/rail/result tuples, including mismatched rails,
 fail closed before any enrollment-route short-circuit, dispatch, or
-notification eligibility is calculated. Contradictory ready
-dispositions are validated on the same path. Closed-state handling stays
+notification eligibility is calculated. Closed-state handling stays
 first. The persisted-row adapter applies the same rail-aware
-validation and maps inconsistent or malformed stored state/rail tokens
-such as rail='spark' to typed unknown results and exact builtin
-state/rail values so the canonical decision can fail closed to blocked
-instead of raising; direct public contract inputs remain strict.
+validation and maps inconsistent stored state/rail data to typed
+unknown results; direct public contract inputs remain strict.
 """
 
 from __future__ import annotations
@@ -400,10 +396,6 @@ def decide_orchestration_outcome(raw: Any) -> dict[str, Any]:
         return _fail_closed_blocked(repair, "unknown_rail_result_fail_closed")
     if not _consistent_state_rail_results(state, rail, openclaw_result, clawsweeper_result):
         return _fail_closed_blocked(repair, "inconsistent_state_rail_result_fail_closed")
-    if state == "ready_for_human_merge" and not _ready_compatible_dispositions(
-        dispositions
-    ):
-        return _fail_closed_blocked(repair, "inconsistent_ready_disposition_fail_closed")
     if route == "fail_closed":
         return _fail_closed_blocked(repair, route_reason)
     if route == "none":
@@ -439,6 +431,10 @@ def decide_orchestration_outcome(raw: Any) -> dict[str, Any]:
             repair=repair,
             reason="human_action_required",
         )
+    if state == "ready_for_human_merge" and not _ready_compatible_dispositions(
+        dispositions
+    ):
+        return _fail_closed_blocked(repair, "inconsistent_ready_disposition_fail_closed")
 
     clawsweeper_eligible = openclaw_result not in {"absent"}
     if openclaw_result in BLOCKING_OPENCLAW:
@@ -648,7 +644,7 @@ def outcome_from_review_row(
 
     Persisted-row adapter only: inconsistent or malformed stored state/rail
     tokens map to typed unknown results and exact builtin state/rail values
-    so the canonical decision can fail closed and notify. Direct
+    so the canonical decision can fail closed and notify once. Direct
     ``decide_orchestration_outcome`` / ``derive_rail_results`` inputs remain
     strict. Readiness/quality flags accept only stored integer ``0`` / ``1``;
     any other persisted value maps to unknown rail results.

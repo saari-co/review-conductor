@@ -1546,6 +1546,14 @@ def test_legacy_database_migrates_review_epoch(temp: Path) -> None:
               payload_json TEXT NOT NULL, receipt_json TEXT, attempts INTEGER NOT NULL DEFAULT 0,
               last_error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
             );
+            CREATE TABLE events (
+              sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+              event_id TEXT NOT NULL UNIQUE, kind TEXT NOT NULL,
+              repository TEXT NOT NULL, pr_number INTEGER NOT NULL,
+              base_sha TEXT NOT NULL, head_sha TEXT NOT NULL,
+              stale INTEGER NOT NULL, payload_json TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
             """
         )
         connection.execute(
@@ -1577,6 +1585,23 @@ def test_legacy_database_migrates_review_epoch(temp: Path) -> None:
                 head,
                 json.dumps(payload, sort_keys=True, separators=(",", ":")),
                 "2026-08-27T00:06:01Z",
+                "2026-08-27T00:06:01Z",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO events(
+              event_id, kind, repository, pr_number, base_sha, head_sha,
+              stale, payload_json, created_at
+            ) VALUES (?, 'ci.completed', ?, ?, ?, ?, 0, ?, ?)
+            """,
+            (
+                "legacy-malformed-ci",
+                "dinkuskit/blocks",
+                112,
+                BASE,
+                head,
+                "{malformed legacy event",
                 "2026-08-27T00:06:01Z",
             ),
         )

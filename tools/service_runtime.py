@@ -11,11 +11,13 @@ import hashlib
 import json
 import sqlite3
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Union
 
 import review_conductor as core
 import review_conductor_runtime as runtime
+import orchestration_outcome as orchestration
 import trusted_admission as admission
 from target_manifest import unique_object, validate_manifest
 
@@ -23,7 +25,6 @@ from target_manifest import unique_object, validate_manifest
 BINDING_TABLE_SCHEMA = "review-conductor.service-policy-binding.v1"
 PROFILE_DIGEST_SCHEMA = "review-conductor.engine-profile-digest.v1"
 MAX_STAGED_POLICIES = 8
-WORKFLOW_READBACK_PATH = "/github/workflow-readback"
 
 # Approved policy bytes keyed by (repository, commit, sha256). Content is
 # immutable under that key and is hash-verified before it is stored, so a hit
@@ -111,16 +112,80 @@ class ServiceError(core.ContractError):
     """A service-owned identity, enrollment or policy boundary failed closed."""
 
 
-RegistrySource = Union[admission.Registry, Callable[[], admission.Registry]]
+class RegistryRouteLease:
+    """Versioned cooperative registry/route lease for the send boundary.
 
-
-def resolve_registry(source: RegistrySource) -> admission.Registry:
-    """Return the current validated registry; a provider re-reads it every time.
-
-    Passing a provider means promotion or revocation in the service-owned registry
-    is observed by the next delivery or worker tick without a restart, and a
-    registry that stops validating fails every delivery and tick closed.
+    Supported replacements go through ``replace`` and fail closed while any
+    send hold is active. ``current`` re-reads the wrapped source unless a
+    send hold has pinned that generation. Nested or overlapping holds reuse
+    that already pinned registry instead of resolving a later source
+    generation. This contract does not claim a guarantee against arbitrary
+    nonconforming OS-level registry writes.
     """
+
+    schema = "review-conductor.registry-route-lease.v1"
+
+    def __init__(self, source: "RegistrySource") -> None:
+        if isinstance(source, RegistryRouteLease):
+            raise ServiceError("registry route lease cannot wrap another lease")
+        self._lock = threading.Lock()
+        self._source = source
+        self._generation = 0
+        self._holds = 0
+        self._pinned: admission.Registry | None = None
+
+    def generation(self) -> int:
+        with self._lock:
+            return self._generation
+
+    def current(self) -> admission.Registry:
+        with self._lock:
+            if self._holds:
+                if self._pinned is None:
+                    raise ServiceError("registry send lease is missing its pinned registry")
+                return self._pinned
+            return _resolve_registry_source(self._source)
+
+    def replace(self, registry: admission.Registry) -> int:
+        if type(registry) is not admission.Registry:
+            raise ServiceError("supported registry replacement requires a validated registry")
+        with self._lock:
+            if self._holds:
+                raise ServiceError(
+                    "supported registry replacement is blocked while a send lease is held"
+                )
+            self._source = registry
+            self._generation += 1
+            return self._generation
+
+    @contextmanager
+    def hold_send(self):
+        with self._lock:
+            if self._holds:
+                if self._pinned is None:
+                    raise ServiceError("registry send lease is missing its pinned registry")
+                pinned = self._pinned
+            else:
+                pinned = _resolve_registry_source(self._source)
+                self._pinned = pinned
+            self._holds += 1
+        try:
+            yield pinned
+        finally:
+            with self._lock:
+                self._holds -= 1
+                if self._holds == 0:
+                    self._pinned = None
+
+
+RegistrySource = Union[admission.Registry, Callable[[], admission.Registry], RegistryRouteLease]
+
+
+def _resolve_registry_source(source: RegistrySource) -> admission.Registry:
+    if isinstance(source, RegistryRouteLease):
+        raise ServiceError(
+            "registry route lease must be resolved through resolve_registry"
+        )
     if isinstance(source, admission.Registry):
         return source
     if not callable(source):
@@ -131,9 +196,21 @@ def resolve_registry(source: RegistrySource) -> admission.Registry:
     return value
 
 
-def _strict_payload(body: bytes, max_body_bytes: int) -> dict[str, Any]:
-    if len(body) > max_body_bytes:
-        raise ServiceError("GitHub webhook payload is oversized")
+def resolve_registry(source: RegistrySource) -> admission.Registry:
+    """Return the current validated registry; a provider re-reads it every time.
+
+    Passing a provider means promotion or revocation in the service-owned registry
+    is observed by the next delivery or worker tick without a restart, and a
+    registry that stops validating fails every delivery and tick closed. A
+    ``RegistryRouteLease`` returns its pinned generation while a send hold is
+    active and otherwise re-reads the wrapped source.
+    """
+    if isinstance(source, RegistryRouteLease):
+        return source.current()
+    return _resolve_registry_source(source)
+
+
+def _strict_payload(body: bytes) -> dict[str, Any]:
     try:
         value = json.loads(body.decode("utf-8"), object_pairs_hook=unique_object)
     except (UnicodeError, RecursionError, ValueError) as exc:
@@ -431,46 +508,6 @@ def _admission_hook(
     return hook
 
 
-def _reconciliation_admission_hook(
-    registry_source: RegistrySource,
-    service_config: dict[str, Any],
-) -> Callable[[sqlite3.Connection, dict[str, Any], str, dict[str, Any], dict[str, Any]], dict[str, Any] | None]:
-    """Revalidate the current approved-policy binding for one CI read-back."""
-    def hook(
-        connection: sqlite3.Connection,
-        config: dict[str, Any],
-        event_type: str,
-        payload: dict[str, Any],
-        outcome: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        if event_type != "workflow_run":
-            raise ServiceError("workflow reconciliation hook received an unexpected event")
-        event = core.parse_workflow_run_event(config, payload)
-        if "ignored" in event or event.get("rail") == "clawsweeper":
-            raise ServiceError("workflow reconciliation requires a terminal CI workflow_run")
-        registry = resolve_registry(registry_source)
-        enrolled = preflight_enrollment(
-            service_config, registry, payload, core_config=config
-        )
-        if event["repository"] != enrolled.repository:
-            raise ServiceError("workflow read-back repository contradicts service enrollment")
-        binding = binding_for_current_head(
-            connection,
-            registry,
-            event["repository"],
-            event["pr_number"],
-            config,
-            service_config,
-        )
-        if binding is None:
-            raise ServiceError("workflow read-back tuple lacks a current approved-policy binding")
-        if any(binding[key] != event[key] for key in ("repository", "pr_number", "base_sha", "head_sha")):
-            raise ServiceError("workflow read-back binding does not match the exact tuple")
-        return binding
-
-    return hook
-
-
 def ingest_service_delivery(
     *,
     config_path: Path,
@@ -487,11 +524,7 @@ def ingest_service_delivery(
     """Authenticate, admit and ingest one GitHub App delivery atomically."""
     # Authentication must precede JSON parsing, registry resolution, lookup and policy I/O.
     core.verify_github_signature(body, signature, secret)
-    ingress = core.require_object(service_config.get("ingress"), "service ingress")
-    payload = _strict_payload(
-        body,
-        core.require_positive_int(ingress.get("max_body_bytes"), "service ingress max_body_bytes"),
-    )
+    payload = _strict_payload(body)
     core_config = core.load_config(config_path)
     registry_source = registry
     # Early rejection only; the admission hook re-resolves the registry inside
@@ -526,92 +559,6 @@ def ingest_service_delivery(
     raise runtime.RetryableIngestError("approved policy staging raced registry or cache changes")
 
 
-def reconcile_service_workflow_run(
-    *,
-    config_path: Path,
-    state_root: Path,
-    body: bytes,
-    signature: str,
-    secret: str,
-    expected_pr_number: int,
-    expected_base_sha: str,
-    expected_head_sha: str,
-    expected_run_id: int,
-    registry: RegistrySource,
-    service_config: dict[str, Any],
-) -> dict[str, Any]:
-    """Authenticate and reconcile one CI read-back behind service authority."""
-    verify_signature = core.verify_github_signature
-    verify_signature(body, signature, secret)
-    ingress = core.require_object(service_config.get("ingress"), "service ingress")
-    ingress_limit = core.require_positive_int(
-        ingress.get("max_body_bytes"), "service ingress max_body_bytes"
-    )
-    payload = _strict_payload(
-        body, min(ingress_limit, core.WORKFLOW_READBACK_MAX_BYTES)
-    )
-    return core.reconcile_workflow_run(
-        config_path=config_path,
-        state_root=state_root,
-        payload=payload,
-        expected_pr_number=expected_pr_number,
-        expected_base_sha=expected_base_sha,
-        expected_head_sha=expected_head_sha,
-        expected_run_id=expected_run_id,
-        admission_hook=_reconciliation_admission_hook(registry, service_config),
-    )
-
-
-def _reconcile_workflow_request(
-    *,
-    config_path: Path,
-    state_root: Path,
-    headers: dict[str, str],
-    body: bytes,
-    secret: str,
-    registry: RegistrySource,
-    service_config: dict[str, Any],
-) -> dict[str, Any]:
-    """Adapt the authenticated loopback read-back request to the typed boundary."""
-    def header_positive_int(name: str, label: str) -> int:
-        text = core.require_text(headers.get(name), label, 20)
-        if not text.isascii() or not text.isdecimal():
-            raise ServiceError(f"{label} must be a positive decimal integer")
-        return core.require_positive_int(int(text), label)
-
-    try:
-        expected_pr_number = header_positive_int(
-            "x-review-conductor-pr-number", "workflow read-back PR number"
-        )
-        expected_base_sha = core.require_sha(
-            headers.get("x-review-conductor-base-sha"),
-            "workflow read-back base SHA",
-        )
-        expected_head_sha = core.require_sha(
-            headers.get("x-review-conductor-head-sha"),
-            "workflow read-back head SHA",
-        )
-        expected_run_id = header_positive_int(
-            "x-review-conductor-workflow-run-id", "workflow read-back run id"
-        )
-    except (core.ContractError, TypeError, ValueError) as exc:
-        raise ServiceError("workflow read-back exact tuple headers are invalid") from exc
-    receipt = reconcile_service_workflow_run(
-        config_path=config_path,
-        state_root=state_root,
-        body=body,
-        signature=headers.get("x-hub-signature-256", ""),
-        secret=secret,
-        expected_pr_number=expected_pr_number,
-        expected_base_sha=expected_base_sha,
-        expected_head_sha=expected_head_sha,
-        expected_run_id=expected_run_id,
-        registry=registry,
-        service_config=service_config,
-    )
-    return {**receipt, "run_id": expected_run_id}
-
-
 def build_service_http_handler(
     config: dict[str, Any],
     *,
@@ -626,18 +573,7 @@ def build_service_http_handler(
             service_config=config,
         )
 
-    def reconciler(**kwargs: Any) -> dict[str, Any]:
-        return _reconcile_workflow_request(
-            **kwargs, registry=registry, service_config=config,
-        )
-
-    return runtime.build_http_handler(
-        config,
-        secret,
-        ingestor=ingestor,
-        reconciler=reconciler,
-        reconciliation_path=WORKFLOW_READBACK_PATH,
-    )
+    return runtime.build_http_handler(config, secret, ingestor=ingestor)
 
 
 def binding_for_current_head(
@@ -1004,11 +940,7 @@ def trusted_enrollment_from_registry(
     grant a status. The service-profile repository must be an exact
     admitted-scope string before omitted-marker absence is treated as
     legitimate none/legacy-absent. Identity, reviewer, or core
-    contradictions fail closed. A matching enrollment still requires a
-    valid enabled core ``review_policy`` and the exact registry reviewer
-    mapping before Conductor present; missing or non-dict policy or
-    core config is broken. Unmatched enrollment keeps the existing
-    absent/legacy result. Dual is Conductor present plus that same
+    contradictions fail closed. Dual is Conductor present plus that same
     registry-owned legacy marker for this profile.
     """
     broken = {"review_conductor": "broken", "legacy_xapi": "broken"}
@@ -1042,7 +974,7 @@ def trusted_enrollment_from_registry(
     if core_config is None and config.get("core_config"):
         try:
             core_config = core.load_config(Path(config["core_config"]))
-        except (OSError, core.ContractError):
+        except (OSError, TypeError, ValueError, core.ContractError):
             return dict(broken)
     if not isinstance(core_config, dict):
         return dict(broken)
@@ -1054,9 +986,8 @@ def trusted_enrollment_from_registry(
     review_policy = core_config.get("review_policy")
     if not isinstance(review_policy, dict):
         return dict(broken)
-    if review_policy.get("enabled") is not True:
-        return dict(broken)
-    if review_policy.get("reviewers") != enrolled.reviewers:
+    reviewers = review_policy.get("reviewers")
+    if not isinstance(reviewers, dict) or reviewers != enrolled.reviewers:
         return dict(broken)
     return {"review_conductor": "present", "legacy_xapi": legacy}
 
@@ -1075,12 +1006,32 @@ def run_service_tick(
     (check creation/update, ClawSweeper dispatch) through the client's authority
     guard, so a registry revocation or profile edit after the gate stops the
     remainder of the tick instead of letting it publish under stale authority.
+    Trusted enrollment comes from the registry/admission result and is passed
+    into ``run_tick``; userland activation flags do not select the route.
+    Every live route keeps a freshness guard that re-resolves and compares
+    that pair; exact binding checks remain Conductor-only. Send eligibility
+    revalidates the current pair at the reserved claim/send boundary under
+    a versioned registry/route lease held through ``notifier.send``.
     """
-    require_current_bindings(config, registry)
+    lease = registry if isinstance(registry, RegistryRouteLease) else RegistryRouteLease(registry)
+    resolved = lease.current()
+    trusted_enrollment = trusted_enrollment_from_registry(config, resolved)
+    route, _reason = orchestration.enrollment_route(trusted_enrollment)
+    if route == "review_conductor":
+        require_current_bindings(config, resolved)
     import review_conductor_userland as userland
 
-    if not dry_run:
-        install = getattr(client, "set_authority_guard", None)
+    def current_trusted_enrollment() -> dict[str, str]:
+        return trusted_enrollment_from_registry(config, lease.current())
+
+    def ensure_current_trusted_enrollment() -> dict[str, str]:
+        current = current_trusted_enrollment()
+        if current != trusted_enrollment:
+            raise ServiceError("trusted enrollment changed before side effect")
+        return current
+
+    install = getattr(client, "set_authority_guard", None)
+    if route == "review_conductor" and not dry_run:
         assertion = getattr(client, "assert_authority", None)
         if not callable(install) or not callable(assertion):
             raise ServiceError(
@@ -1094,11 +1045,34 @@ def run_service_tick(
             # Explicit stale-check cleanup and unbound operator alerts are
             # repository-level maintenance. Every current review/check action
             # supplies an exact tuple and must still own that tuple here.
+            # Re-resolve first so a route change is observed for every live
+            # route; exact binding checks stay Conductor-only.
+            current_registry = lease.current()
+            current = trusted_enrollment_from_registry(config, current_registry)
+            if current != trusted_enrollment:
+                raise ServiceError("trusted enrollment changed before side effect")
             if authority is None:
-                require_current_bindings(config, registry)
+                require_current_bindings(config, current_registry)
             else:
-                require_current_bindings(config, registry)
-                require_exact_current_binding(config, registry, authority)
+                require_current_bindings(config, current_registry)
+                require_exact_current_binding(config, current_registry, authority)
 
         install(authority_guard)
-    return userland.run_tick(config, client, notifier, dry_run=dry_run)
+    elif not dry_run and callable(install):
+        def route_freshness_guard(
+            _method: str,
+            _path: str,
+            _authority: dict[str, Any] | None,
+        ) -> None:
+            ensure_current_trusted_enrollment()
+
+        install(route_freshness_guard)
+    return userland.run_tick(
+        config,
+        client,
+        notifier,
+        dry_run=dry_run,
+        enrollment=trusted_enrollment,
+        enrollment_resolver=current_trusted_enrollment,
+        registry_lease=lease,
+    )

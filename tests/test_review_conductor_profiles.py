@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -186,6 +187,57 @@ class ProfilesTest(unittest.TestCase):
         blocks['paths']['state_root']=str(path)
         with self.assertRaises(core.ContractError):runtime.recover_abandoned_actions(blocks)
         self.assertEqual(self.state(config)['state'],'openclaw_queued')
+
+    def test_legacy_ci_identity_conflict_closes_database_connection(self):
+        state = self.root / 'legacy-ci-conflict-state'
+        state.mkdir(mode=0o700)
+        database = state / 'review-conductor.sqlite3'
+        payload_a = {'workflow_run': {'id': 9001, 'created_at': '2026-08-27T00:10:00Z', 'conclusion': 'success'}}
+        payload_b = {'workflow_run': {'id': 9001, 'created_at': '2026-08-27T00:11:00Z', 'conclusion': 'failure'}}
+        with sqlite3.connect(database) as seed:
+            seed.execute(
+                """
+                CREATE TABLE events (
+                  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                  event_id TEXT NOT NULL UNIQUE, kind TEXT NOT NULL,
+                  repository TEXT NOT NULL, pr_number INTEGER NOT NULL,
+                  base_sha TEXT NOT NULL, head_sha TEXT NOT NULL,
+                  stale INTEGER NOT NULL, payload_json TEXT NOT NULL,
+                  created_at TEXT NOT NULL
+                )
+                """
+            )
+            for event_id, pr_number, head_sha, payload in (
+                ('legacy-ci-a', 7, 'a' * 40, payload_a),
+                ('legacy-ci-b', 8, 'b' * 40, payload_b),
+            ):
+                seed.execute(
+                    """
+                    INSERT INTO events(
+                      event_id, kind, repository, pr_number, base_sha, head_sha,
+                      stale, payload_json, created_at
+                    ) VALUES (?, 'ci.completed', ?, ?, ?, ?, 0, ?, ?)
+                    """,
+                    (event_id, REPO, pr_number, BASE, head_sha, json.dumps(payload), '2026-08-27T00:10:00Z'),
+                )
+            seed.commit()
+        created = []
+        real_connect = sqlite3.connect
+
+        def capture_connect(*args, **kwargs):
+            connection = real_connect(*args, **kwargs)
+            created.append(connection)
+            return connection
+
+        with patch.object(core.sqlite3, 'connect', capture_connect):
+            with self.assertRaises(core.ContractError) as ctx:
+                core.open_database(state, REPO)
+        self.assertIn('legacy CI workflow_run identities conflict', str(ctx.exception))
+        self.assertEqual(len(created), 1)
+        with self.assertRaises(sqlite3.ProgrammingError):
+            created[0].execute('SELECT 1')
+        with self.assertRaises(core.ContractError):
+            core.open_database(state, REPO)
 
     def test_draft_runs_openclaw_and_ready_enables_clawsweeper_without_new_epoch(self):
         config=self.config();p=self.payload(legacy.pr_payload(7));p['pull_request']['draft']=True
