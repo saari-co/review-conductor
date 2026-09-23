@@ -175,7 +175,10 @@ x-api. Later #687 workstreams are sequenced in
    executable and rebind that hardcoded receipt destination to the new source
    root. Userland health component `spark_transport` withholds overall
    dispatch readiness until that path is a regular executable whose single
-   absolute `DEST` literal is this checkout. Profile parsing stays valid while
+   absolute `DEST` literal is this checkout. The read opens the trusted source
+   root and each relative ancestor with `O_DIRECTORY|O_NOFOLLOW`, then opens
+   the leaf from that held directory, so a symlinked parent such as `source/bin`
+   cannot make an external executable look ready. Profile parsing stays valid while
    the file is absent. Health reads that literal only. It does not execute the
    adapter, rewrite `DEST`, or select a previous checkout. The copied
    compatibility modules still describe the existing pilot and tests inject

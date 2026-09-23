@@ -2775,24 +2775,48 @@ _RECEIPT_DEST_LINE = re.compile(r"""^DEST=Path\((['"])(/.+)\1\)$""")
 _TRANSPORT_INSPECT_LIMIT = 64 * 1024
 
 
-def adapter_receipt_destinations(path: Path) -> tuple[str, list[str]]:
+def adapter_receipt_destinations(path: Path, *, source_root: Path) -> tuple[str, list[str]]:
     """Read hardcoded receipt DEST literals without executing the adapter.
 
     The qualified untracked wrapper assigns ``DEST=Path('<absolute>')``. A
-    checkout move must rebind that literal to the new source root. This reader
-    accepts one bounded regular file and never follows a symlink.
+    checkout move must rebind that literal to the new source root. ``O_NOFOLLOW``
+    on a full path covers only the leaf, so this reader opens the trusted source
+    root and each relative ancestor with ``O_DIRECTORY|O_NOFOLLOW``, then opens
+    the leaf from that held directory. A symlinked parent such as ``source/bin``
+    cannot redirect the read at an external executable.
     """
     try:
-        info = path.lstat()
-    except OSError:
-        return ("unreadable", [])
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        relative = path.relative_to(source_root)
+    except ValueError:
         return ("not_regular", [])
+    if ".." in relative.parts or not relative.parts:
+        return ("not_regular", [])
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        held = os.open(source_root, directory_flags)
     except OSError:
         return ("unreadable", [])
     try:
+        for component in relative.parts[:-1]:
+            try:
+                ancestor = os.open(component, directory_flags, dir_fd=held)
+            except OSError:
+                return ("not_regular", [])
+            os.close(held)
+            held = ancestor
+        try:
+            descriptor = os.open(
+                relative.name,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                dir_fd=held,
+            )
+        except OSError:
+            return ("not_regular", [])
+    finally:
+        os.close(held)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return ("not_regular", [])
         with os.fdopen(descriptor, "rb", closefd=False) as stream:
             raw = stream.read(_TRANSPORT_INSPECT_LIMIT + 1)
     finally:
@@ -2815,8 +2839,9 @@ def spark_transport_component(config: dict[str, Any]) -> dict[str, str]:
     Profile parsing stays valid when the adapter is absent. Dispatch readiness is
     this health boundary: the source-relative ``spark.smoky_path`` must already
     be a regular executable whose single hardcoded receipt ``DEST`` is this
-    checkout. Copying the qualified wrapper without rebinding that literal
-    leaves receipts in the previous checkout.
+    checkout, reached without following a symlink at any relative component.
+    Copying the qualified wrapper without rebinding that literal leaves receipts
+    in the previous checkout.
     """
     path = Path(config["spark"]["smoky_path"])
     located = str(path)
@@ -2826,7 +2851,9 @@ def spark_transport_component(config: dict[str, Any]) -> dict[str, str]:
         "rebind its hardcoded receipt destination DEST to this checkout"
     )
     if path.is_file() and os.access(path, os.X_OK):
-        status, destinations = adapter_receipt_destinations(path)
+        status, destinations = adapter_receipt_destinations(
+            path, source_root=Path(config["source_root"])
+        )
         if status == "ok" and len(destinations) == 1 and os.path.normpath(destinations[0]) == checkout:
             return runtime.component(
                 "ready",
