@@ -2520,7 +2520,7 @@ def tuple_action(
         SELECT * FROM actions
         WHERE repository = ? AND pr_number = ? AND base_sha = ? AND head_sha = ?
           AND kind = ? AND review_epoch = ?
-        ORDER BY created_at, action_id
+        ORDER BY created_at DESC, rowid DESC
         LIMIT 1
         """,
         (*identity.values(), kind, review_epoch),

@@ -175,6 +175,37 @@ def test_same_head_proof_refresh_and_stale_completion(temp: Path) -> None:
         },
     )
     assert dispatched["result"] == "dispatched"
+    # A same-second rereview can produce equal timestamps.  The current
+    # dispatch is the later inserted row even when action IDs sort the other
+    # way; tuple_action must not select the obsolete historical action.
+    connection = core.open_database(state)
+    try:
+        current_action_id = "z" * 64
+        obsolete_action_id = "a" * 64
+        connection.execute(
+            "UPDATE actions SET action_id = ?, created_at = ?, review_epoch = ? WHERE action_id = ?",
+            (obsolete_action_id, "2026-08-27T01:00:00Z", accepted["review_epoch"], superseded["action_id"]),
+        )
+        connection.execute(
+            "UPDATE actions SET action_id = ?, created_at = ? WHERE action_id = ?",
+            (current_action_id, "2026-08-27T01:00:00Z", refreshed["action_id"]),
+        )
+        connection.commit()
+        selected = core.tuple_action(
+            connection,
+            {
+                "repository": "dinkuskit/blocks",
+                "pr_number": 301,
+                "base_sha": legacy.BASE,
+                "head_sha": head,
+            },
+            "clawsweeper.dispatch",
+            accepted["review_epoch"],
+        )
+        assert selected is not None
+        assert selected["action_id"] == current_action_id
+    finally:
+        connection.close()
     clean = legacy.internal_event(
         temp,
         state,
