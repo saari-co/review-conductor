@@ -200,13 +200,59 @@ class ProfilesTest(unittest.TestCase):
             denied['components']['spark_transport']['reason'],
         )
         transport.chmod(0o755)
+        unbound=userland.health(config)
+        self.assertEqual(unbound['overall'], 'not_ready')
+        self.assertIn(
+            'does not hardcode a receipt DEST',
+            unbound['components']['spark_transport']['reason'],
+        )
+        self.assertIn('rebind its hardcoded receipt destination DEST', unbound['components']['spark_transport']['reason'])
+        stale_checkout=self.root / 'legacy-checkout'
+        transport.write_text(f"#!/bin/sh\nDEST=Path('{stale_checkout}')\n", encoding='utf-8')
+        transport.chmod(0o755)
+        stale=userland.health(config)
+        self.assertEqual(stale['overall'], 'not_ready')
+        self.assertIn(
+            f'hardcodes receipt DEST {stale_checkout}',
+            stale['components']['spark_transport']['reason'],
+        )
+        self.assertIn(str(self.source.resolve()), stale['components']['spark_transport']['reason'])
+        self.assertNotIn(str(decoy), stale['components']['spark_transport']['reason'])
+        transport.write_text(
+            "#!/bin/sh\n"
+            f"DEST=Path('{self.source.resolve()}')\n"
+            f"DEST=Path('{stale_checkout}')\n",
+            encoding='utf-8',
+        )
+        transport.chmod(0o755)
+        duplicated=userland.health(config)
+        self.assertEqual(duplicated['overall'], 'not_ready')
+        self.assertIn(
+            'more than one receipt DEST',
+            duplicated['components']['spark_transport']['reason'],
+        )
+        transport.write_text(f"#!/bin/sh\nDEST=Path('{self.source.resolve()}')\n", encoding='utf-8')
+        transport.chmod(0o755)
         ready=userland.health(config)
         self.assertEqual(
             ready['components']['spark_transport'],
-            {'state': 'ready', 'reason': 'configured Spark transport is executable'},
+            {
+                'state': 'ready',
+                'reason': 'configured Spark transport is executable and its receipt destination is this checkout',
+            },
         )
         self.assertEqual(ready['overall'], 'ready')
         self.assertEqual(config['spark']['smoky_path'], str(transport))
+        linked=self.root / 'linked-smoky'
+        linked.symlink_to(transport)
+        config['spark']['smoky_path']=str(linked)
+        followed=userland.health(config)
+        self.assertEqual(followed['overall'], 'not_ready')
+        self.assertIn(
+            f'not a regular file at {linked}',
+            followed['components']['spark_transport']['reason'],
+        )
+        config['spark']['smoky_path']=str(transport)
 
     def test_isolation_rejects_every_shared_boundary_and_nested_or_symlink_roots(self):
         suite=self.config()

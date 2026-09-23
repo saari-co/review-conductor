@@ -2771,29 +2771,88 @@ def run_tick(
     }
 
 
+_RECEIPT_DEST_LINE = re.compile(r"""^DEST=Path\((['"])(/.+)\1\)$""")
+_TRANSPORT_INSPECT_LIMIT = 64 * 1024
+
+
+def adapter_receipt_destinations(path: Path) -> tuple[str, list[str]]:
+    """Read hardcoded receipt DEST literals without executing the adapter.
+
+    The qualified untracked wrapper assigns ``DEST=Path('<absolute>')``. A
+    checkout move must rebind that literal to the new source root. This reader
+    accepts one bounded regular file and never follows a symlink.
+    """
+    try:
+        info = path.lstat()
+    except OSError:
+        return ("unreadable", [])
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return ("not_regular", [])
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return ("unreadable", [])
+    try:
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            raw = stream.read(_TRANSPORT_INSPECT_LIMIT + 1)
+    finally:
+        os.close(descriptor)
+    if len(raw) > _TRANSPORT_INSPECT_LIMIT:
+        return ("oversized", [])
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeError:
+        return ("unreadable", [])
+    return (
+        "ok",
+        [match.group(2) for line in text.splitlines() if (match := _RECEIPT_DEST_LINE.fullmatch(line))],
+    )
+
+
 def spark_transport_component(config: dict[str, Any]) -> dict[str, str]:
     """Report the configured Spark transport without executing it or selecting another path.
 
     Profile parsing stays valid when the adapter is absent. Dispatch readiness is
     this health boundary: the source-relative ``spark.smoky_path`` must already
-    be a regular executable. The external untracked adapter and its receipt
-    destination are preserved with the checkout that owns the profile.
+    be a regular executable whose single hardcoded receipt ``DEST`` is this
+    checkout. Copying the qualified wrapper without rebinding that literal
+    leaves receipts in the previous checkout.
     """
     path = Path(config["spark"]["smoky_path"])
     located = str(path)
+    checkout = os.path.normpath(config["source_root"])
+    preserve = (
+        "; preserve the external untracked adapter at the configured path and "
+        "rebind its hardcoded receipt destination DEST to this checkout"
+    )
     if path.is_file() and os.access(path, os.X_OK):
-        return runtime.component("ready", "configured Spark transport is executable")
+        status, destinations = adapter_receipt_destinations(path)
+        if status == "ok" and len(destinations) == 1 and os.path.normpath(destinations[0]) == checkout:
+            return runtime.component(
+                "ready",
+                "configured Spark transport is executable and its receipt destination is this checkout",
+            )
+        if status == "ok" and len(destinations) == 1:
+            detail = (
+                f"configured Spark transport hardcodes receipt DEST {os.path.normpath(destinations[0])}, "
+                f"which is not this checkout {checkout}"
+            )
+        elif status == "ok" and len(destinations) > 1:
+            detail = "configured Spark transport hardcodes more than one receipt DEST"
+        elif status == "oversized":
+            detail = f"configured Spark transport exceeds the receipt-destination inspection bound at {located}"
+        elif status == "not_regular":
+            detail = f"configured Spark transport is not a regular file at {located}"
+        else:
+            detail = f"configured Spark transport does not hardcode a receipt DEST at {located}"
+        return runtime.component("not_ready", detail + preserve)
     if path.is_file():
         detail = f"configured Spark transport is not executable at {located}"
     elif path.exists():
         detail = f"configured Spark transport is not a regular file at {located}"
     else:
         detail = f"configured Spark transport is missing at {located}"
-    return runtime.component(
-        "not_ready",
-        detail
-        + "; preserve the external untracked adapter at the configured path and verify its receipt destination for this checkout",
-    )
+    return runtime.component("not_ready", detail + preserve)
 
 
 def health(config: dict[str, Any]) -> dict[str, Any]:
