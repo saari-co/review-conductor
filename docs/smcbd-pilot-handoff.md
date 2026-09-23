@@ -114,7 +114,12 @@ mode-0600 registry against this profile. `preflight` reports registry and
 bootstrap status only. `start` forwards already-prepared webhook and GitHub
 App descriptors into `tools/standalone_supervisor.py` and does not read live
 secrets from reviewed-profile `onepassword` selectors. `health` only queries
-the supervisor. None of these verbs resolve or start cloudflared. Legacy
+the supervisor. Supervisor health reports process status. Dispatch readiness
+is `tools/review_conductor_userland.py health`: component `spark_transport`
+must be ready before `overall` is ready. `spark.smoky_path` is an external
+untracked adapter, so a moved checkout must preserve that file, pass this
+health component, and verify the adapter receipt destination is the moved
+checkout. None of these verbs resolve or start cloudflared. Legacy
 `start` remains the Blocks 9443 consumer and refuses this profile.
 Standalone stop uses `stop_standalone_child`; Blocks/tunnel callers keep
 `stop_child`. No launchd unit is stored here. The
@@ -214,6 +219,9 @@ next stage.
    credentials. Keep the GitHub App webhook disabled and its URL empty.
 6. Verify service health, TLS, loopback routing, exact deployed source, isolated
    state/queue/proof paths, and a synthetic signed POST without logging secrets.
+   When the checkout moves, preserve the external untracked `spark.smoky_path`
+   adapter, require userland health `spark_transport` ready, and verify that
+   adapter's receipt destination is the moved checkout.
 
 ### Stage 3: separately authorized webhook activation
 

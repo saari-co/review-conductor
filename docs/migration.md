@@ -165,7 +165,14 @@ x-api. Later #687 workstreams are sequenced in
 2. Qualify the remaining Smoky runtime integration. The standalone entrypoint
    contains its own periodic worker loop, so it needs no external scheduler or
    Gateway plugin; however, OpenClaw dispatch still executes the configured
-   `spark.smoky_path` transport for the configured Spark target. The copied
+   `spark.smoky_path` transport for the configured Spark target. That path is
+   an external untracked adapter. Moving a checkout keeps the profile value
+   and drops the executable unless the adapter is preserved at the configured
+   path. Userland health component `spark_transport` withholds overall
+   dispatch readiness until that path is a regular executable, and the same
+   move must verify the adapter's receipt destination is the checkout that
+   owns the profile. Profile parsing stays valid while the file is absent.
+   Health does not run the adapter or select a previous checkout. The copied
    compatibility modules still describe the existing pilot and tests inject
    transports. They are not a portable activated service yet. The queue command
    now names the source-qualified exact-tuple contract flags; x-api attachment

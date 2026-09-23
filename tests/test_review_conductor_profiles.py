@@ -159,6 +159,55 @@ class ProfilesTest(unittest.TestCase):
         with self.assertRaises(core.ContractError):core.ingest_github_delivery(config_path=Path(config['core_config']),state_root=Path(config['paths']['state_root']),event_type='pull_request',delivery_id='inactive',signature=signature,body=body,secret=legacy.SECRET)
         self.assertFalse(Path(config['paths']['state_root']).exists())
 
+    def test_health_withholds_dispatch_readiness_without_configured_transport(self):
+        config=self.config(True)
+        transport=Path(config['spark']['smoky_path'])
+        self.assertEqual(transport, self.source.resolve() / 'bin' / 'smoky')
+        self.assertFalse(transport.exists())
+        for key in ('state_root', 'proof_root', 'blocks_checkout'):
+            Path(config['paths'][key]).mkdir(parents=True)
+        gateway=self.root / 'bin' / 'openclaw'
+        gateway.parent.mkdir()
+        gateway.write_text('#!/bin/sh\nexit 0\n')
+        gateway.chmod(0o755)
+        config['notifications']['openclaw_path']=str(gateway)
+        decoy=self.root / 'legacy-checkout' / 'bin' / 'smoky'
+        decoy.parent.mkdir(parents=True)
+        decoy.write_text('#!/bin/sh\nexit 0\n')
+        decoy.chmod(0o755)
+        missing=userland.health(config)
+        self.assertEqual(missing['overall'], 'not_ready')
+        self.assertEqual(missing['components']['spark_transport']['state'], 'not_ready')
+        self.assertIn(
+            f'configured Spark transport is missing at {transport}',
+            missing['components']['spark_transport']['reason'],
+        )
+        self.assertIn('receipt destination', missing['components']['spark_transport']['reason'])
+        self.assertNotIn(str(decoy), missing['components']['spark_transport']['reason'])
+        self.assertTrue(all(
+            item['state'] == 'ready'
+            for name, item in missing['components'].items()
+            if name != 'spark_transport'
+        ))
+        self.assertEqual(config['spark']['smoky_path'], str(transport))
+        transport.parent.mkdir(parents=True)
+        transport.write_text('#!/bin/sh\nexit 0\n')
+        transport.chmod(0o644)
+        denied=userland.health(config)
+        self.assertEqual(denied['overall'], 'not_ready')
+        self.assertIn(
+            f'configured Spark transport is not executable at {transport}',
+            denied['components']['spark_transport']['reason'],
+        )
+        transport.chmod(0o755)
+        ready=userland.health(config)
+        self.assertEqual(
+            ready['components']['spark_transport'],
+            {'state': 'ready', 'reason': 'configured Spark transport is executable'},
+        )
+        self.assertEqual(ready['overall'], 'ready')
+        self.assertEqual(config['spark']['smoky_path'], str(transport))
+
     def test_isolation_rejects_every_shared_boundary_and_nested_or_symlink_roots(self):
         suite=self.config()
         blocks=userland.load_config(self.contracts/'dinkuskit-blocks-userland.json',home=self.home,source_root=self.source)

@@ -2771,6 +2771,31 @@ def run_tick(
     }
 
 
+def spark_transport_component(config: dict[str, Any]) -> dict[str, str]:
+    """Report the configured Spark transport without executing it or selecting another path.
+
+    Profile parsing stays valid when the adapter is absent. Dispatch readiness is
+    this health boundary: the source-relative ``spark.smoky_path`` must already
+    be a regular executable. The external untracked adapter and its receipt
+    destination are preserved with the checkout that owns the profile.
+    """
+    path = Path(config["spark"]["smoky_path"])
+    located = str(path)
+    if path.is_file() and os.access(path, os.X_OK):
+        return runtime.component("ready", "configured Spark transport is executable")
+    if path.is_file():
+        detail = f"configured Spark transport is not executable at {located}"
+    elif path.exists():
+        detail = f"configured Spark transport is not a regular file at {located}"
+    else:
+        detail = f"configured Spark transport is missing at {located}"
+    return runtime.component(
+        "not_ready",
+        detail
+        + "; preserve the external untracked adapter at the configured path and verify its receipt destination for this checkout",
+    )
+
+
 def health(config: dict[str, Any]) -> dict[str, Any]:
     components: dict[str, dict[str, str]] = {}
     if config.get("enrollment", {}).get("enabled") is False:
@@ -2796,6 +2821,7 @@ def health(config: dict[str, Any]) -> dict[str, Any]:
         "ready" if openclaw_ready else "not_ready",
         "OpenClaw Gateway CLI is executable" if openclaw_ready else "OpenClaw Gateway CLI is unavailable",
     )
+    components["spark_transport"] = spark_transport_component(config)
     return {
         "schema": "smoky.review-conductor.userland-health.v1",
         "overall": "ready" if all(item["state"] == "ready" for item in components.values()) else "not_ready",
