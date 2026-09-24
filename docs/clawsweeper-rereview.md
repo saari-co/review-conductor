@@ -84,16 +84,31 @@ A non-success run with no exact verdict bundle fails the current head only when
 that run is the already-started request, the dispatch receipt stores that
 workflow run id, or the single admission job log shows one consistent
 `pr_number`, `expected_base_sha`, `expected_head_sha`, and `review_epoch` for
-the current dispatched tuple. The head becomes `clawsweeper_failed` with no
-content verdict. That is not review PASS. While the head remains
-`clawsweeper_queued` or `clawsweeper_running`, rereview waits. After
-`clawsweeper_failed`, maintainer rereview is the supported same-head recovery.
-An unproven failure stays a repository alert and does not select a pull request.
-Creation time, workflow ref SHA, and "the only queued pull" are not identities.
+the current dispatched tuple. Repeated identical complete blocks are one
+identity. An incomplete block that only repeats those values is ignored. A
+different value in a partial block or a second complete block is no identity.
+A log larger than 64KiB is no identity, including when the first 64KiB already
+contain a complete tuple and a conflicting tuple follows. The head becomes
+`clawsweeper_failed` with no content verdict. That is not review PASS. While
+the head remains `clawsweeper_queued` or `clawsweeper_running`, rereview
+waits. After `clawsweeper_failed`, maintainer rereview is the supported
+same-head recovery. An unproven failure stays a repository alert and does not
+select a pull request. Creation time, workflow ref SHA, and "the only queued
+pull" are not identities.
 
-Dispatch asks GitHub for `return_run_details` and stores `workflow_run_id` on
-the receipt when the host returns it. A 204 response still counts as dispatch
-and leaves the run id unset.
+The admission job log is downloaded through the existing artifact redirect
+transport. GitHub's job-log endpoint returns one 302, and only a
+`productionresultssa*.blob.core.windows.net` target is followed. Private
+runner log hosts, including `results-receiver.actions.githubusercontent.com`
+and `*.actions.githubusercontent.com` pipeline hosts, stay outside that
+allowlist until a separate approval. A refused redirect is no identity.
+
+Dispatch sends `return_run_details: true`. GitHub's 2026-02-19 workflow
+dispatch changelog returns HTTP 200 when that flag is set and HTTP 204 when
+it is omitted. The current REST schema names the 200 body key
+`workflow_run_id` (with `run_url` and `html_url`). The receipt stores that
+integer key. A 204 response, or a 200 body without `workflow_run_id`, still
+counts as dispatch and leaves the run id unset.
 
 ## Live activation is separate
 

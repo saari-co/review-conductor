@@ -43,7 +43,9 @@ supported same-head ClawSweeper refresh entry; `pull_request.edited` is not a
 trigger. A superseded or unbound ClawSweeper bundle does not block collection
 or projection of a different current action. A no-artifact producer failure
 becomes `clawsweeper_failed` only for the exact current dispatched tuple, and
-that failure is not review PASS. See [ClawSweeper rereview](clawsweeper-rereview.md).
+that failure is not review PASS. An admission log larger than 64KiB, a
+conflicting partial block, or a private-runner log redirect is not that
+identity. See [ClawSweeper rereview](clawsweeper-rereview.md).
 
 Enrollment and terminal notification eligibility are one Conductor-owned
 decision, [`decide_orchestration_outcome`](../tools/orchestration_outcome.py)

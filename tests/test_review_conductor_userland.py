@@ -2893,6 +2893,12 @@ def test_parse_clawsweeper_dispatch_log_accepts_one_consistent_tuple() -> None:
     assert runtime.parse_clawsweeper_dispatch_log(conflict) is None
     assert runtime.parse_clawsweeper_dispatch_log("pr_number: 48\nreview_epoch: 0\n") is None
     assert runtime.parse_clawsweeper_dispatch_log("pr_number: 0\nexpected_base_sha: " + base + "\nexpected_head_sha: " + head + "\nreview_epoch: 0\n") is None
+    echoed = text + "\npr_number: 48\nexpected_base_sha: " + base
+    assert runtime.parse_clawsweeper_dispatch_log(echoed)["pr_number"] == 48
+    partial_conflict = text + "\npr_number: 49\n"
+    assert runtime.parse_clawsweeper_dispatch_log(partial_conflict) is None
+    leading_conflict = "pr_number: 49\nnoise\n" + text
+    assert runtime.parse_clawsweeper_dispatch_log(leading_conflict) is None
 
 
 def test_admission_job_log_is_the_only_dispatch_identity_source() -> None:
@@ -2947,6 +2953,192 @@ def test_admission_job_log_is_the_only_dispatch_identity_source() -> None:
         client._transport = no_admission
         assert client.clawsweeper_dispatch_identity(36009939846) is None
         assert len(calls) == 1 and calls[0].endswith("/jobs")
+
+
+def _dispatch_tuple_text(pr: int, base: str, head: str, epoch: int) -> str:
+    return "\n".join([
+        f"pr_number: {pr}",
+        f"expected_base_sha: {base}",
+        f"expected_head_sha: {head}",
+        f"review_epoch: {epoch}",
+    ]) + "\n"
+
+
+def _admission_log_client(
+    config: dict[str, Any],
+    request_once: runtime.ArtifactRequest,
+) -> runtime.GitHubAppClient:
+    def transport(
+        method: str, url: str, _headers: dict[str, str], body: bytes | None, _timeout: float
+    ):
+        if url.endswith("/jobs"):
+            payload = {"jobs": [{"id": 7, "name": "Run pinned exact-tuple ClawSweeper / Admit exact-tuple PR"}]}
+            return 200, {}, json.dumps(payload).encode()
+        if url.endswith("/artifacts"):
+            return 200, {}, b'{"artifacts":[]}'
+        if body and b"return_run_details" in body:
+            return 200, {}, json.dumps({"workflow_run_id": 99}).encode()
+        raise AssertionError(url)
+
+    def artifact_transport(url: str, headers: dict[str, str], timeout: float) -> tuple[int, bytes]:
+        return runtime.urllib_artifact_transport(url, headers, timeout, request_once=request_once)
+
+    client = runtime.GitHubAppClient(
+        config, "fixture-key", transport=transport, artifact_transport=artifact_transport
+    )
+    client._token = "fixture-token"
+    client._token_expires = 9999999999
+    return client
+
+
+def test_oversize_admission_log_with_conflicting_suffix_is_not_an_identity() -> None:
+    other = "e" * 40
+    pr, run_id = 86, 3086
+    prefix = _dispatch_tuple_text(pr, BASE, HEAD, 0).encode()
+    limit = runtime.CLAWSWEEPER_DISPATCH_LOG_LIMIT
+    assert len(prefix) < limit
+    padding = b"x" * (limit - len(prefix))
+    suffix = _dispatch_tuple_text(pr + 1, BASE, other, 1).encode()
+    raw = prefix + padding + suffix
+    assert len(raw) == limit + len(suffix)
+    assert runtime.parse_clawsweeper_dispatch_log(raw[:limit].decode()) == {
+        "pr_number": pr,
+        "expected_base_sha": BASE,
+        "expected_head_sha": HEAD,
+        "review_epoch": 0,
+    }
+    calls: list[str] = []
+
+    def request_once(url: str, headers: dict[str, str], _timeout: float):
+        calls.append(url)
+        if url.endswith("/logs"):
+            assert headers["Authorization"] == "Bearer fixture-token"
+            return 302, {
+                "Location": (
+                    "https://productionresultssa12.blob.core.windows.net/"
+                    "actions-results/admission.log?sig=fixture"
+                )
+            }, b""
+        assert "Authorization" not in headers
+        return 200, {}, raw
+
+    with tempfile.TemporaryDirectory() as temporary:
+        config = config_fixture(Path(temporary))
+        prepare_openclaw(config, Path(temporary), pr)
+        assert current(config, pr)["review_epoch"] == 0
+        mark_dispatched(config, action(config, pr, "clawsweeper.dispatch")["action_id"])
+        ingress(
+            config, "workflow_run", "oversize-log",
+            claw_workflow_payload(run_id, conclusion="failure"),
+        )
+        client = _admission_log_client(config, request_once)
+        assert client.clawsweeper_dispatch_identity(run_id) is None
+        outcomes = userland.collect_clawsweeper_terminals(config, client, dry_run=False)
+        assert outcomes[0]["result"] == "rail_failure_alerted"
+        assert current(config, pr)["state"] == "clawsweeper_queued"
+        assert calls[0].endswith("/logs")
+        assert "productionresultssa12.blob.core.windows.net" in calls[1]
+
+
+def test_admission_log_redirect_stays_on_the_artifact_allowlist() -> None:
+    head = "a" * 40
+    base = "b" * 40
+    log = _dispatch_tuple_text(48, base, head, 2).encode()
+    blob = (
+        "https://productionresultssa7.blob.core.windows.net/"
+        "actions-results/admission.log?sig=fixture"
+    )
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    def allowlisted(url: str, headers: dict[str, str], _timeout: float):
+        calls.append((url, dict(headers)))
+        if url.endswith("/logs"):
+            return 302, {"Location": blob}, b""
+        return 200, {}, log
+
+    with tempfile.TemporaryDirectory() as temporary:
+        config = config_fixture(Path(temporary))
+        client = _admission_log_client(config, allowlisted)
+        assert client.clawsweeper_dispatch_identity(36009939846) == {
+            "repository": "dinkuskit/blocks",
+            "pr_number": 48,
+            "base_sha": base,
+            "head_sha": head,
+            "review_epoch": 2,
+        }
+    assert calls[0][0].endswith("/logs")
+    assert calls[0][1]["Authorization"] == "Bearer fixture-token"
+    assert calls[1] == (blob, {
+        "Accept": "application/octet-stream",
+        "User-Agent": "smoky-review-conductor/1",
+    })
+
+    forbidden = (
+        "https://results-receiver.actions.githubusercontent.com/logs/job?sig=fixture",
+        "https://pipelinesghubeus25.actions.githubusercontent.com/signedlogcontent/4?sig=fixture",
+    )
+    for location in forbidden:
+        seen: list[str] = []
+
+        def denied(url: str, _headers: dict[str, str], _timeout: float, bound: str = location) -> tuple[int, dict[str, str], bytes]:
+            seen.append(url)
+            return 302, {"Location": bound}, b""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            config = config_fixture(Path(temporary))
+            client = _admission_log_client(config, denied)
+            assert client.clawsweeper_dispatch_identity(36009939846) is None
+        assert len(seen) == 1 and seen[0].endswith("/logs")
+
+
+def test_dispatch_stores_only_documented_workflow_run_id() -> None:
+    head = "a" * 40
+    base = "b" * 40
+    recorded: list[dict[str, Any]] = []
+    scripted: list[tuple[int, bytes]] = [
+        (200, json.dumps({
+            "workflow_run_id": 99,
+            "run_url": "https://api.github.com/repos/dinkuskit/blocks/actions/runs/99",
+            "html_url": "https://github.com/dinkuskit/blocks/actions/runs/99",
+        }).encode()),
+        (204, b""),
+        (200, json.dumps({
+            "id": 99,
+            "run_url": "https://api.github.com/repos/dinkuskit/blocks/actions/runs/99",
+            "html_url": "https://github.com/dinkuskit/blocks/actions/runs/99",
+        }).encode()),
+    ]
+
+    def transport(
+        _method: str, url: str, _headers: dict[str, str], body: bytes | None, _timeout: float
+    ):
+        assert url.endswith("/dispatches")
+        assert body is not None
+        payload = json.loads(body)
+        recorded.append(payload)
+        status, raw = scripted.pop(0)
+        return status, {}, raw
+
+    with tempfile.TemporaryDirectory() as temporary:
+        config = config_fixture(Path(temporary))
+        client = runtime.GitHubAppClient(config, "fixture-key", transport=transport)
+        client._token = "fixture-token"
+        client._token_expires = 9999999999
+        assert client.dispatch_clawsweeper(
+            pr_number=48, base_sha=base, head_sha=head, publish=True
+        ) == 99
+        assert client.dispatch_clawsweeper(
+            pr_number=48, base_sha=base, head_sha=head, publish=True
+        ) is None
+        assert client.dispatch_clawsweeper(
+            pr_number=48, base_sha=base, head_sha=head, publish=True
+        ) is None
+    assert scripted == []
+    assert len(recorded) == 3
+    for payload in recorded:
+        assert payload["return_run_details"] is True
+        assert payload["inputs"]["expected_base_sha"] == base
+        assert payload["inputs"]["expected_head_sha"] == head
 
 
 def test_failed_clawsweeper_publisher_binds_exact_artifact_and_fails_pr() -> None:
@@ -3285,6 +3477,9 @@ def main() -> None:
         test_dispatch_identity_transport_failure_leaves_the_run_pending,
         test_parse_clawsweeper_dispatch_log_accepts_one_consistent_tuple,
         test_admission_job_log_is_the_only_dispatch_identity_source,
+        test_oversize_admission_log_with_conflicting_suffix_is_not_an_identity,
+        test_admission_log_redirect_stays_on_the_artifact_allowlist,
+        test_dispatch_stores_only_documented_workflow_run_id,
         test_failed_clawsweeper_publisher_binds_exact_artifact_and_fails_pr,
         test_notification_commands_use_gateway_without_secret_flags,
         test_pretty_multiline_notification_receipt_and_explicit_reconciliation,

@@ -89,6 +89,14 @@ class GitHubApiError(RuntimeError):
     """A fixed GitHub API operation failed without exposing response material."""
 
 
+class ArtifactRedirectDenied(GitHubApiError):
+    """The signed redirect host is outside the fixed artifact allowlist.
+
+    Admission-log collection treats this as no identity. Widening the
+    allowlist for private runner logs requires a separate approval.
+    """
+
+
 class GitHubTransientError(GitHubApiError):
     """The transport or GitHub itself failed transiently; the same call may be retried."""
 
@@ -204,6 +212,8 @@ ARTIFACT_BLOB_HOST_RE = re.compile(
     r"^productionresultssa[0-9]+\.blob\.core\.windows\.net$", re.IGNORECASE
 )
 CLAWSWEEPER_ADMISSION_JOB_MARK = "Admit exact-tuple"
+# Bytes above this bound are not an identity. A prefix parse would hide a
+# conflicting tuple that begins later in the same admission log.
 CLAWSWEEPER_DISPATCH_LOG_LIMIT = 64 * 1024
 _DISPATCH_LOG_ANSI = re.compile(r"\x1b\[[0-9;]*m")
 _DISPATCH_LOG_TIMESTAMP = re.compile(
@@ -294,7 +304,6 @@ def validate_artifact_redirect(api_url: str, location: str) -> str:
     if (
         target.scheme != "https"
         or target.hostname is None
-        or ARTIFACT_BLOB_HOST_RE.fullmatch(target.hostname) is None
         or target.username is not None
         or target.password is not None
         or target_port not in {None, 443}
@@ -303,6 +312,10 @@ def validate_artifact_redirect(api_url: str, location: str) -> str:
         or target.fragment
     ):
         raise GitHubApiError("GitHub artifact redirect target is outside the fixed allowlist")
+    if ARTIFACT_BLOB_HOST_RE.fullmatch(target.hostname) is None:
+        raise ArtifactRedirectDenied(
+            "GitHub artifact redirect target is outside the fixed allowlist"
+        )
     return location
 
 
@@ -333,47 +346,65 @@ def urllib_artifact_transport(
 def parse_clawsweeper_dispatch_log(text: str) -> dict[str, Any] | None:
     """Return one consistent dispatch tuple echoed by the admission job.
 
-    Repeated identical blocks are one identity. A partial block is ignored.
-    Two different complete blocks, or a repeated key with a different value,
-    are not an identity.
+    Repeated identical complete blocks are one identity. An incomplete block
+    is not an identity by itself. A partial block that only repeats the
+    complete tuple is ignored. A different value in any partial or complete
+    block is not an identity.
     """
     if not isinstance(text, str):
         return None
-    complete: set[tuple[tuple[str, Any], ...]] = set()
+    complete: list[tuple[tuple[str, Any], ...]] = []
+    partials: list[dict[str, Any]] = []
     current: dict[str, Any] = {}
 
-    def reject_or_store(key: str, value: str) -> bool:
+    def parse_field(key: str, value: str) -> Any:
         if key in {"pr_number", "review_epoch"}:
             if not re.fullmatch(r"[0-9]{1,10}", value):
-                return False
+                return None
             if key == "pr_number" and value == "0":
-                return False
-            parsed: Any = int(value)
+                return None
+            return int(value)
+        if not re.fullmatch(r"[0-9a-f]{40}", value):
+            return None
+        return value
+
+    def close_block() -> None:
+        nonlocal current
+        if not current:
+            return
+        if set(current) == _DISPATCH_LOG_FIELDS:
+            complete.append(tuple(sorted(current.items())))
         else:
-            if not re.fullmatch(r"[0-9a-f]{40}", value):
-                return False
-            parsed = value
-        prior = current.get(key)
-        if prior is not None and prior != parsed:
-            return False
-        current[key] = parsed
-        return True
+            partials.append(current)
+        current = {}
 
     for raw_line in text.splitlines():
         line = _DISPATCH_LOG_ANSI.sub("", raw_line).strip()
         line = _DISPATCH_LOG_TIMESTAMP.sub("", line).strip()
         match = _DISPATCH_LOG_FIELD.fullmatch(line)
         if match is None:
-            current.clear()
+            close_block()
             continue
-        if not reject_or_store(match.group(1).lower(), match.group(2)):
+        key = match.group(1).lower()
+        parsed = parse_field(key, match.group(2))
+        if parsed is None:
             return None
+        prior = current.get(key)
+        if prior is not None and prior != parsed:
+            return None
+        current[key] = parsed
         if set(current) == _DISPATCH_LOG_FIELDS:
-            complete.add(tuple(sorted(current.items())))
+            complete.append(tuple(sorted(current.items())))
             current = {}
-    if len(complete) != 1:
+    close_block()
+    if len(set(complete)) != 1:
         return None
-    return dict(complete.pop())
+    identity = dict(complete[0])
+    for partial in partials:
+        for key, value in partial.items():
+            if identity[key] != value:
+                return None
+    return identity
 
 
 class GitHubAppClient:
@@ -1060,7 +1091,8 @@ class GitHubAppClient:
         if self._strict_adapter:
             require_review_epoch(review_epoch, "dispatch review epoch")
             extra = {"review_epoch": str(review_epoch), "repository": self.repository, "review_scope": "comprehensive"}
-        # github.com returns the created run when asked. A 204 host still
+        # Changelog 2026-02-19: return_run_details true yields HTTP 200 with
+        # workflow_run_id. Omitting the flag yields 204. A 204 host still
         # dispatches; the collector then has no stored run id for that attempt.
         response = self._call(
             "POST",
@@ -1121,8 +1153,11 @@ class GitHubAppClient:
 
         GitHub's workflow run resource does not return workflow_dispatch inputs.
         The admission job log is the only retained exact tuple for a run whose
-        dispatch receipt predates stored run ids. A missing, conflicting, or
-        non-admission log is no identity, not a guess.
+        dispatch receipt predates stored run ids. Download reuses the artifact
+        redirect transport and its productionresultssa blob allowlist. Private
+        runner log hosts stay unfetched until a separate approval. A missing,
+        conflicting, oversize, non-admission, or disallowed-redirect log is no
+        identity.
         """
         run_id = core.require_positive_int(workflow_run_id, "ClawSweeper workflow run id")
         response = self._call(
@@ -1151,11 +1186,14 @@ class GitHubAppClient:
             "X-GitHub-Api-Version": API_VERSION,
             "User-Agent": "smoky-review-conductor/1",
         }
-        status, raw = self._artifact_transport(self._app["api_base"] + path, headers, 15.0)
+        try:
+            status, raw = self._artifact_transport(self._app["api_base"] + path, headers, 15.0)
+        except ArtifactRedirectDenied:
+            return None
         if status != 200:
             raise GitHubApiError(f"allowlisted GitHub API operation failed ({operation})")
         if len(raw) > CLAWSWEEPER_DISPATCH_LOG_LIMIT:
-            raw = raw[:CLAWSWEEPER_DISPATCH_LOG_LIMIT]
+            return None
         try:
             text = raw.decode("utf-8")
         except UnicodeError:
