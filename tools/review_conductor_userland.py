@@ -1171,6 +1171,24 @@ def _receipt_owns_run(row: sqlite3.Row, workflow_run_id: int) -> bool:
     return recorded == int(workflow_run_id)
 
 
+def _bundle_receipt_owns(
+    row: sqlite3.Row, workflow_run_id: int, identity: dict[str, Any]
+) -> bool:
+    """True when this dispatched receipt may select the bundle.
+
+    A JSON object that omits ``workflow_run_id`` still owns a bundle that
+    names this epoch, and an epoch-less legacy bundle at epoch 0. After
+    reopen, that omitted key does not own an epoch-less bundle. An exact
+    integer run id still does.
+    """
+    if not _receipt_owns_run(row, workflow_run_id):
+        return False
+    receipt = _load_receipt_object(row["receipt_json"])
+    if receipt is None or "workflow_run_id" in receipt:
+        return True
+    return "review_epoch" in identity or int(row["review_epoch"]) == 0  # epochless-nonzero-needs-run
+
+
 def _receipt_excludes_run(row: sqlite3.Row, workflow_run_id: int) -> bool:
     """True only when the receipt stored a different integer run id."""
     receipt = _load_receipt_object(row["receipt_json"])
@@ -1277,7 +1295,8 @@ def clawsweeper_action(
         rows = [
             row
             for row in current_epoch_clawsweeper_actions(connection, identity)
-            if row["status"] == "dispatched" and _receipt_owns_run(row, workflow_run_id)
+            if row["status"] == "dispatched"
+            and _bundle_receipt_owns(row, workflow_run_id, identity)
         ]
         if len(rows) != 1:
             raise UserlandError(CLAWSWEEPER_BUNDLE_MISMATCH)
@@ -1581,7 +1600,7 @@ def settle_unmatched_clawsweeper_bundle(
         owning = [
             row
             for row in rows
-            if row["status"] == "dispatched" and _receipt_owns_run(row, run_id)
+            if row["status"] == "dispatched" and _bundle_receipt_owns(row, run_id, identity)
         ]
         if in_flight or owning:
             connection.rollback()

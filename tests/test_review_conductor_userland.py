@@ -3019,6 +3019,9 @@ class ReceiptAndJobPageMutationTarget(unittest.TestCase):
     def test_empty_receipt_does_not_pass_the_admission_fence(self) -> None:
         test_empty_receipt_does_not_pass_the_admission_fence()
 
+    def test_epochless_bundle_does_not_own_a_reopened_omitted_run_id(self) -> None:
+        test_epochless_bundle_does_not_own_a_reopened_omitted_run_id()
+
 
 def test_bundle_retirement_mutants_fail_their_intended_tests() -> None:
     mutants = (
@@ -3114,6 +3117,13 @@ def test_bundle_retirement_mutants_fail_their_intended_tests() -> None:
             "        receipt = json.loads(raw or \"{}\")  # empty-receipt-is-not-an-object\n",
             "test_review_conductor_userland.ReceiptAndJobPageMutationTarget."
             "test_empty_receipt_does_not_own_a_current_bundle",
+        ),
+        (
+            "tools/review_conductor_userland.py",
+            "    return \"review_epoch\" in identity or int(row[\"review_epoch\"]) == 0  # epochless-nonzero-needs-run\n",
+            "    return True  # epochless-nonzero-needs-run\n",
+            "test_review_conductor_userland.ReceiptAndJobPageMutationTarget."
+            "test_epochless_bundle_does_not_own_a_reopened_omitted_run_id",
         ),
     )
     for relative, old, new, test_id in mutants:
@@ -3992,6 +4002,100 @@ def test_empty_receipt_does_not_pass_the_admission_fence() -> None:
         assert current(config, pr)["state"] == "clawsweeper_queued"
 
 
+def _reopen_clawsweeper_without_bundle_epoch(
+    config: dict[str, Any], pr: int, receipt: dict[str, Any]
+) -> str:
+    previous = action(config, pr, "clawsweeper.dispatch")
+    _set_action_status(
+        config, previous["action_id"], "dispatched", {"result": "dispatched", "workflow_run_id": 1}
+    )
+    connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+    try:
+        connection.execute(
+            "UPDATE heads SET review_epoch = 1 WHERE pr_number = ? AND is_current = 1",
+            (pr,),
+        )
+        payload = json.loads(previous["payload_json"])
+        payload["review_epoch"] = 1
+        core.insert_action(
+            connection,
+            kind="clawsweeper.dispatch",
+            repository="dinkuskit/blocks",
+            pr_number=pr,
+            base_sha=BASE,
+            head_sha=HEAD,
+            payload=payload,
+            suffix="reopen",
+            review_epoch=1,
+        )
+        connection.commit()
+        inserted = connection.execute(
+            """
+            SELECT action_id FROM actions
+            WHERE pr_number = ? AND kind = 'clawsweeper.dispatch' AND review_epoch = 1
+            """,
+            (pr,),
+        ).fetchone()
+        assert inserted is not None
+        action_id = inserted["action_id"]
+    finally:
+        connection.close()
+    _set_action_status(config, action_id, "dispatched", receipt)
+    return action_id
+
+
+def test_epochless_bundle_does_not_own_a_reopened_omitted_run_id() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config = config_fixture(root)
+        assert not config.get("review_policy")
+        pr, old_run = 103, 4105
+        prepare_openclaw(config, root, pr)
+        _reopen_clawsweeper_without_bundle_epoch(
+            config, pr, {"result": "dispatched"}
+        )
+        ingress(config, "workflow_run", "epochless-old", claw_workflow_payload(old_run))
+        client = HistoricalThenCurrentGitHub(
+            old_run, old_run + 1, claw_bundle(run_id=old_run, pr=pr), None, None
+        )
+        collected = userland.collect_clawsweeper_terminals(config, client, dry_run=False)
+        assert collected[0]["result"] == "historical_bundle_retired"
+        assert current(config, pr)["state"] == "clawsweeper_queued"
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'clawsweeper_quality'"
+            ).fetchone()
+            assert table is None
+        finally:
+            connection.close()
+
+
+def test_epochless_bundle_with_exact_run_id_still_materializes() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config = config_fixture(root)
+        pr, old_run = 104, 4106
+        prepare_openclaw(config, root, pr)
+        _reopen_clawsweeper_without_bundle_epoch(
+            config, pr, {"result": "dispatched", "workflow_run_id": old_run}
+        )
+        ingress(config, "workflow_run", "epochless-exact", claw_workflow_payload(old_run))
+        client = HistoricalThenCurrentGitHub(
+            old_run, old_run + 1, claw_bundle(run_id=old_run, pr=pr), None, None
+        )
+        collected = userland.collect_clawsweeper_terminals(config, client, dry_run=False)
+        assert collected[0]["result"] == "terminal_materialized"
+        assert collected[0]["verdict"] == "clean"
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM clawsweeper_quality WHERE review_epoch = 1"
+            ).fetchone()[0] == 1
+        finally:
+            connection.close()
+
+
 def test_dispatch_stores_only_documented_workflow_run_id() -> None:
     head = "a" * 40
     base = "b" * 40
@@ -4394,6 +4498,8 @@ def main() -> None:
         test_jobs_next_link_must_stay_on_the_requested_run,
         test_empty_receipt_does_not_own_a_current_bundle,
         test_empty_receipt_does_not_pass_the_admission_fence,
+        test_epochless_bundle_does_not_own_a_reopened_omitted_run_id,
+        test_epochless_bundle_with_exact_run_id_still_materializes,
         test_oversize_admission_log_with_conflicting_suffix_is_not_an_identity,
         test_admission_log_redirect_stays_on_the_artifact_allowlist,
         test_dispatch_stores_only_documented_workflow_run_id,

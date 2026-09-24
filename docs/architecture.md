@@ -48,7 +48,8 @@ becomes `clawsweeper_failed` only for the exact current dispatched tuple, and
 that failure is not review PASS. Those same in-flight statuses leave that
 failure receipt pending when the current epoch has not stored a different run
 id. A non-object dispatch receipt owns no run, and a present run id must be a
-non-boolean integer. An empty or NULL receipt is not that object. Admission-job
+non-boolean integer. An empty or NULL receipt is not that object. An epoch-less bundle does not
+own a reopened epoch unless the receipt stores that run id. Admission-job
 lookup reads bounded `per_page=100` pages and does not treat a later page as
 absent. A next link onto another workflow run is an incomplete listing. A
 malformed admission-job id stays an incomplete lookup. A report epoch uses the admission tuple's ten-digit

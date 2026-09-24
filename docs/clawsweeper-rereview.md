@@ -99,7 +99,10 @@ failed run can finish before dispatch commits the receipt; retiring it in
 that window would drop the later bind. A non-object dispatch receipt,
 including JSON `null` or `[]`, owns no run. A present `workflow_run_id` must
 be a non-boolean integer; a string or other JSON type is not that run. A
-JSON object that omits `workflow_run_id` still owns the run. An empty string
+JSON object that omits `workflow_run_id` still owns the run when the bundle
+names that epoch, and an epoch-less legacy bundle at epoch 0. After reopen,
+that omitted key does not select an epoch-less bundle; an exact integer run
+id still does. An empty string
 or SQL NULL is not that object and owns no run. A report epoch
 is at most ten digits, the same bound as the admission-log tuple, and an
 out-of-bound epoch leaves that receipt pending instead of aborting later
