@@ -1,0 +1,17 @@
+{
+  "schema": "review-conductor.candidate-manifest.v1",
+  "base_sha": "94b19d0246c54123fee6c5c091cc5db609b809bb",
+  "starting_head_sha": "86723c7998333e0c59a0972ce8a162c2157d5fe3",
+  "captured_date": "2026-09-23",
+  "captured_at": "2026-09-23T15:23:58Z",
+  "binding_scheme": "A commit cannot contain its own SHA. base_sha is origin/main. starting_head_sha is the verified PR #25 head this ancestor-symlink repair starts from. Per-file sha256 values are of this candidate source, including this packet's PROOF.md. The branch head after commit is the exact candidate SHA for hosted CI. Copilot cycle 1 at PRR_kwDOUXe3188AAAABO3odUQ remains the unsuccessful review. The 2-cycle ledger is not reset. No merge, deployment, or OpenClaw/ClawSweeper request is in this packet.",
+  "review_ledger": "1/2 unsuccessful Copilot cycles completed; cycle 2 re-review follows exact-head CI",
+  "files": {
+    "docs/migration.md": "6da9ee57f7e5d6ef883c21b8bdb37a534eac842d1c2a155e6f28cb1ffd07fae9",
+    "docs/provenance.json": "022edde8e49a377e1cb7726b50a10cc4775a350479e8ab00750a9e5cc1e700e9",
+    "docs/smcbd-pilot-handoff.md": "2f6a7edbb65b2d5e6ec8b0cd2f54378e02735e93713d82fd34a1b5a18e7f23c2",
+    "proof/dispatch-transport-ancestor-symlink-20260923/PROOF.md": "b669829d608a64e78863e4496bff69104334152472a6f8cbbe404c9364555f83",
+    "tests/test_review_conductor_profiles.py": "439e7fc998ffe6703c8e8011f79844b9fe72d7753bac44fde4dded7ea3ea9661",
+    "tools/review_conductor_userland.py": "13d25d5f2579b5944f0a5e82f4ec8ead0a87192bc6c1b8ff1c10df749eafaa14"
+  }
+}

@@ -5,6 +5,7 @@ import copy
 import hashlib
 import io
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -158,6 +159,142 @@ class ProfilesTest(unittest.TestCase):
         signature='sha256='+hmac.new(legacy.SECRET.encode(),body,hashlib.sha256).hexdigest()
         with self.assertRaises(core.ContractError):core.ingest_github_delivery(config_path=Path(config['core_config']),state_root=Path(config['paths']['state_root']),event_type='pull_request',delivery_id='inactive',signature=signature,body=body,secret=legacy.SECRET)
         self.assertFalse(Path(config['paths']['state_root']).exists())
+
+    def test_health_withholds_dispatch_readiness_without_configured_transport(self):
+        config=self.config(True)
+        transport=Path(config['spark']['smoky_path'])
+        self.assertEqual(transport, self.source.resolve() / 'bin' / 'smoky')
+        self.assertFalse(transport.exists())
+        for key in ('state_root', 'proof_root', 'blocks_checkout'):
+            Path(config['paths'][key]).mkdir(parents=True)
+        gateway=self.root / 'bin' / 'openclaw'
+        gateway.parent.mkdir()
+        gateway.write_text('#!/bin/sh\nexit 0\n')
+        gateway.chmod(0o755)
+        config['notifications']['openclaw_path']=str(gateway)
+        decoy=self.root / 'legacy-checkout' / 'bin' / 'smoky'
+        decoy.parent.mkdir(parents=True)
+        decoy.write_text('#!/bin/sh\nexit 0\n')
+        decoy.chmod(0o755)
+        missing=userland.health(config)
+        self.assertEqual(missing['overall'], 'not_ready')
+        self.assertEqual(missing['components']['spark_transport']['state'], 'not_ready')
+        self.assertIn(
+            f'configured Spark transport is missing at {transport}',
+            missing['components']['spark_transport']['reason'],
+        )
+        self.assertIn('receipt destination', missing['components']['spark_transport']['reason'])
+        self.assertNotIn(str(decoy), missing['components']['spark_transport']['reason'])
+        self.assertTrue(all(
+            item['state'] == 'ready'
+            for name, item in missing['components'].items()
+            if name != 'spark_transport'
+        ))
+        self.assertEqual(config['spark']['smoky_path'], str(transport))
+        transport.parent.mkdir(parents=True)
+        transport.write_text('#!/bin/sh\nexit 0\n')
+        transport.chmod(0o644)
+        denied=userland.health(config)
+        self.assertEqual(denied['overall'], 'not_ready')
+        self.assertIn(
+            f'configured Spark transport is not executable at {transport}',
+            denied['components']['spark_transport']['reason'],
+        )
+        transport.chmod(0o755)
+        unbound=userland.health(config)
+        self.assertEqual(unbound['overall'], 'not_ready')
+        self.assertIn(
+            'does not hardcode a receipt DEST',
+            unbound['components']['spark_transport']['reason'],
+        )
+        self.assertIn('rebind its hardcoded receipt destination DEST', unbound['components']['spark_transport']['reason'])
+        stale_checkout=self.root / 'legacy-checkout'
+        transport.write_text(f"#!/bin/sh\nDEST=Path('{stale_checkout}')\n", encoding='utf-8')
+        transport.chmod(0o755)
+        stale=userland.health(config)
+        self.assertEqual(stale['overall'], 'not_ready')
+        self.assertIn(
+            f'hardcodes receipt DEST {stale_checkout}',
+            stale['components']['spark_transport']['reason'],
+        )
+        self.assertIn(str(self.source.resolve()), stale['components']['spark_transport']['reason'])
+        self.assertNotIn(str(decoy), stale['components']['spark_transport']['reason'])
+        transport.write_text(
+            "#!/bin/sh\n"
+            f"DEST=Path('{self.source.resolve()}')\n"
+            f"DEST=Path('{stale_checkout}')\n",
+            encoding='utf-8',
+        )
+        transport.chmod(0o755)
+        duplicated=userland.health(config)
+        self.assertEqual(duplicated['overall'], 'not_ready')
+        self.assertIn(
+            'more than one receipt DEST',
+            duplicated['components']['spark_transport']['reason'],
+        )
+        transport.write_text(f"#!/bin/sh\nDEST=Path('{self.source.resolve()}')\n", encoding='utf-8')
+        transport.chmod(0o755)
+        ready=userland.health(config)
+        self.assertEqual(
+            ready['components']['spark_transport'],
+            {
+                'state': 'ready',
+                'reason': 'configured Spark transport is executable and its receipt destination is this checkout',
+            },
+        )
+        self.assertEqual(ready['overall'], 'ready')
+        self.assertEqual(config['spark']['smoky_path'], str(transport))
+        linked=self.root / 'linked-smoky'
+        linked.symlink_to(transport)
+        config['spark']['smoky_path']=str(linked)
+        followed=userland.health(config)
+        self.assertEqual(followed['overall'], 'not_ready')
+        self.assertIn(
+            f'not a regular file at {linked}',
+            followed['components']['spark_transport']['reason'],
+        )
+        config['spark']['smoky_path']=str(transport)
+
+    def test_health_rejects_symlinked_spark_transport_ancestor(self):
+        config=self.config(True)
+        transport=Path(config['spark']['smoky_path'])
+        self.assertEqual(transport, self.source.resolve() / 'bin' / 'smoky')
+        for key in ('state_root', 'proof_root', 'blocks_checkout'):
+            Path(config['paths'][key]).mkdir(parents=True)
+        gateway=self.root / 'bin' / 'openclaw'
+        gateway.parent.mkdir()
+        gateway.write_text('#!/bin/sh\nexit 0\n')
+        gateway.chmod(0o755)
+        config['notifications']['openclaw_path']=str(gateway)
+        checkout=self.source.resolve()
+        transport.parent.mkdir(parents=True)
+        transport.write_text(f"#!/bin/sh\nDEST=Path('{checkout}')\n", encoding='utf-8')
+        transport.chmod(0o755)
+        ready=userland.health(config)
+        self.assertEqual(ready['overall'], 'ready')
+        external=self.root / 'external-bin'
+        external.mkdir()
+        transport.replace(external / 'smoky')
+        transport.parent.rmdir()
+        transport.parent.symlink_to(external, target_is_directory=True)
+        self.assertTrue(transport.parent.is_symlink())
+        self.assertTrue(transport.is_file() and os.access(transport, os.X_OK))
+        rejected=userland.health(config)
+        self.assertEqual(rejected['components']['spark_transport']['state'], 'not_ready')
+        self.assertIn(
+            f'configured Spark transport is not a regular file at {transport}',
+            rejected['components']['spark_transport']['reason'],
+        )
+        self.assertNotIn(
+            'receipt destination is this checkout',
+            rejected['components']['spark_transport']['reason'],
+        )
+        self.assertEqual(rejected['overall'], 'not_ready')
+        self.assertTrue(all(
+            item['state'] == 'ready'
+            for name, item in rejected['components'].items()
+            if name != 'spark_transport'
+        ))
 
     def test_isolation_rejects_every_shared_boundary_and_nested_or_symlink_roots(self):
         suite=self.config()
@@ -937,6 +1074,43 @@ class OpenClawTerminalMutationTests(unittest.TestCase):
                     r'(FAIL|ERROR): test_generalized_openclaw_unqualified_status_writes_zero_artifacts',
                     f'failure was not the intended test: {label}\n{completed.stderr}',
                 )
+
+
+class SparkTransportMutationTests(unittest.TestCase):
+    """The ancestor no-follow open is the check that rejects an external executable."""
+
+    def test_following_transport_ancestor_mutant_is_rejected(self):
+        label = 'follow symlinked transport ancestor'
+        relative = 'tools/review_conductor_userland.py'
+        old = 'ancestor = os.open(component, directory_flags, dir_fd=held)\n'
+        new = 'ancestor = os.open(component, directory_flags & ~os.O_NOFOLLOW, dir_fd=held)\n'
+        test_id = (
+            'test_review_conductor_profiles.ProfilesTest.'
+            'test_health_rejects_symlinked_spark_transport_ancestor'
+        )
+        with tempfile.TemporaryDirectory(prefix='review-conductor-mutant-') as temp:
+            copy_root = Path(temp) / 'copy'
+            for name in ('tools', 'tests', 'contracts', 'examples'):
+                shutil.copytree(ROOT / name, copy_root / name)
+            target = copy_root / relative
+            source = target.read_text()
+            self.assertEqual(source.count(old), 1, f'mutant anchor drifted: {label}')
+            target.write_text(source.replace(old, new, 1))
+            completed = subprocess.run(
+                [sys.executable, '-m', 'unittest', '-q', test_id],
+                cwd=copy_root / 'tests',
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env={'PATH': '/usr/bin:/bin', 'HOME': temp, 'PYTHONDONTWRITEBYTECODE': '1'},
+            )
+        self.assertNotEqual(completed.returncode, 0, f'mutant survived: {label}\n{completed.stderr}')
+        self.assertIn('Ran 1 test', completed.stderr, f'intended test did not run: {label}\n{completed.stderr}')
+        self.assertRegex(
+            completed.stderr,
+            r'(FAIL|ERROR): test_health_rejects_symlinked_spark_transport_ancestor',
+            f'failure was not the intended test: {label}\n{completed.stderr}',
+        )
 
 
 if __name__=='__main__':unittest.main(verbosity=2)

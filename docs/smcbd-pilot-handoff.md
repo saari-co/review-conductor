@@ -114,7 +114,18 @@ mode-0600 registry against this profile. `preflight` reports registry and
 bootstrap status only. `start` forwards already-prepared webhook and GitHub
 App descriptors into `tools/standalone_supervisor.py` and does not read live
 secrets from reviewed-profile `onepassword` selectors. `health` only queries
-the supervisor. None of these verbs resolve or start cloudflared. Legacy
+the supervisor. Supervisor health reports process status. Dispatch readiness
+is `tools/review_conductor_userland.py health`: component `spark_transport`
+must be ready before `overall` is ready. `spark.smoky_path` is an external
+untracked adapter. The qualified adapter hardcodes receipt `DEST` as an
+absolute path, so a moved checkout must preserve that executable and rebind
+`DEST` to the new source root while leaving qualified `ROOT` and `SHA` pins
+unchanged. Health withholds readiness until the single `DEST` literal is this
+checkout. The read opens the source root and each relative ancestor with
+`O_DIRECTORY|O_NOFOLLOW`, then opens the leaf from that directory, so a
+symlinked `bin` cannot redirect the adapter outside the checkout. It reads
+that literal only and does not execute the adapter or rewrite `DEST`. None of
+these verbs resolve or start cloudflared. Legacy
 `start` remains the Blocks 9443 consumer and refuses this profile.
 Standalone stop uses `stop_standalone_child`; Blocks/tunnel callers keep
 `stop_child`. No launchd unit is stored here. The
@@ -214,6 +225,11 @@ next stage.
    credentials. Keep the GitHub App webhook disabled and its URL empty.
 6. Verify service health, TLS, loopback routing, exact deployed source, isolated
    state/queue/proof paths, and a synthetic signed POST without logging secrets.
+   When the checkout moves, preserve the external untracked `spark.smoky_path`
+   executable and rebind its hardcoded receipt `DEST` to the moved checkout.
+   Qualified `ROOT` and `SHA` stay pinned. Require userland health
+   `spark_transport` ready before treating dispatch as ready. A symlinked
+   ancestor under the checkout is not that ready state.
 
 ### Stage 3: separately authorized webhook activation
 

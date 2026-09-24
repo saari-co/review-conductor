@@ -2771,6 +2771,117 @@ def run_tick(
     }
 
 
+_RECEIPT_DEST_LINE = re.compile(r"""^DEST=Path\((['"])(/.+)\1\)$""")
+_TRANSPORT_INSPECT_LIMIT = 64 * 1024
+
+
+def adapter_receipt_destinations(path: Path, *, source_root: Path) -> tuple[str, list[str]]:
+    """Read hardcoded receipt DEST literals without executing the adapter.
+
+    The qualified untracked wrapper assigns ``DEST=Path('<absolute>')``. A
+    checkout move must rebind that literal to the new source root. ``O_NOFOLLOW``
+    on a full path covers only the leaf, so this reader opens the trusted source
+    root and each relative ancestor with ``O_DIRECTORY|O_NOFOLLOW``, then opens
+    the leaf from that held directory. A symlinked parent such as ``source/bin``
+    cannot redirect the read at an external executable.
+    """
+    try:
+        relative = path.relative_to(source_root)
+    except ValueError:
+        return ("not_regular", [])
+    if ".." in relative.parts or not relative.parts:
+        return ("not_regular", [])
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        held = os.open(source_root, directory_flags)
+    except OSError:
+        return ("unreadable", [])
+    try:
+        for component in relative.parts[:-1]:
+            try:
+                ancestor = os.open(component, directory_flags, dir_fd=held)
+            except OSError:
+                return ("not_regular", [])
+            os.close(held)
+            held = ancestor
+        try:
+            descriptor = os.open(
+                relative.name,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                dir_fd=held,
+            )
+        except OSError:
+            return ("not_regular", [])
+    finally:
+        os.close(held)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return ("not_regular", [])
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            raw = stream.read(_TRANSPORT_INSPECT_LIMIT + 1)
+    finally:
+        os.close(descriptor)
+    if len(raw) > _TRANSPORT_INSPECT_LIMIT:
+        return ("oversized", [])
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeError:
+        return ("unreadable", [])
+    return (
+        "ok",
+        [match.group(2) for line in text.splitlines() if (match := _RECEIPT_DEST_LINE.fullmatch(line))],
+    )
+
+
+def spark_transport_component(config: dict[str, Any]) -> dict[str, str]:
+    """Report the configured Spark transport without executing it or selecting another path.
+
+    Profile parsing stays valid when the adapter is absent. Dispatch readiness is
+    this health boundary: the source-relative ``spark.smoky_path`` must already
+    be a regular executable whose single hardcoded receipt ``DEST`` is this
+    checkout, reached without following a symlink at any relative component.
+    Copying the qualified wrapper without rebinding that literal leaves receipts
+    in the previous checkout.
+    """
+    path = Path(config["spark"]["smoky_path"])
+    located = str(path)
+    checkout = os.path.normpath(config["source_root"])
+    preserve = (
+        "; preserve the external untracked adapter at the configured path and "
+        "rebind its hardcoded receipt destination DEST to this checkout"
+    )
+    if path.is_file() and os.access(path, os.X_OK):
+        status, destinations = adapter_receipt_destinations(
+            path, source_root=Path(config["source_root"])
+        )
+        if status == "ok" and len(destinations) == 1 and os.path.normpath(destinations[0]) == checkout:
+            return runtime.component(
+                "ready",
+                "configured Spark transport is executable and its receipt destination is this checkout",
+            )
+        if status == "ok" and len(destinations) == 1:
+            detail = (
+                f"configured Spark transport hardcodes receipt DEST {os.path.normpath(destinations[0])}, "
+                f"which is not this checkout {checkout}"
+            )
+        elif status == "ok" and len(destinations) > 1:
+            detail = "configured Spark transport hardcodes more than one receipt DEST"
+        elif status == "oversized":
+            detail = f"configured Spark transport exceeds the receipt-destination inspection bound at {located}"
+        elif status == "not_regular":
+            detail = f"configured Spark transport is not a regular file at {located}"
+        else:
+            detail = f"configured Spark transport does not hardcode a receipt DEST at {located}"
+        return runtime.component("not_ready", detail + preserve)
+    if path.is_file():
+        detail = f"configured Spark transport is not executable at {located}"
+    elif path.exists():
+        detail = f"configured Spark transport is not a regular file at {located}"
+    else:
+        detail = f"configured Spark transport is missing at {located}"
+    return runtime.component("not_ready", detail + preserve)
+
+
 def health(config: dict[str, Any]) -> dict[str, Any]:
     components: dict[str, dict[str, str]] = {}
     if config.get("enrollment", {}).get("enabled") is False:
@@ -2796,6 +2907,7 @@ def health(config: dict[str, Any]) -> dict[str, Any]:
         "ready" if openclaw_ready else "not_ready",
         "OpenClaw Gateway CLI is executable" if openclaw_ready else "OpenClaw Gateway CLI is unavailable",
     )
+    components["spark_transport"] = spark_transport_component(config)
     return {
         "schema": "smoky.review-conductor.userland-health.v1",
         "overall": "ready" if all(item["state"] == "ready" for item in components.values()) else "not_ready",
