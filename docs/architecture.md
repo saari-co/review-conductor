@@ -53,7 +53,7 @@ own a reopened epoch unless the receipt stores that run id. Admission-job
 lookup reads bounded `per_page=100` pages and does not treat a later page as
 absent. A next link onto another workflow run is an incomplete listing. A
 malformed admission-job id stays an incomplete lookup. A report epoch uses the admission tuple's ten-digit
-bound so one artifact cannot abort later collection. An
+bound so one artifact cannot abort later collection. A dispatch identity uses that same ten-digit bound before it is returned, and an out-of-bound value leaves that receipt pending instead of reaching SQLite. An
 admission log larger than 64KiB, a conflicting partial block, or a
 private-runner log redirect is not that identity. See
 [ClawSweeper rereview](clawsweeper-rereview.md).

@@ -3022,6 +3022,9 @@ class ReceiptAndJobPageMutationTarget(unittest.TestCase):
     def test_epochless_bundle_does_not_own_a_reopened_omitted_run_id(self) -> None:
         test_epochless_bundle_does_not_own_a_reopened_omitted_run_id()
 
+    def test_overlong_dispatch_epoch_stays_pending_and_collection_continues(self) -> None:
+        test_overlong_dispatch_epoch_stays_pending_and_collection_continues()
+
 
 def test_bundle_retirement_mutants_fail_their_intended_tests() -> None:
     mutants = (
@@ -3124,6 +3127,13 @@ def test_bundle_retirement_mutants_fail_their_intended_tests() -> None:
             "    return True  # epochless-nonzero-needs-run\n",
             "test_review_conductor_userland.ReceiptAndJobPageMutationTarget."
             "test_epochless_bundle_does_not_own_a_reopened_omitted_run_id",
+        ),
+        (
+            "tools/review_conductor_userland.py",
+            "    if epoch > 9_999_999_999:  # dispatch-epoch-digit-bound\n",
+            "    if epoch >= 2**63:  # dispatch-epoch-digit-bound\n",
+            "test_review_conductor_userland.ReceiptAndJobPageMutationTarget."
+            "test_overlong_dispatch_epoch_stays_pending_and_collection_continues",
         ),
     )
     for relative, old, new, test_id in mutants:
@@ -4096,6 +4106,77 @@ def test_epochless_bundle_with_exact_run_id_still_materializes() -> None:
             connection.close()
 
 
+def test_overlong_dispatch_epoch_stays_pending_and_collection_continues() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config = config_fixture(root)
+        pr = 105
+        bad_run, good_run = 4107, 4108
+        prepare_openclaw(config, root, pr)
+        mark_dispatched(config, action(config, pr, "clawsweeper.dispatch")["action_id"])
+        head = current(config, pr)
+        accepted = userland._dispatch_identity_from_report(config, {
+            "repository": head["repository"],
+            "pr_number": pr,
+            "base_sha": head["base_sha"],
+            "head_sha": head["head_sha"],
+            "review_epoch": 10**10 - 1,
+        })
+        assert accepted is not None
+        assert accepted["review_epoch"] == 10**10 - 1
+        bad_payload = claw_workflow_payload(bad_run, conclusion="failure")
+        bad_payload["workflow_run"]["created_at"] = "2026-09-24T14:00:00Z"
+        good_payload = claw_workflow_payload(good_run)
+        good_payload["workflow_run"]["created_at"] = "2026-09-24T14:05:00Z"
+        ingress(config, "workflow_run", "overlong-dispatch-epoch", bad_payload)
+        ingress(config, "workflow_run", "current-clean-after-dispatch-epoch", good_payload)
+
+        class OverlongDispatchEpoch:
+            def list_run_artifacts(self, run_id: int) -> list[dict[str, Any]]:
+                if run_id == bad_run:
+                    return []
+                return [{
+                    "id": good_run,
+                    "name": f"dinkuskit-native-review-{good_run}-1",
+                    "expired": False,
+                }]
+
+            def download_artifact(self, artifact_id: int) -> bytes:
+                assert artifact_id == good_run
+                return claw_bundle(run_id=good_run, pr=pr)
+
+            def clawsweeper_dispatch_identity(self, run_id: int) -> dict[str, Any]:
+                assert run_id == bad_run
+                return {
+                    "repository": head["repository"],
+                    "pr_number": pr,
+                    "base_sha": head["base_sha"],
+                    "head_sha": head["head_sha"],
+                    # Eleven digits. This fits in SQLite and is past the
+                    # admission tuple's ten-digit bound. A sqlite-range-only
+                    # guard would query it and retire the receipt.
+                    "review_epoch": 10**10,
+                }
+
+        collected = userland.collect_clawsweeper_terminals(
+            config, OverlongDispatchEpoch(), dry_run=False
+        )
+        assert [item["result"] for item in collected] == [
+            "dispatch_identity_unavailable",
+            "terminal_materialized",
+        ]
+        assert collected[1]["verdict"] == "clean"
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            pending = connection.execute(
+                "SELECT status FROM rail_workflow_runs WHERE workflow_run_id = ?",
+                (str(bad_run),),
+            ).fetchone()
+            assert pending["status"] == "terminal_pending_verdict_bridge"
+        finally:
+            connection.close()
+
+
 def test_dispatch_stores_only_documented_workflow_run_id() -> None:
     head = "a" * 40
     base = "b" * 40
@@ -4500,6 +4581,7 @@ def main() -> None:
         test_empty_receipt_does_not_pass_the_admission_fence,
         test_epochless_bundle_does_not_own_a_reopened_omitted_run_id,
         test_epochless_bundle_with_exact_run_id_still_materializes,
+        test_overlong_dispatch_epoch_stays_pending_and_collection_continues,
         test_oversize_admission_log_with_conflicting_suffix_is_not_an_identity,
         test_admission_log_redirect_stays_on_the_artifact_allowlist,
         test_dispatch_stores_only_documented_workflow_run_id,

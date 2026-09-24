@@ -1419,6 +1419,8 @@ def _dispatch_identity_from_report(
     epoch = reported.get("review_epoch")
     if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0:
         return None
+    if epoch > 9_999_999_999:  # dispatch-epoch-digit-bound
+        raise runtime.GitHubApiError("ClawSweeper dispatch review epoch is invalid")
     try:
         return {
             "repository": reported["repository"],

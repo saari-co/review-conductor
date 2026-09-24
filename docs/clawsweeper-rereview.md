@@ -106,7 +106,9 @@ id still does. An empty string
 or SQL NULL is not that object and owns no run. A report epoch
 is at most ten digits, the same bound as the admission-log tuple, and an
 out-of-bound epoch leaves that receipt pending instead of aborting later
-collection. A matching admission job whose id is not a positive integer is
+collection. A dispatch identity epoch uses that same bound before it is
+returned; an out-of-bound value leaves that no-artifact receipt pending
+instead of reaching SQLite. A matching admission job whose id is not a positive integer is
 an incomplete lookup, not a missing job. The jobs request uses `per_page=100`
 and follows `Link` rel=next only while the next URL stays on the allowlisted
 API origin and that same run's jobs path, and only through the existing
