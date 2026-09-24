@@ -203,6 +203,19 @@ ARTIFACT_MAX_BYTES = 1024 * 1024
 ARTIFACT_BLOB_HOST_RE = re.compile(
     r"^productionresultssa[0-9]+\.blob\.core\.windows\.net$", re.IGNORECASE
 )
+CLAWSWEEPER_ADMISSION_JOB_MARK = "Admit exact-tuple"
+CLAWSWEEPER_DISPATCH_LOG_LIMIT = 64 * 1024
+_DISPATCH_LOG_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+_DISPATCH_LOG_TIMESTAMP = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+"
+)
+_DISPATCH_LOG_FIELD = re.compile(
+    r"^(pr_number|expected_base_sha|expected_head_sha|review_epoch):\s*(\S+)\s*$",
+    re.IGNORECASE,
+)
+_DISPATCH_LOG_FIELDS = frozenset(
+    {"pr_number", "expected_base_sha", "expected_head_sha", "review_epoch"}
+)
 
 
 def urllib_transport(
@@ -315,6 +328,52 @@ def urllib_artifact_transport(
     if not raw or len(raw) > ARTIFACT_MAX_BYTES:
         raise GitHubApiError("ClawSweeper artifact download has an invalid bounded size")
     return final_status, raw
+
+
+def parse_clawsweeper_dispatch_log(text: str) -> dict[str, Any] | None:
+    """Return one consistent dispatch tuple echoed by the admission job.
+
+    Repeated identical blocks are one identity. A partial block is ignored.
+    Two different complete blocks, or a repeated key with a different value,
+    are not an identity.
+    """
+    if not isinstance(text, str):
+        return None
+    complete: set[tuple[tuple[str, Any], ...]] = set()
+    current: dict[str, Any] = {}
+
+    def reject_or_store(key: str, value: str) -> bool:
+        if key in {"pr_number", "review_epoch"}:
+            if not re.fullmatch(r"[0-9]{1,10}", value):
+                return False
+            if key == "pr_number" and value == "0":
+                return False
+            parsed: Any = int(value)
+        else:
+            if not re.fullmatch(r"[0-9a-f]{40}", value):
+                return False
+            parsed = value
+        prior = current.get(key)
+        if prior is not None and prior != parsed:
+            return False
+        current[key] = parsed
+        return True
+
+    for raw_line in text.splitlines():
+        line = _DISPATCH_LOG_ANSI.sub("", raw_line).strip()
+        line = _DISPATCH_LOG_TIMESTAMP.sub("", line).strip()
+        match = _DISPATCH_LOG_FIELD.fullmatch(line)
+        if match is None:
+            current.clear()
+            continue
+        if not reject_or_store(match.group(1).lower(), match.group(2)):
+            return None
+        if set(current) == _DISPATCH_LOG_FIELDS:
+            complete.add(tuple(sorted(current.items())))
+            current = {}
+    if len(complete) != 1:
+        return None
+    return dict(complete.pop())
 
 
 class GitHubAppClient:
@@ -441,6 +500,16 @@ class GitHubAppClient:
                 "GET",
                 rf"/repos/{repository}/actions/artifacts/[1-9][0-9]*/zip",
                 "clawsweeper-artifact-download",
+            ),
+            (
+                "GET",
+                rf"/repos/{repository}/actions/runs/[1-9][0-9]*/jobs",
+                "clawsweeper-job-list",
+            ),
+            (
+                "GET",
+                rf"/repos/{repository}/actions/jobs/[1-9][0-9]*/logs",
+                "clawsweeper-admission-log",
             ),
         )
         for allowed_method, pattern, operation in rules:
@@ -982,7 +1051,7 @@ class GitHubAppClient:
         self, *, pr_number: int, base_sha: str, head_sha: str, publish: bool,
         review_epoch: int | None = None,
         authority: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> int | None:
         core.require_sha(base_sha, "ClawSweeper dispatch base_sha")
         core.require_sha(head_sha, "ClawSweeper dispatch head_sha")
         if publish is not True:
@@ -991,7 +1060,9 @@ class GitHubAppClient:
         if self._strict_adapter:
             require_review_epoch(review_epoch, "dispatch review epoch")
             extra = {"review_epoch": str(review_epoch), "repository": self.repository, "review_scope": "comprehensive"}
-        self._call(
+        # github.com returns the created run when asked. A 204 host still
+        # dispatches; the collector then has no stored run id for that attempt.
+        response = self._call(
             "POST",
             f"/repos/{self.repository}/actions/workflows/{self._clawsweeper['workflow_id']}/dispatches",
             {
@@ -1003,10 +1074,15 @@ class GitHubAppClient:
                     "expected_head_sha": head_sha,
                     "publish": "true",
                 },
+                "return_run_details": True,
             },
-            expected={204},
+            expected={200, 204},
             authority=authority,
         )
+        raw_run_id = response.get("workflow_run_id")
+        if raw_run_id is None:
+            return None
+        return core.require_positive_int(raw_run_id, "dispatched ClawSweeper workflow run id")
 
     def list_run_artifacts(self, workflow_run_id: int) -> list[dict[str, Any]]:
         run_id = core.require_positive_int(workflow_run_id, "ClawSweeper workflow run id")
@@ -1039,6 +1115,61 @@ class GitHubAppClient:
         if not raw or len(raw) > 1024 * 1024:
             raise GitHubApiError("ClawSweeper artifact download has an invalid bounded size")
         return raw
+
+    def clawsweeper_dispatch_identity(self, workflow_run_id: int) -> dict[str, Any] | None:
+        """Read one admission-job log for the dispatch inputs this client sent.
+
+        GitHub's workflow run resource does not return workflow_dispatch inputs.
+        The admission job log is the only retained exact tuple for a run whose
+        dispatch receipt predates stored run ids. A missing, conflicting, or
+        non-admission log is no identity, not a guess.
+        """
+        run_id = core.require_positive_int(workflow_run_id, "ClawSweeper workflow run id")
+        response = self._call(
+            "GET",
+            f"/repos/{self.repository}/actions/runs/{run_id}/jobs",
+            None,
+            expected={200},
+        )
+        jobs = response.get("jobs")
+        if not isinstance(jobs, list) or len(jobs) > 100:
+            raise GitHubApiError("ClawSweeper jobs listing has an invalid shape")
+        admission = [
+            job for job in jobs
+            if isinstance(job, dict)
+            and isinstance(job.get("name"), str)
+            and CLAWSWEEPER_ADMISSION_JOB_MARK in job["name"]
+        ]
+        if len(admission) != 1:
+            return None
+        job_id = core.require_positive_int(admission[0].get("id"), "ClawSweeper admission job id")
+        path = f"/repos/{self.repository}/actions/jobs/{job_id}/logs"
+        operation = self._allow("GET", path)
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {self._installation_token()}",
+            "X-GitHub-Api-Version": API_VERSION,
+            "User-Agent": "smoky-review-conductor/1",
+        }
+        status, raw = self._artifact_transport(self._app["api_base"] + path, headers, 15.0)
+        if status != 200:
+            raise GitHubApiError(f"allowlisted GitHub API operation failed ({operation})")
+        if len(raw) > CLAWSWEEPER_DISPATCH_LOG_LIMIT:
+            raw = raw[:CLAWSWEEPER_DISPATCH_LOG_LIMIT]
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeError:
+            return None
+        parsed = parse_clawsweeper_dispatch_log(text)
+        if parsed is None:
+            return None
+        return {
+            "repository": self.repository,
+            "pr_number": parsed["pr_number"],
+            "base_sha": parsed["expected_base_sha"],
+            "head_sha": parsed["expected_head_sha"],
+            "review_epoch": parsed["review_epoch"],
+        }
 
 
 def check_payload(
@@ -2346,7 +2477,7 @@ def dispatch_clawsweeper_action(
             return {"action_id": action_id, "result": "not_claimed", "merge_dispatched": False}
         payload = json.loads(action["payload_json"])
         try:
-            client.dispatch_clawsweeper(
+            dispatched_run_id = client.dispatch_clawsweeper(
                 pr_number=payload["pr_number"],
                 base_sha=payload["base_sha"],
                 head_sha=payload["head_sha"],
@@ -2390,6 +2521,8 @@ def dispatch_clawsweeper_action(
             "terminal_verdict_received": False,
             "merge_dispatched": False,
         }
+        if dispatched_run_id is not None:
+            receipt["workflow_run_id"] = dispatched_run_id
         connection.execute("BEGIN IMMEDIATE")
         updated = connection.execute(
             """

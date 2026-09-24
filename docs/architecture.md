@@ -40,7 +40,10 @@ Copilot review 5242972219's cycle-2 "unbounded repairs" finding is
 rejected as inconsistent with this confirmed product contract.
 Maintainer `@ClawSweeper rereview` / `@clawsweeper re-review` comments are the
 supported same-head ClawSweeper refresh entry; `pull_request.edited` is not a
-trigger. See [ClawSweeper rereview](clawsweeper-rereview.md).
+trigger. A superseded or unbound ClawSweeper bundle does not block collection
+or projection of a different current action. A no-artifact producer failure
+becomes `clawsweeper_failed` only for the exact current dispatched tuple, and
+that failure is not review PASS. See [ClawSweeper rereview](clawsweeper-rereview.md).
 
 Enrollment and terminal notification eligibility are one Conductor-owned
 decision, [`decide_orchestration_outcome`](../tools/orchestration_outcome.py)

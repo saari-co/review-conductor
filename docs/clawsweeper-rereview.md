@@ -73,6 +73,28 @@ acknowledgement claim stays `reconcile_required` and is not retried. The new
 ClawSweeper verdict publishes only through the existing rail checks and
 presentation path. No result authorizes merge.
 
+## Historical bundles and no-artifact execution failure
+
+A `terminal_pending_verdict_bridge` artifact that does not match exactly one
+current dispatched action is retired as historical attention. Superseded,
+closed, and unbound bundles take this path. Retirement writes no verdict, does
+not change any head, and does not stop later runs or projection in the same tick.
+
+A non-success run with no exact verdict bundle fails the current head only when
+that run is the already-started request, the dispatch receipt stores that
+workflow run id, or the single admission job log shows one consistent
+`pr_number`, `expected_base_sha`, `expected_head_sha`, and `review_epoch` for
+the current dispatched tuple. The head becomes `clawsweeper_failed` with no
+content verdict. That is not review PASS. While the head remains
+`clawsweeper_queued` or `clawsweeper_running`, rereview waits. After
+`clawsweeper_failed`, maintainer rereview is the supported same-head recovery.
+An unproven failure stays a repository alert and does not select a pull request.
+Creation time, workflow ref SHA, and "the only queued pull" are not identities.
+
+Dispatch asks GitHub for `return_run_details` and stores `workflow_run_id` on
+the receipt when the host returns it. A 204 response still counts as dispatch
+and leaves the run id unset.
+
 ## Live activation is separate
 
 Source profiles now list `issue_comment` beside `pull_request` and

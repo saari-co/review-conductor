@@ -34,6 +34,7 @@ import orchestration_outcome as orchestration  # noqa: E402
 
 
 USERLAND_SCHEMA = "smoky.review-conductor.userland.v1"
+CLAWSWEEPER_BUNDLE_MISMATCH = "ClawSweeper bundle does not match one current dispatched action"
 NOTIFICATION_SCHEMA = "smoky.review-conductor.notification.v1"
 DEFAULT_CONFIG = ROOT / "contracts/review-conductor/dinkuskit-blocks-userland.json"
 # Engine terminal states. Notification eligibility is decided by
@@ -1152,7 +1153,7 @@ def clawsweeper_action(config: dict[str, Any], identity: dict[str, Any]) -> sqli
             ),
         ).fetchall()
         if len(row) != 1:
-            raise UserlandError("ClawSweeper bundle does not match one current dispatched action")
+            raise UserlandError(CLAWSWEEPER_BUNDLE_MISMATCH)
         return row[0]
     finally:
         connection.close()
@@ -1262,6 +1263,204 @@ def fail_bound_clawsweeper_execution(
     return {**identity, "review_epoch": row["review_epoch"]}
 
 
+def _dispatch_identity_from_report(
+    config: dict[str, Any], reported: Any
+) -> dict[str, Any] | None:
+    if not isinstance(reported, dict):
+        return None
+    if reported.get("repository") != config["github_app"]["repository"]:
+        return None
+    epoch = reported.get("review_epoch")
+    if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0:
+        return None
+    try:
+        return {
+            "repository": reported["repository"],
+            "pr_number": core.require_positive_int(
+                reported.get("pr_number"), "ClawSweeper dispatch PR"
+            ),
+            "base_sha": core.require_sha(reported.get("base_sha"), "ClawSweeper dispatch base"),
+            "head_sha": core.require_sha(reported.get("head_sha"), "ClawSweeper dispatch head"),
+            "review_epoch": epoch,
+        }
+    except core.ContractError:
+        return None
+
+
+def proven_no_artifact_dispatch_identity(
+    config: dict[str, Any],
+    client: Any,
+    rail_run: sqlite3.Row,
+) -> dict[str, Any] | None:
+    """Bind a no-artifact run only from a stored run id or one proven admission log.
+
+    Uniqueness among queued pulls, creation time, and the workflow ref SHA are
+    not identities. GitHub errors propagate so the receipt can stay pending.
+    """
+    run_id = str(rail_run["workflow_run_id"])
+    connection = core.open_database(
+        Path(config["paths"]["state_root"]), config["github_app"]["repository"]
+    )
+    try:
+        rows = connection.execute(
+            """
+            SELECT actions.repository, actions.pr_number, actions.base_sha, actions.head_sha,
+                   actions.review_epoch, actions.receipt_json
+            FROM actions
+            JOIN heads
+              ON heads.repository = actions.repository
+             AND heads.pr_number = actions.pr_number
+             AND heads.base_sha = actions.base_sha
+             AND heads.head_sha = actions.head_sha
+             AND heads.review_epoch = actions.review_epoch
+             AND heads.is_current = 1
+            WHERE actions.kind = 'clawsweeper.dispatch'
+              AND actions.status = 'dispatched'
+              AND heads.rail = 'clawsweeper'
+              AND heads.state IN ('clawsweeper_queued', 'clawsweeper_running')
+            """
+        ).fetchall()
+    finally:
+        connection.close()
+    hits: list[sqlite3.Row] = []
+    for row in rows:
+        try:
+            receipt = json.loads(row["receipt_json"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(receipt, dict):
+            continue
+        recorded = receipt.get("workflow_run_id")
+        if recorded is not None and str(recorded) == run_id:
+            hits.append(row)
+    if len(hits) > 1:
+        return None
+    if len(hits) == 1:
+        row = hits[0]
+        return {
+            "repository": row["repository"],
+            "pr_number": int(row["pr_number"]),
+            "base_sha": row["base_sha"],
+            "head_sha": row["head_sha"],
+            "review_epoch": int(row["review_epoch"]),
+        }
+    method = getattr(client, "clawsweeper_dispatch_identity", None)
+    if method is None:
+        return None
+    return _dispatch_identity_from_report(
+        config, method(int(rail_run["workflow_run_id"]))
+    )
+
+
+def fail_proven_clawsweeper_execution(
+    connection: sqlite3.Connection,
+    rail_run: sqlite3.Row,
+    identity: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Fail one current dispatched tuple when this run is proven to be its attempt.
+
+    Queued work that never reached clawsweeper.started is included. A different
+    running request, a different stored run id, or a superseded attempt is not.
+    The caller holds the write transaction. This is not a content verdict.
+    """
+    matches = connection.execute(
+        """
+        SELECT heads.*, actions.payload_json, actions.receipt_json
+        FROM heads JOIN actions
+          ON actions.repository = heads.repository
+         AND actions.pr_number = heads.pr_number
+         AND actions.base_sha = heads.base_sha
+         AND actions.head_sha = heads.head_sha
+         AND actions.review_epoch = heads.review_epoch
+        WHERE heads.is_current = 1 AND heads.rail = 'clawsweeper'
+          AND heads.state IN ('clawsweeper_queued', 'clawsweeper_running')
+          AND actions.kind = 'clawsweeper.dispatch' AND actions.status = 'dispatched'
+          AND heads.repository = ? AND heads.pr_number = ?
+          AND heads.base_sha = ? AND heads.head_sha = ?
+          AND heads.review_epoch = ?
+        """,
+        (
+            identity["repository"], identity["pr_number"],
+            identity["base_sha"], identity["head_sha"], identity["review_epoch"],
+        ),
+    ).fetchall()
+    if len(matches) != 1:
+        return None
+    row = matches[0]
+    run_id = str(rail_run["workflow_run_id"])
+    if row["review_request_id"] and str(row["review_request_id"]) != run_id:
+        return None
+    if core.clawsweeper_attempt_mismatch(row, run_id) is not None:
+        return None
+    try:
+        receipt = json.loads(row["receipt_json"] or "{}")
+    except json.JSONDecodeError:
+        receipt = {}
+    recorded = receipt.get("workflow_run_id") if isinstance(receipt, dict) else None
+    if recorded is not None and str(recorded) != run_id:
+        return None
+    head_identity = {key: row[key] for key in ("repository", "pr_number", "base_sha", "head_sha")}
+    reason = (
+        f"ClawSweeper execution {rail_run['conclusion']}; "
+        "no qualified verdict bundle; operator recovery required"
+    )
+    core.update_exact_head(
+        connection, head_identity, state="clawsweeper_failed",
+        review_request_id=run_id, blocker=reason,
+    )
+    connection.execute(
+        """
+        UPDATE rail_workflow_runs SET bound_repository = ?, bound_pr_number = ?,
+          bound_base_sha = ?, bound_head_sha = ?, bound_review_epoch = ?
+        WHERE rail = 'clawsweeper' AND workflow_run_id = ?
+          AND status = 'terminal_pending_verdict_bridge'
+        """,
+        (*head_identity.values(), row["review_epoch"], rail_run["workflow_run_id"]),
+    )
+    core.insert_event(
+        connection, event_id=f"clawsweeper-execution-failed:{rail_run['workflow_run_id']}",
+        kind="clawsweeper.execution_failed", stale=False,
+        payload={"workflow_run_id": rail_run["workflow_run_id"],
+                 "conclusion": rail_run["conclusion"], "review_epoch": row["review_epoch"],
+                 "verdict_available": False}, **head_identity,
+    )
+    return {**head_identity, "review_epoch": row["review_epoch"]}
+
+
+def retire_unmatched_clawsweeper_bundle(
+    config: dict[str, Any], rail_run: sqlite3.Row
+) -> dict[str, Any]:
+    """Drop a pending bundle that is not the one current dispatched action.
+
+    The receipt keeps no verdict. No head, check, or merge state changes.
+    """
+    connection = core.open_database(
+        Path(config["paths"]["state_root"]), config["github_app"]["repository"]
+    )
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        updated = connection.execute(
+            """
+            UPDATE rail_workflow_runs SET status = 'terminal_attention_required'
+            WHERE rail = 'clawsweeper' AND workflow_run_id = ?
+              AND status = 'terminal_pending_verdict_bridge'
+              AND verdict IS NULL AND proof_ref IS NULL
+            """,
+            (str(rail_run["workflow_run_id"]),),
+        )
+        if updated.rowcount != 1:
+            connection.rollback()
+            raise UserlandError("historical ClawSweeper receipt changed during retirement")
+        connection.commit()
+    finally:
+        connection.close()
+    return {
+        "workflow_run_id": int(rail_run["workflow_run_id"]),
+        "result": "historical_bundle_retired",
+        "conclusion": rail_run["conclusion"],
+    }
+
+
 def collect_clawsweeper_terminals(
     config: dict[str, Any],
     client: runtime.GitHubAppClient | Any | None,
@@ -1277,9 +1476,20 @@ def collect_clawsweeper_terminals(
         if client is None:
             raise UserlandError("GitHub client is required to collect ClawSweeper proof")
         expected_prefix = f"{config.get('adapter', {}).get('artifact_prefix', 'dinkuskit-native-review')}-{run_id}-"
+        try:
+            listed = client.list_run_artifacts(run_id)
+        except runtime.GitHubApiError:
+            outcomes.append(
+                {
+                    "workflow_run_id": run_id,
+                    "result": "artifact_unavailable",
+                    "conclusion": rail_run["conclusion"],
+                }
+            )
+            continue
         candidates = [
             item
-            for item in client.list_run_artifacts(run_id)
+            for item in listed
             if isinstance(item.get("name"), str)
             and item["name"].startswith(expected_prefix)
             and item.get("expired") is False
@@ -1295,6 +1505,17 @@ def collect_clawsweeper_terminals(
                     continue
                 except UserlandError:
                     pass
+            try:
+                proven = proven_no_artifact_dispatch_identity(config, client, rail_run)
+            except runtime.GitHubApiError:
+                outcomes.append(
+                    {
+                        "workflow_run_id": run_id,
+                        "result": "dispatch_identity_unavailable",
+                        "conclusion": rail_run["conclusion"],
+                    }
+                )
+                continue
             queue_operator_alert(
                 config,
                 f"clawsweeper-workflow-{run_id}-{rail_run['conclusion']}",
@@ -1309,6 +1530,10 @@ def collect_clawsweeper_terminals(
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 bound_failure = fail_bound_clawsweeper_execution(connection, rail_run)
+                if bound_failure is None and proven is not None:
+                    bound_failure = fail_proven_clawsweeper_execution(
+                        connection, rail_run, proven
+                    )
                 connection.execute(
                     """
                     UPDATE rail_workflow_runs SET status = 'terminal_attention_required'
@@ -1334,8 +1559,23 @@ def collect_clawsweeper_terminals(
         artifact_id = core.require_positive_int(
             candidates[0].get("id"), "ClawSweeper artifact id"
         )
-        raw_bundle = client.download_artifact(artifact_id)
-        action = clawsweeper_action(config, clawsweeper_bundle_identity(raw_bundle))
+        try:
+            raw_bundle = client.download_artifact(artifact_id)
+            action = clawsweeper_action(config, clawsweeper_bundle_identity(raw_bundle))
+        except UserlandError as exc:
+            if str(exc) != CLAWSWEEPER_BUNDLE_MISMATCH:
+                raise
+            outcomes.append(retire_unmatched_clawsweeper_bundle(config, rail_run))
+            continue
+        except runtime.GitHubApiError:
+            outcomes.append(
+                {
+                    "workflow_run_id": run_id,
+                    "result": "artifact_unavailable",
+                    "conclusion": rail_run["conclusion"],
+                }
+            )
+            continue
         parsed = parse_clawsweeper_bundle(
             raw_bundle,
             workflow_run_id=run_id,
