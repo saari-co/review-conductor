@@ -1152,9 +1152,10 @@ class GitHubAppClient:
         """Read every jobs page, or fail closed before calling the list complete.
 
         The first page is not the whole run. ``per_page=100`` and allowlisted
-        ``Link`` rel=next pages stay inside ``MAX_LIST_PAGES``. A loop, a
-        disallowed next URL, a full page with no next link and no matching
-        ``total_count``, or a page past the cap is an incomplete listing.
+        ``Link`` rel=next pages stay inside ``MAX_LIST_PAGES`` and on this
+        run's jobs path. A loop, a disallowed next URL, a next URL for another
+        run, a full page with no next link and no matching ``total_count``,
+        or a page past the cap is an incomplete listing.
         """
         current = f"/repos/{self.repository}/actions/runs/{run_id}/jobs?per_page=100"
         jobs: list[Any] = []
@@ -1193,6 +1194,9 @@ class GitHubAppClient:
                 return jobs
             if page_index == MAX_LIST_PAGES - 1:  # clawsweeper-job-page-cap
                 raise GitHubApiError("ClawSweeper jobs listing exceeded the bounded page count")
+            same_run = f"/repos/{self.repository}/actions/runs/{run_id}/jobs"
+            if nxt.split("?", 1)[0] != same_run:  # clawsweeper-job-same-run
+                raise GitHubApiError("ClawSweeper jobs listing left the requested run")
             current = nxt  # clawsweeper-job-pages
         raise GitHubApiError("ClawSweeper jobs listing exceeded the bounded page count")
 

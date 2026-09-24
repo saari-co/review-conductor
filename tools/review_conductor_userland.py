@@ -1135,19 +1135,33 @@ def clawsweeper_bundle_identity(raw: bytes) -> dict[str, Any]:
     return identity
 
 
+def _load_receipt_object(raw: Any) -> dict[str, Any] | None:
+    """Return a JSON object receipt, or nothing for empty and non-object values.
+
+    Only a real object may use the missing-key rule. SQL NULL and ``""`` are
+    not that object. JSON ``null`` and arrays are not either.
+    """
+    if not isinstance(raw, str) or raw == "":  # empty-receipt-is-not-an-object
+        return None
+    try:
+        receipt = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(receipt, dict):  # malformed-receipt-owns-nothing
+        return None
+    return receipt
+
+
 def _receipt_owns_run(row: sqlite3.Row, workflow_run_id: int) -> bool:
     """True when this dispatched receipt did not record a different run.
 
-    A missing ``workflow_run_id`` still owns the run. Dispatch stores that
-    integer only when GitHub returns it; a 204 response leaves it unset.
-    A non-object receipt, including JSON ``null`` or ``[]``, owns nothing.
-    A present but non-integer value owns nothing.
+    A missing ``workflow_run_id`` on a JSON object still owns the run.
+    Dispatch stores that integer only when GitHub returns it; a 204 response
+    leaves it unset. An empty string, SQL NULL, JSON ``null``, or an array
+    owns nothing. A present but non-integer value owns nothing.
     """
-    try:
-        receipt = json.loads(row["receipt_json"] or "{}")
-    except json.JSONDecodeError:
-        return False
-    if not isinstance(receipt, dict):  # malformed-receipt-owns-nothing
+    receipt = _load_receipt_object(row["receipt_json"])
+    if receipt is None:
         return False
     if "workflow_run_id" not in receipt:
         return True
@@ -1159,11 +1173,8 @@ def _receipt_owns_run(row: sqlite3.Row, workflow_run_id: int) -> bool:
 
 def _receipt_excludes_run(row: sqlite3.Row, workflow_run_id: int) -> bool:
     """True only when the receipt stored a different integer run id."""
-    try:
-        receipt = json.loads(row["receipt_json"] or "{}")
-    except json.JSONDecodeError:
-        return False
-    if not isinstance(receipt, dict) or "workflow_run_id" not in receipt:
+    receipt = _load_receipt_object(row["receipt_json"])
+    if receipt is None or "workflow_run_id" not in receipt:
         return False
     recorded = receipt["workflow_run_id"]
     if isinstance(recorded, bool) or not isinstance(recorded, int):
@@ -1440,13 +1451,8 @@ def proven_no_artifact_dispatch_identity(
         connection.close()
     hits: list[sqlite3.Row] = []
     for row in rows:
-        try:
-            receipt = json.loads(row["receipt_json"] or "{}")
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(receipt, dict):
-            continue
-        if "workflow_run_id" not in receipt:
+        receipt = _load_receipt_object(row["receipt_json"])
+        if receipt is None or "workflow_run_id" not in receipt:
             continue
         recorded = receipt["workflow_run_id"]
         if (isinstance(recorded, bool) or not isinstance(recorded, int)
@@ -1512,11 +1518,8 @@ def fail_proven_clawsweeper_execution(
         return None
     if core.clawsweeper_attempt_mismatch(row, run_id) is not None:
         return None
-    try:
-        receipt = json.loads(row["receipt_json"] or "{}")
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(receipt, dict):
+    receipt = _load_receipt_object(row["receipt_json"])
+    if receipt is None:
         return None
     if "workflow_run_id" in receipt:
         recorded = receipt["workflow_run_id"]
