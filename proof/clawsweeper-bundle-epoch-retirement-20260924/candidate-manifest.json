@@ -1,0 +1,16 @@
+{
+  "schema": "review-conductor.candidate-manifest.v1",
+  "base_sha": "0c048e227043741fcbb5b4e08c1064d9c5c100a6",
+  "starting_head_sha": "fcbb28afbe6fc44a1bf4516e142d76aadbd8147e",
+  "captured_date": "2026-09-24",
+  "captured_at": "2026-09-24T18:22:21Z",
+  "binding_scheme": "A commit cannot contain its own SHA. base_sha is origin/main 0c048e227043741fcbb5b4e08c1064d9c5c100a6. starting_head_sha is fcbb28afbe6fc44a1bf4516e142d76aadbd8147e. Per-file sha256 values are of this follow-up candidate, including this packet's PROOF.md. The branch head after commit is the exact candidate SHA for hosted CI. No merge, deployment, or live database write is in this packet.",
+  "files": {
+    "docs/architecture.md": "571fffe74b5d070a3cd1d8b0163400daab0e0b01a9e0ddb9a59d4884e16c3390",
+    "docs/clawsweeper-rereview.md": "9c83253421e0f763add8bd4190f9c2e1e0e5d912d87fccc002402a921d9a1f05",
+    "docs/provenance.json": "fd9ee9d22992cde9be5b92d773ec4202a8bb1d2dd9a22c0e699ac2a921eb621b",
+    "proof/clawsweeper-bundle-epoch-retirement-20260924/PROOF.md": "f4959fe65b5bede49910465e35f97bf7eb3c7dd9fda056126b7f297e3fc3de2b",
+    "tests/test_review_conductor_userland.py": "2d7997c739b7e0cb3b9ae4a5c0372ed016c39b67c49b9785b9e234daa1d27345",
+    "tools/review_conductor_userland.py": "a88ebf31a4a819cc0361c3522e60dcf2d1f7f5e38c2d5ea6c8dcfefbfc4e3db6"
+  }
+}

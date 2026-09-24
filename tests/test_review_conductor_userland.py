@@ -10,9 +10,11 @@ import json
 import os
 import pwd
 import sqlite3
+import shutil
 import subprocess
 import sys
 import tempfile
+import unittest
 import warnings
 import zipfile
 from pathlib import Path
@@ -345,6 +347,7 @@ def claw_bundle(
     needs_contributor_action: bool = False,
     base_sha: str = BASE,
     head_sha: str = HEAD,
+    review_epoch: int | None = None,
 ) -> bytes:
     finding_text = (
         "\n## Review Findings\n\n- **[P1] Fix the exact regression:** `src/example.ts:1`\n  - body: bounded fixture finding\n"
@@ -360,6 +363,11 @@ def claw_bundle(
             "review_terminal_failure: false",
             f"main_sha: {base_sha}",
             f"pull_head_sha: {head_sha}",
+            *(
+                [f"review_epoch: {review_epoch}"]
+                if review_epoch is not None
+                else []
+            ),
             f"pr_rating_overall: {overall}",
             f"pr_rating_proof: {proof}",
             f"real_behavior_proof_status: {proof_status}",
@@ -2764,6 +2772,260 @@ def test_historical_success_bundle_still_allows_the_current_clean_terminal() -> 
             connection.close()
 
 
+def _set_action_status(
+    config: dict[str, Any], action_id: str, status: str, receipt: dict[str, Any]
+) -> None:
+    connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+    try:
+        connection.execute(
+            "UPDATE actions SET status = ?, receipt_json = ? WHERE action_id = ?",
+            (status, core.canonical_json(receipt), action_id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def test_inflight_dispatch_bundle_stays_pending() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config = config_fixture(root)
+        pr, run_id = 90, 4090
+        prepare_openclaw(config, root, pr)
+        claw_action = action(config, pr, "clawsweeper.dispatch")
+        _set_action_status(config, claw_action["action_id"], "dispatching", {})
+        ingress(config, "workflow_run", "inflight-success", claw_workflow_payload(run_id))
+        client = HistoricalThenCurrentGitHub(
+            1,
+            run_id,
+            b"",
+            claw_bundle(run_id=run_id, pr=pr),
+            None,
+        )
+        collected = userland.collect_clawsweeper_terminals(config, client, dry_run=False)
+        assert collected == [
+            {
+                "workflow_run_id": run_id,
+                "result": "current_dispatch_pending",
+                "conclusion": "success",
+            }
+        ]
+        assert current(config, pr)["state"] == "clawsweeper_queued"
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            receipt = connection.execute(
+                "SELECT * FROM rail_workflow_runs WHERE workflow_run_id = ?",
+                (str(run_id),),
+            ).fetchone()
+            assert receipt["status"] == "terminal_pending_verdict_bridge"
+            assert receipt["verdict"] is None and receipt["proof_ref"] is None
+        finally:
+            connection.close()
+        assert list(Path(config["clawsweeper_bridge"]["terminal_inbox"]).glob("*.json")) == []
+        _set_action_status(
+            config,
+            claw_action["action_id"],
+            "dispatched",
+            {"result": "dispatched", "workflow_run_id": run_id},
+        )
+        again = userland.collect_clawsweeper_terminals(config, client, dry_run=False)
+        assert again[0]["result"] == "terminal_materialized"
+        assert again[0]["verdict"] == "clean"
+
+
+def test_reopened_epoch_retires_previous_run_and_keeps_current_bundle() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config = config_fixture(root)
+        pr = 91
+        old_run, current_run = 11, 22
+        prepare_openclaw(config, root, pr)
+        previous = action(config, pr, "clawsweeper.dispatch")
+        _set_action_status(
+            config,
+            previous["action_id"],
+            "dispatched",
+            {"result": "dispatched", "workflow_run_id": old_run},
+        )
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            connection.execute(
+                "UPDATE heads SET review_epoch = 1 WHERE pr_number = ? AND is_current = 1",
+                (pr,),
+            )
+            payload = json.loads(previous["payload_json"])
+            payload["review_epoch"] = 1
+            core.insert_action(
+                connection,
+                kind="clawsweeper.dispatch",
+                repository="dinkuskit/blocks",
+                pr_number=pr,
+                base_sha=BASE,
+                head_sha=HEAD,
+                payload=payload,
+                suffix="reopen",
+                review_epoch=1,
+            )
+            connection.commit()
+            inserted = connection.execute(
+                """
+                SELECT action_id FROM actions
+                WHERE pr_number = ? AND kind = 'clawsweeper.dispatch' AND review_epoch = 1
+                """,
+                (pr,),
+            ).fetchone()
+            assert inserted is not None
+            current_action_id = inserted["action_id"]
+        finally:
+            connection.close()
+        _set_action_status(
+            config,
+            current_action_id,
+            "dispatched",
+            {"result": "dispatched", "workflow_run_id": current_run},
+        )
+        old_payload = claw_workflow_payload(old_run)
+        old_payload["workflow_run"]["created_at"] = "2026-09-21T04:15:57Z"
+        current_payload = claw_workflow_payload(current_run)
+        current_payload["workflow_run"]["created_at"] = "2026-09-24T14:02:54Z"
+        ingress(config, "workflow_run", "epoch-old", old_payload)
+        ingress(config, "workflow_run", "epoch-current", current_payload)
+        client = HistoricalThenCurrentGitHub(
+            old_run,
+            current_run,
+            claw_bundle(run_id=old_run, pr=pr, review_epoch=0),
+            claw_bundle(run_id=current_run, pr=pr, review_epoch=1),
+            None,
+        )
+        collected = userland.collect_clawsweeper_terminals(config, client, dry_run=False)
+        assert collected[0]["result"] == "historical_bundle_retired"
+        assert collected[1]["result"] == "terminal_materialized"
+        assert collected[1]["verdict"] == "clean"
+        runtime.drain_bridge_inboxes(config)
+        row = current(config, pr)
+        assert row["review_epoch"] == 1
+        assert row["state"] == "ready_for_human_merge"
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM clawsweeper_quality WHERE review_epoch = 0"
+            ).fetchone()[0] == 0
+            assert connection.execute(
+                "SELECT COUNT(*) FROM clawsweeper_quality WHERE review_epoch = 1"
+            ).fetchone()[0] == 1
+        finally:
+            connection.close()
+
+
+def test_ambiguous_current_dispatches_stay_pending() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config = config_fixture(root)
+        pr, run_id = 92, 4092
+        prepare_openclaw(config, root, pr)
+        first = action(config, pr, "clawsweeper.dispatch")
+        mark_dispatched(config, first["action_id"])
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            payload = json.loads(first["payload_json"])
+            core.insert_action(
+                connection,
+                kind="clawsweeper.dispatch",
+                repository="dinkuskit/blocks",
+                pr_number=pr,
+                base_sha=BASE,
+                head_sha=HEAD,
+                payload=payload,
+                suffix="second",
+                review_epoch=0,
+            )
+            connection.commit()
+            second = connection.execute(
+                """
+                SELECT action_id FROM actions
+                WHERE pr_number = ? AND kind = 'clawsweeper.dispatch' AND action_id != ?
+                """,
+                (pr, first["action_id"]),
+            ).fetchone()
+            assert second is not None
+            second_id = second["action_id"]
+        finally:
+            connection.close()
+        mark_dispatched(config, second_id)
+        ingress(config, "workflow_run", "ambiguous", claw_workflow_payload(run_id))
+        client = HistoricalThenCurrentGitHub(
+            1, run_id, b"", claw_bundle(run_id=run_id, pr=pr), None
+        )
+        collected = userland.collect_clawsweeper_terminals(config, client, dry_run=False)
+        assert collected == [
+            {
+                "workflow_run_id": run_id,
+                "result": "current_dispatch_pending",
+                "conclusion": "success",
+            }
+        ]
+        assert current(config, pr)["state"] == "clawsweeper_queued"
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            receipt = connection.execute(
+                "SELECT status, verdict FROM rail_workflow_runs WHERE workflow_run_id = ?",
+                (str(run_id),),
+            ).fetchone()
+            assert receipt["status"] == "terminal_pending_verdict_bridge"
+            assert receipt["verdict"] is None
+        finally:
+            connection.close()
+
+
+class BundleRetirementMutationTarget(unittest.TestCase):
+    def test_inflight_dispatch_bundle_stays_pending(self) -> None:
+        test_inflight_dispatch_bundle_stays_pending()
+
+    def test_reopened_epoch_retires_previous_run_and_keeps_current_bundle(self) -> None:
+        test_reopened_epoch_retires_previous_run_and_keeps_current_bundle()
+
+
+def test_bundle_retirement_mutants_fail_their_intended_tests() -> None:
+    mutants = (
+        (
+            "tools/review_conductor_userland.py",
+            "         AND heads.review_epoch = actions.review_epoch -- current-head epoch\n",
+            "",
+            "test_review_conductor_userland.BundleRetirementMutationTarget."
+            "test_reopened_epoch_retires_previous_run_and_keeps_current_bundle",
+        ),
+        (
+            "tools/review_conductor_userland.py",
+            'IN_FLIGHT_CLAWSWEEPER_STATUSES = ("pending", "preparing", "dispatching", "reconcile_required")\n',
+            'IN_FLIGHT_CLAWSWEEPER_STATUSES = ("pending", "preparing", "reconcile_required")\n',
+            "test_review_conductor_userland.BundleRetirementMutationTarget."
+            "test_inflight_dispatch_bundle_stays_pending",
+        ),
+    )
+    for relative, old, new, test_id in mutants:
+        with tempfile.TemporaryDirectory() as temporary:
+            copy_root = Path(temporary) / "copy"
+            for name in ("tools", "tests", "contracts", "examples"):
+                shutil.copytree(ROOT / name, copy_root / name, ignore=shutil.ignore_patterns("__pycache__"))
+            target = copy_root / relative
+            source = target.read_text()
+            assert source.count(old) == 1, relative
+            target.write_text(source.replace(old, new, 1))
+            completed = subprocess.run(
+                [sys.executable, "-m", "unittest", "-q", test_id],
+                cwd=copy_root / "tests",
+                capture_output=True,
+                text=True,
+                timeout=180,
+                env={"PATH": "/usr/bin:/bin", "HOME": temporary, "PYTHONDONTWRITEBYTECODE": "1"},
+            )
+            assert completed.returncode != 0, completed.stderr
+            assert "Ran 1 test" in completed.stderr, completed.stderr
+            assert f"FAIL: {test_id.rsplit('.', 1)[1]}" in completed.stderr or (
+                f"ERROR: {test_id.rsplit('.', 1)[1]}" in completed.stderr
+            ), completed.stderr
+
+
 def test_unproven_no_artifact_failure_does_not_choose_a_pull_request() -> None:
     cases = (
         {"review_epoch": 1, "head_sha": HEAD},
@@ -3472,6 +3734,10 @@ def main() -> None:
         test_bound_failed_workflow_without_bundle_is_execution_failure,
         test_historical_bundle_does_not_block_current_no_artifact_failure,
         test_historical_success_bundle_still_allows_the_current_clean_terminal,
+        test_inflight_dispatch_bundle_stays_pending,
+        test_reopened_epoch_retires_previous_run_and_keeps_current_bundle,
+        test_ambiguous_current_dispatches_stay_pending,
+        test_bundle_retirement_mutants_fail_their_intended_tests,
         test_unproven_no_artifact_failure_does_not_choose_a_pull_request,
         test_stored_dispatch_run_id_fails_queued_execution_without_a_log,
         test_dispatch_identity_transport_failure_leaves_the_run_pending,

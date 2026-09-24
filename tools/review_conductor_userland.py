@@ -35,6 +35,7 @@ import orchestration_outcome as orchestration  # noqa: E402
 
 USERLAND_SCHEMA = "smoky.review-conductor.userland.v1"
 CLAWSWEEPER_BUNDLE_MISMATCH = "ClawSweeper bundle does not match one current dispatched action"
+IN_FLIGHT_CLAWSWEEPER_STATUSES = ("pending", "preparing", "dispatching", "reconcile_required")
 NOTIFICATION_SCHEMA = "smoky.review-conductor.notification.v1"
 DEFAULT_CONFIG = ROOT / "contracts/review-conductor/dinkuskit-blocks-userland.json"
 # Engine terminal states. Notification eligibility is decided by
@@ -1120,41 +1121,95 @@ def clawsweeper_bundle_identity(raw: bytes) -> dict[str, Any]:
         raise UserlandError("ClawSweeper report is not UTF-8") from exc
     base_sha = core.require_sha(frontmatter.get("main_sha"), "ClawSweeper report base")
     head_sha = core.require_sha(frontmatter.get("pull_head_sha"), "ClawSweeper report head")
-    return {
+    identity = {
         "repository": repository,
         "pr_number": pr_number,
         "base_sha": base_sha,
         "head_sha": head_sha,
     }
+    if "review_epoch" in frontmatter:
+        epoch = frontmatter["review_epoch"]
+        if re.fullmatch(r"[0-9]+", epoch) is None:
+            raise UserlandError("ClawSweeper report review epoch is invalid")
+        identity["review_epoch"] = int(epoch)
+    return identity
 
 
-def clawsweeper_action(config: dict[str, Any], identity: dict[str, Any]) -> sqlite3.Row:
-    connection = core.open_database(Path(config["paths"]["state_root"]), config["github_app"]["repository"])
+def _receipt_owns_run(row: sqlite3.Row, workflow_run_id: int) -> bool:
+    """True when this dispatched receipt did not record a different run.
+
+    A missing ``workflow_run_id`` still owns the run. Dispatch stores that
+    integer only when GitHub returns it; a 204 response leaves it unset.
+    A present but non-integer value owns nothing.
+    """
     try:
-        row = connection.execute(
-            """
+        receipt = json.loads(row["receipt_json"] or "{}")
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(receipt, dict) or "workflow_run_id" not in receipt:
+        return True
+    recorded = receipt["workflow_run_id"]
+    if isinstance(recorded, bool) or not isinstance(recorded, int):
+        return False
+    return recorded == int(workflow_run_id)
+
+
+def current_epoch_clawsweeper_actions(
+    connection: sqlite3.Connection, identity: dict[str, Any]
+) -> list[sqlite3.Row]:
+    """Return ClawSweeper dispatches joined to the current head's epoch.
+
+    An earlier epoch stays dispatched across reopen and must not join.
+    A bundle epoch, when the report carries one, must be that same epoch.
+    """
+    parameters: list[Any] = [
+        identity["repository"],
+        identity["pr_number"],
+        identity["base_sha"],
+        identity["head_sha"],
+    ]
+    epoch_clause = ""
+    if "review_epoch" in identity:
+        epoch_clause = "AND actions.review_epoch = ?"
+        parameters.append(identity["review_epoch"])
+    return list(
+        connection.execute(
+            f"""
             SELECT actions.* FROM actions
             JOIN heads
               ON heads.repository = actions.repository
              AND heads.pr_number = actions.pr_number
              AND heads.base_sha = actions.base_sha
              AND heads.head_sha = actions.head_sha
-             AND heads.review_epoch = actions.review_epoch
+             AND heads.review_epoch = actions.review_epoch -- current-head epoch
              AND heads.is_current = 1
             WHERE actions.kind = 'clawsweeper.dispatch'
-              AND actions.status = 'dispatched'
               AND heads.state IN ('clawsweeper_queued', 'clawsweeper_running')
               AND actions.repository = ? AND actions.pr_number = ?
               AND actions.base_sha = ? AND actions.head_sha = ?
+              {epoch_clause}
             """,
-            (
-                identity["repository"], identity["pr_number"],
-                identity["base_sha"], identity["head_sha"],
-            ),
+            parameters,
         ).fetchall()
-        if len(row) != 1:
+    )
+
+
+def clawsweeper_action(
+    config: dict[str, Any],
+    identity: dict[str, Any],
+    *,
+    workflow_run_id: int,
+) -> sqlite3.Row:
+    connection = core.open_database(Path(config["paths"]["state_root"]), config["github_app"]["repository"])
+    try:
+        rows = [
+            row
+            for row in current_epoch_clawsweeper_actions(connection, identity)
+            if row["status"] == "dispatched" and _receipt_owns_run(row, workflow_run_id)
+        ]
+        if len(rows) != 1:
             raise UserlandError(CLAWSWEEPER_BUNDLE_MISMATCH)
-        return row[0]
+        return rows[0]
     finally:
         connection.close()
 
@@ -1171,7 +1226,7 @@ def materialize_failed_clawsweeper_terminal(
     )
     raw_bundle = client.download_artifact(artifact_id)
     identity = clawsweeper_bundle_identity(raw_bundle)
-    action = clawsweeper_action(config, identity)
+    action = clawsweeper_action(config, identity, workflow_run_id=run_id)
     if config.get("review_policy"):
         parse_clawsweeper_bundle(raw_bundle, workflow_run_id=run_id, action=action, policy=config["review_policy"])
     files = bounded_zip_files(raw_bundle)
@@ -1427,18 +1482,42 @@ def fail_proven_clawsweeper_execution(
     return {**head_identity, "review_epoch": row["review_epoch"]}
 
 
-def retire_unmatched_clawsweeper_bundle(
-    config: dict[str, Any], rail_run: sqlite3.Row
+def settle_unmatched_clawsweeper_bundle(
+    config: dict[str, Any],
+    rail_run: sqlite3.Row,
+    identity: dict[str, Any],
 ) -> dict[str, Any]:
-    """Drop a pending bundle that is not the one current dispatched action.
+    """Retire a bundle only when the current epoch cannot still own it.
 
-    The receipt keeps no verdict. No head, check, or merge state changes.
+    ``pending``, ``preparing``, ``dispatching``, and ``reconcile_required``
+    keep the receipt pending: dispatch stays ``dispatching`` until the API
+    response commits, and a fast run can finish inside that window. Several
+    current-epoch dispatches that do not exclude this run also stay pending.
+    A stored ``workflow_run_id`` for a different run, or no current-epoch
+    action at all, is historical. The receipt then keeps no verdict and no
+    head, check, or merge state changes. The decision and any retirement
+    share one immediate transaction.
     """
+    run_id = int(rail_run["workflow_run_id"])
     connection = core.open_database(
         Path(config["paths"]["state_root"]), config["github_app"]["repository"]
     )
     try:
         connection.execute("BEGIN IMMEDIATE")
+        rows = current_epoch_clawsweeper_actions(connection, identity)
+        in_flight = [row for row in rows if row["status"] in IN_FLIGHT_CLAWSWEEPER_STATUSES]
+        owning = [
+            row
+            for row in rows
+            if row["status"] == "dispatched" and _receipt_owns_run(row, run_id)
+        ]
+        if in_flight or owning:
+            connection.rollback()
+            return {
+                "workflow_run_id": run_id,
+                "result": "current_dispatch_pending",
+                "conclusion": rail_run["conclusion"],
+            }
         updated = connection.execute(
             """
             UPDATE rail_workflow_runs SET status = 'terminal_attention_required'
@@ -1455,7 +1534,7 @@ def retire_unmatched_clawsweeper_bundle(
     finally:
         connection.close()
     return {
-        "workflow_run_id": int(rail_run["workflow_run_id"]),
+        "workflow_run_id": run_id,
         "result": "historical_bundle_retired",
         "conclusion": rail_run["conclusion"],
     }
@@ -1561,11 +1640,14 @@ def collect_clawsweeper_terminals(
         )
         try:
             raw_bundle = client.download_artifact(artifact_id)
-            action = clawsweeper_action(config, clawsweeper_bundle_identity(raw_bundle))
+            identity = clawsweeper_bundle_identity(raw_bundle)
+            action = clawsweeper_action(config, identity, workflow_run_id=run_id)
         except UserlandError as exc:
             if str(exc) != CLAWSWEEPER_BUNDLE_MISMATCH:
                 raise
-            outcomes.append(retire_unmatched_clawsweeper_bundle(config, rail_run))
+            outcomes.append(
+                settle_unmatched_clawsweeper_bundle(config, rail_run, identity)
+            )
             continue
         except runtime.GitHubApiError:
             outcomes.append(

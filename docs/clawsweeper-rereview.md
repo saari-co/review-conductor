@@ -75,10 +75,18 @@ presentation path. No result authorizes merge.
 
 ## Historical bundles and no-artifact execution failure
 
-A `terminal_pending_verdict_bridge` artifact that does not match exactly one
-current dispatched action is retired as historical attention. Superseded,
-closed, and unbound bundles take this path. Retirement writes no verdict, does
-not change any head, and does not stop later runs or projection in the same tick.
+A success bundle is retired as historical attention only when the current
+head's review epoch cannot still own it. The lookup joins each action to that
+current head on `review_epoch`, and a report epoch must be the same epoch.
+An earlier epoch's action stays `dispatched` across reopen and does not match.
+`pending`, `preparing`, `dispatching`, and `reconcile_required` leave the
+receipt pending, because dispatch remains `dispatching` until the API response
+commits and a fast run can finish in that window. A receipt that stores
+`workflow_run_id` binds only that run; a different run is historical. Several
+current-epoch dispatches that do not uniquely exclude this run stay pending
+instead of being retired. Superseded, closed, and unbound bundles still take
+the historical path. Retirement writes no verdict, does not change any head,
+and does not stop later runs or projection in the same tick.
 
 A non-success run with no exact verdict bundle fails the current head only when
 that run is the already-started request, the dispatch receipt stores that

@@ -41,7 +41,9 @@ rejected as inconsistent with this confirmed product contract.
 Maintainer `@ClawSweeper rereview` / `@clawsweeper re-review` comments are the
 supported same-head ClawSweeper refresh entry; `pull_request.edited` is not a
 trigger. A superseded or unbound ClawSweeper bundle does not block collection
-or projection of a different current action. A no-artifact producer failure
+or projection of a different current action. An in-flight current-epoch
+dispatch keeps that receipt pending, and an earlier epoch's dispatched action
+is not the current owner. A no-artifact producer failure
 becomes `clawsweeper_failed` only for the exact current dispatched tuple, and
 that failure is not review PASS. An admission log larger than 64KiB, a
 conflicting partial block, or a private-runner log redirect is not that
