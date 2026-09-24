@@ -10,9 +10,11 @@ import json
 import os
 import pwd
 import sqlite3
+import shutil
 import subprocess
 import sys
 import tempfile
+import unittest
 import warnings
 import zipfile
 from pathlib import Path
@@ -343,6 +345,9 @@ def claw_bundle(
     decision: str | None = None,
     process_gates: list[str] | None = None,
     needs_contributor_action: bool = False,
+    base_sha: str = BASE,
+    head_sha: str = HEAD,
+    review_epoch: int | None = None,
 ) -> bytes:
     finding_text = (
         "\n## Review Findings\n\n- **[P1] Fix the exact regression:** `src/example.ts:1`\n  - body: bounded fixture finding\n"
@@ -356,8 +361,13 @@ def claw_bundle(
             "repository: dinkuskit/blocks",
             "review_status: complete",
             "review_terminal_failure: false",
-            f"main_sha: {BASE}",
-            f"pull_head_sha: {HEAD}",
+            f"main_sha: {base_sha}",
+            f"pull_head_sha: {head_sha}",
+            *(
+                [f"review_epoch: {review_epoch}"]
+                if review_epoch is not None
+                else []
+            ),
             f"pr_rating_overall: {overall}",
             f"pr_rating_proof: {proof}",
             f"real_behavior_proof_status: {proof_status}",
@@ -2618,6 +2628,1605 @@ def test_bound_failed_workflow_without_bundle_is_execution_failure() -> None:
             assert list(Path(config["clawsweeper_bridge"]["terminal_inbox"]).glob("*.json")) == []
 
 
+class HistoricalThenCurrentGitHub:
+    def __init__(self, old_run: int, current_run: int, old_bundle: bytes, current_bundle: bytes | None, identity: dict[str, Any] | None) -> None:
+        self.old_run = old_run
+        self.current_run = current_run
+        self.old_bundle = old_bundle
+        self.current_bundle = current_bundle
+        self.identity = identity
+
+    def list_run_artifacts(self, run_id: int) -> list[dict[str, Any]]:
+        if run_id == self.old_run or (run_id == self.current_run and self.current_bundle is not None):
+            return [{"id": run_id, "name": f"dinkuskit-native-review-{run_id}-1", "expired": False}]
+        return []
+
+    def download_artifact(self, artifact_id: int) -> bytes:
+        if artifact_id == self.old_run:
+            return self.old_bundle
+        if artifact_id == self.current_run and self.current_bundle is not None:
+            return self.current_bundle
+        raise AssertionError(artifact_id)
+
+    def clawsweeper_dispatch_identity(self, run_id: int) -> dict[str, Any] | None:
+        if run_id == self.current_run:
+            return self.identity
+        return None
+
+
+def test_historical_bundle_does_not_block_current_no_artifact_failure() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config = config_fixture(root)
+        pr = 48
+        old_run, failed_run = 35560312902, 36009939846
+        stale_head = "9" * 40
+        prepare_openclaw(config, root, pr)
+        claw_action = action(config, pr, "clawsweeper.dispatch")
+        mark_dispatched(config, claw_action["action_id"])
+        old_payload = claw_workflow_payload(old_run, conclusion="success")
+        old_payload["workflow_run"]["created_at"] = "2026-09-21T04:15:57Z"
+        failed_payload = claw_workflow_payload(failed_run, conclusion="failure")
+        failed_payload["workflow_run"]["created_at"] = "2026-09-24T14:02:54Z"
+        ingress(config, "workflow_run", "historical-success", old_payload)
+        ingress(config, "workflow_run", "current-failure", failed_payload)
+        identity = {
+            "repository": "dinkuskit/blocks",
+            "pr_number": pr,
+            "base_sha": BASE,
+            "head_sha": HEAD,
+            "review_epoch": 0,
+        }
+        client = HistoricalThenCurrentGitHub(
+            old_run,
+            failed_run,
+            claw_bundle(run_id=old_run, pr=pr, head_sha=stale_head),
+            None,
+            identity,
+        )
+        collected = userland.collect_clawsweeper_terminals(config, client, dry_run=False)
+        assert collected == [
+            {
+                "workflow_run_id": old_run,
+                "result": "historical_bundle_retired",
+                "conclusion": "success",
+            },
+            {
+                "workflow_run_id": failed_run,
+                "result": "bound_execution_failed",
+                "conclusion": "failure",
+                "binding": {**identity},
+            },
+        ]
+        row = current(config, pr)
+        assert row["state"] == "clawsweeper_failed"
+        assert row["review_request_id"] == str(failed_run)
+        assert "no qualified verdict bundle" in row["blocker"]
+        assert core.state_projection(dict(row))["checks"]["ClawSweeper Review Rail"] == "failure"
+        assert core.state_projection(dict(row))["merge_authorized"] is False
+        projected = runtime.reconcile_projection(config, None, pr_number=pr, dry_run=True)
+        assert projected["projected"][0]["visible_state"] == "clawsweeper_failed"
+        assert projected["projected"][0]["checks"]["ClawSweeper Review Rail"] == "failure"
+        assert projected["projected"][0]["merge_authorized"] is False
+        report = runtime.projection_check_report(
+            row, check_name="ClawSweeper Review Rail", check_state="failure"
+        )
+        payload = runtime.check_payload(
+            "ClawSweeper Review Rail", HEAD, "fixture-check", "failure", report=report
+        )
+        assert payload["conclusion"] == "failure"
+        assert "Review content:" not in payload["output"]["summary"]
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            historical = connection.execute(
+                "SELECT * FROM rail_workflow_runs WHERE workflow_run_id = ?", (str(old_run),)
+            ).fetchone()
+            failed = connection.execute(
+                "SELECT * FROM rail_workflow_runs WHERE workflow_run_id = ?", (str(failed_run),)
+            ).fetchone()
+            assert historical["status"] == "terminal_attention_required"
+            assert historical["verdict"] is None and historical["bound_pr_number"] is None
+            assert failed["status"] == "terminal_attention_required"
+            assert failed["verdict"] is None and failed["proof_ref"] is None
+            assert failed["bound_pr_number"] == pr and failed["bound_head_sha"] == HEAD
+            assert connection.execute("SELECT COUNT(*) FROM clawsweeper_quality").fetchone()[0] == 0
+        finally:
+            connection.close()
+        assert list(Path(config["clawsweeper_bridge"]["terminal_inbox"]).glob("*.json")) == []
+        assert userland.collect_clawsweeper_terminals(config, client, dry_run=False) == []
+
+
+def test_historical_success_bundle_still_allows_the_current_clean_terminal() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config = config_fixture(root)
+        pr = 49
+        old_run, current_run = 11, 22
+        prepare_openclaw(config, root, pr)
+        mark_dispatched(config, action(config, pr, "clawsweeper.dispatch")["action_id"])
+        old_payload = claw_workflow_payload(old_run)
+        old_payload["workflow_run"]["created_at"] = "2026-09-21T04:15:57Z"
+        current_payload = claw_workflow_payload(current_run)
+        current_payload["workflow_run"]["created_at"] = "2026-09-24T14:02:54Z"
+        ingress(config, "workflow_run", "old-clean", old_payload)
+        ingress(config, "workflow_run", "current-clean", current_payload)
+        client = HistoricalThenCurrentGitHub(
+            old_run,
+            current_run,
+            claw_bundle(run_id=old_run, pr=pr, head_sha="8" * 40),
+            claw_bundle(run_id=current_run, pr=pr),
+            None,
+        )
+        collected = userland.collect_clawsweeper_terminals(config, client, dry_run=False)
+        assert collected[0]["result"] == "historical_bundle_retired"
+        assert collected[1]["result"] == "terminal_materialized"
+        assert collected[1]["verdict"] == "clean"
+        runtime.drain_bridge_inboxes(config)
+        assert current(config, pr)["state"] == "ready_for_human_merge"
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM clawsweeper_quality WHERE head_sha = ?", ("8" * 40,)
+            ).fetchone()[0] == 0
+        finally:
+            connection.close()
+
+
+def _set_action_status(
+    config: dict[str, Any], action_id: str, status: str, receipt: dict[str, Any]
+) -> None:
+    connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+    try:
+        connection.execute(
+            "UPDATE actions SET status = ?, receipt_json = ? WHERE action_id = ?",
+            (status, core.canonical_json(receipt), action_id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def test_inflight_dispatch_bundle_stays_pending() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config = config_fixture(root)
+        pr, run_id = 90, 4090
+        prepare_openclaw(config, root, pr)
+        claw_action = action(config, pr, "clawsweeper.dispatch")
+        _set_action_status(config, claw_action["action_id"], "dispatching", {})
+        ingress(config, "workflow_run", "inflight-success", claw_workflow_payload(run_id))
+        client = HistoricalThenCurrentGitHub(
+            1,
+            run_id,
+            b"",
+            claw_bundle(run_id=run_id, pr=pr),
+            None,
+        )
+        collected = userland.collect_clawsweeper_terminals(config, client, dry_run=False)
+        assert collected == [
+            {
+                "workflow_run_id": run_id,
+                "result": "current_dispatch_pending",
+                "conclusion": "success",
+            }
+        ]
+        assert current(config, pr)["state"] == "clawsweeper_queued"
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            receipt = connection.execute(
+                "SELECT * FROM rail_workflow_runs WHERE workflow_run_id = ?",
+                (str(run_id),),
+            ).fetchone()
+            assert receipt["status"] == "terminal_pending_verdict_bridge"
+            assert receipt["verdict"] is None and receipt["proof_ref"] is None
+        finally:
+            connection.close()
+        assert list(Path(config["clawsweeper_bridge"]["terminal_inbox"]).glob("*.json")) == []
+        _set_action_status(
+            config,
+            claw_action["action_id"],
+            "dispatched",
+            {"result": "dispatched", "workflow_run_id": run_id},
+        )
+        again = userland.collect_clawsweeper_terminals(config, client, dry_run=False)
+        assert again[0]["result"] == "terminal_materialized"
+        assert again[0]["verdict"] == "clean"
+
+
+def test_reopened_epoch_retires_previous_run_and_keeps_current_bundle() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config = config_fixture(root)
+        pr = 91
+        old_run, current_run = 11, 22
+        prepare_openclaw(config, root, pr)
+        previous = action(config, pr, "clawsweeper.dispatch")
+        _set_action_status(
+            config,
+            previous["action_id"],
+            "dispatched",
+            {"result": "dispatched", "workflow_run_id": old_run},
+        )
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            connection.execute(
+                "UPDATE heads SET review_epoch = 1 WHERE pr_number = ? AND is_current = 1",
+                (pr,),
+            )
+            payload = json.loads(previous["payload_json"])
+            payload["review_epoch"] = 1
+            core.insert_action(
+                connection,
+                kind="clawsweeper.dispatch",
+                repository="dinkuskit/blocks",
+                pr_number=pr,
+                base_sha=BASE,
+                head_sha=HEAD,
+                payload=payload,
+                suffix="reopen",
+                review_epoch=1,
+            )
+            connection.commit()
+            inserted = connection.execute(
+                """
+                SELECT action_id FROM actions
+                WHERE pr_number = ? AND kind = 'clawsweeper.dispatch' AND review_epoch = 1
+                """,
+                (pr,),
+            ).fetchone()
+            assert inserted is not None
+            current_action_id = inserted["action_id"]
+        finally:
+            connection.close()
+        _set_action_status(
+            config,
+            current_action_id,
+            "dispatched",
+            {"result": "dispatched", "workflow_run_id": current_run},
+        )
+        old_payload = claw_workflow_payload(old_run)
+        old_payload["workflow_run"]["created_at"] = "2026-09-21T04:15:57Z"
+        current_payload = claw_workflow_payload(current_run)
+        current_payload["workflow_run"]["created_at"] = "2026-09-24T14:02:54Z"
+        ingress(config, "workflow_run", "epoch-old", old_payload)
+        ingress(config, "workflow_run", "epoch-current", current_payload)
+        client = HistoricalThenCurrentGitHub(
+            old_run,
+            current_run,
+            claw_bundle(run_id=old_run, pr=pr, review_epoch=0),
+            claw_bundle(run_id=current_run, pr=pr, review_epoch=1),
+            None,
+        )
+        collected = userland.collect_clawsweeper_terminals(config, client, dry_run=False)
+        assert collected[0]["result"] == "historical_bundle_retired"
+        assert collected[1]["result"] == "terminal_materialized"
+        assert collected[1]["verdict"] == "clean"
+        runtime.drain_bridge_inboxes(config)
+        row = current(config, pr)
+        assert row["review_epoch"] == 1
+        assert row["state"] == "ready_for_human_merge"
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM clawsweeper_quality WHERE review_epoch = 0"
+            ).fetchone()[0] == 0
+            assert connection.execute(
+                "SELECT COUNT(*) FROM clawsweeper_quality WHERE review_epoch = 1"
+            ).fetchone()[0] == 1
+        finally:
+            connection.close()
+
+
+def test_ambiguous_current_dispatches_stay_pending() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config = config_fixture(root)
+        pr, run_id = 92, 4092
+        prepare_openclaw(config, root, pr)
+        first = action(config, pr, "clawsweeper.dispatch")
+        mark_dispatched(config, first["action_id"])
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            payload = json.loads(first["payload_json"])
+            core.insert_action(
+                connection,
+                kind="clawsweeper.dispatch",
+                repository="dinkuskit/blocks",
+                pr_number=pr,
+                base_sha=BASE,
+                head_sha=HEAD,
+                payload=payload,
+                suffix="second",
+                review_epoch=0,
+            )
+            connection.commit()
+            second = connection.execute(
+                """
+                SELECT action_id FROM actions
+                WHERE pr_number = ? AND kind = 'clawsweeper.dispatch' AND action_id != ?
+                """,
+                (pr, first["action_id"]),
+            ).fetchone()
+            assert second is not None
+            second_id = second["action_id"]
+        finally:
+            connection.close()
+        mark_dispatched(config, second_id)
+        ingress(config, "workflow_run", "ambiguous", claw_workflow_payload(run_id))
+        client = HistoricalThenCurrentGitHub(
+            1, run_id, b"", claw_bundle(run_id=run_id, pr=pr), None
+        )
+        collected = userland.collect_clawsweeper_terminals(config, client, dry_run=False)
+        assert collected == [
+            {
+                "workflow_run_id": run_id,
+                "result": "current_dispatch_pending",
+                "conclusion": "success",
+            }
+        ]
+        assert current(config, pr)["state"] == "clawsweeper_queued"
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            receipt = connection.execute(
+                "SELECT status, verdict FROM rail_workflow_runs WHERE workflow_run_id = ?",
+                (str(run_id),),
+            ).fetchone()
+            assert receipt["status"] == "terminal_pending_verdict_bridge"
+            assert receipt["verdict"] is None
+        finally:
+            connection.close()
+
+
+class BundleRetirementMutationTarget(unittest.TestCase):
+    def test_inflight_dispatch_bundle_stays_pending(self) -> None:
+        test_inflight_dispatch_bundle_stays_pending()
+
+    def test_reopened_epoch_retires_previous_run_and_keeps_current_bundle(self) -> None:
+        test_reopened_epoch_retires_previous_run_and_keeps_current_bundle()
+
+
+class ReceiptAndJobPageMutationTarget(unittest.TestCase):
+    def test_malformed_receipt_does_not_own_a_current_bundle(self) -> None:
+        test_malformed_receipt_does_not_own_a_current_bundle()
+
+    def test_inflight_no_artifact_failure_stays_pending(self) -> None:
+        test_inflight_no_artifact_failure_stays_pending()
+
+    def test_admission_job_on_a_later_page_is_the_dispatch_identity(self) -> None:
+        test_admission_job_on_a_later_page_is_the_dispatch_identity()
+
+    def test_admission_job_lookup_does_not_read_past_the_page_cap(self) -> None:
+        test_admission_job_lookup_does_not_read_past_the_page_cap()
+
+    def test_string_receipt_run_id_is_not_a_stored_identity(self) -> None:
+        test_string_receipt_run_id_is_not_a_stored_identity()
+
+    def test_string_receipt_run_id_does_not_pass_the_admission_fence(self) -> None:
+        test_string_receipt_run_id_does_not_pass_the_admission_fence()
+
+    def test_malformed_admission_job_id_stays_pending_and_collection_continues(self) -> None:
+        test_malformed_admission_job_id_stays_pending_and_collection_continues()
+
+    def test_overlong_bundle_epoch_does_not_abort_later_collection(self) -> None:
+        test_overlong_bundle_epoch_does_not_abort_later_collection()
+
+    def test_jobs_next_link_must_stay_on_the_requested_run(self) -> None:
+        test_jobs_next_link_must_stay_on_the_requested_run()
+
+    def test_empty_receipt_does_not_own_a_current_bundle(self) -> None:
+        test_empty_receipt_does_not_own_a_current_bundle()
+
+    def test_empty_receipt_does_not_pass_the_admission_fence(self) -> None:
+        test_empty_receipt_does_not_pass_the_admission_fence()
+
+    def test_epochless_bundle_does_not_own_a_reopened_omitted_run_id(self) -> None:
+        test_epochless_bundle_does_not_own_a_reopened_omitted_run_id()
+
+    def test_overlong_dispatch_epoch_stays_pending_and_collection_continues(self) -> None:
+        test_overlong_dispatch_epoch_stays_pending_and_collection_continues()
+
+
+def test_bundle_retirement_mutants_fail_their_intended_tests() -> None:
+    mutants = (
+        (
+            "tools/review_conductor_userland.py",
+            "         AND heads.review_epoch = actions.review_epoch -- current-head epoch\n",
+            "",
+            "test_review_conductor_userland.BundleRetirementMutationTarget."
+            "test_reopened_epoch_retires_previous_run_and_keeps_current_bundle",
+        ),
+        (
+            "tools/review_conductor_userland.py",
+            'IN_FLIGHT_CLAWSWEEPER_STATUSES = ("pending", "preparing", "dispatching", "reconcile_required")\n',
+            'IN_FLIGHT_CLAWSWEEPER_STATUSES = ("pending", "preparing", "reconcile_required")\n',
+            "test_review_conductor_userland.BundleRetirementMutationTarget."
+            "test_inflight_dispatch_bundle_stays_pending",
+        ),
+        (
+            "tools/review_conductor_userland.py",
+            "    if not isinstance(receipt, dict):  # malformed-receipt-owns-nothing\n"
+            "        return None\n",
+            "",
+            "test_review_conductor_userland.ReceiptAndJobPageMutationTarget."
+            "test_malformed_receipt_does_not_own_a_current_bundle",
+        ),
+        (
+            "tools/review_conductor_userland.py",
+            "                if bound_failure is None and _no_artifact_failure_awaits_current_dispatch(\n",
+            "                if False and bound_failure is None and _no_artifact_failure_awaits_current_dispatch(\n",
+            "test_review_conductor_userland.ReceiptAndJobPageMutationTarget."
+            "test_inflight_no_artifact_failure_stays_pending",
+        ),
+        (
+            "tools/review_conductor_runtime.py",
+            "            current = nxt  # clawsweeper-job-pages\n",
+            "            return jobs  # clawsweeper-job-pages\n",
+            "test_review_conductor_userland.ReceiptAndJobPageMutationTarget."
+            "test_admission_job_on_a_later_page_is_the_dispatch_identity",
+        ),
+        (
+            "tools/review_conductor_runtime.py",
+            "            if page_index == MAX_LIST_PAGES - 1:  # clawsweeper-job-page-cap\n",
+            "            if page_index == MAX_LIST_PAGES + 99:  # clawsweeper-job-page-cap\n",
+            "test_review_conductor_userland.ReceiptAndJobPageMutationTarget."
+            "test_admission_job_lookup_does_not_read_past_the_page_cap",
+        ),
+        (
+            "tools/review_conductor_userland.py",
+            "        if (isinstance(recorded, bool) or not isinstance(recorded, int)\n"
+            "                or recorded != int(run_id)):  # integer-receipt-hit\n",
+            "        if recorded is None or str(recorded) != run_id:  # integer-receipt-hit\n",
+            "test_review_conductor_userland.ReceiptAndJobPageMutationTarget."
+            "test_string_receipt_run_id_is_not_a_stored_identity",
+        ),
+        (
+            "tools/review_conductor_userland.py",
+            "        if (isinstance(recorded, bool) or not isinstance(recorded, int)\n"
+            "                or recorded != int(rail_run[\"workflow_run_id\"])):  # integer-receipt-fence\n",
+            "        if recorded is not None and str(recorded) != str(rail_run[\"workflow_run_id\"]):  # integer-receipt-fence\n",
+            "test_review_conductor_userland.ReceiptAndJobPageMutationTarget."
+            "test_string_receipt_run_id_does_not_pass_the_admission_fence",
+        ),
+        (
+            "tools/review_conductor_runtime.py",
+            "            raise GitHubApiError(\"ClawSweeper admission job id is invalid\") from exc\n",
+            "            return None\n",
+            "test_review_conductor_userland.ReceiptAndJobPageMutationTarget."
+            "test_malformed_admission_job_id_stays_pending_and_collection_continues",
+        ),
+        (
+            "tools/review_conductor_userland.py",
+            "        if re.fullmatch(r\"[0-9]{1,10}\", epoch) is None:  # bundle-epoch-digit-bound\n",
+            "        if re.fullmatch(r\"[0-9]+\", epoch) is None:  # bundle-epoch-digit-bound\n",
+            "test_review_conductor_userland.ReceiptAndJobPageMutationTarget."
+            "test_overlong_bundle_epoch_does_not_abort_later_collection",
+        ),
+        (
+            "tools/review_conductor_runtime.py",
+            "            same_run = f\"/repos/{self.repository}/actions/runs/{run_id}/jobs\"\n"
+            "            if nxt.split(\"?\", 1)[0] != same_run:  # clawsweeper-job-same-run\n"
+            "                raise GitHubApiError(\"ClawSweeper jobs listing left the requested run\")\n",
+            "",
+            "test_review_conductor_userland.ReceiptAndJobPageMutationTarget."
+            "test_jobs_next_link_must_stay_on_the_requested_run",
+        ),
+        (
+            "tools/review_conductor_userland.py",
+            "    if not isinstance(raw, str) or raw == \"\":  # empty-receipt-is-not-an-object\n"
+            "        return None\n"
+            "    try:\n"
+            "        receipt = json.loads(raw)\n",
+            "    try:\n"
+            "        receipt = json.loads(raw or \"{}\")  # empty-receipt-is-not-an-object\n",
+            "test_review_conductor_userland.ReceiptAndJobPageMutationTarget."
+            "test_empty_receipt_does_not_own_a_current_bundle",
+        ),
+        (
+            "tools/review_conductor_userland.py",
+            "    return \"review_epoch\" in identity or int(row[\"review_epoch\"]) == 0  # epochless-nonzero-needs-run\n",
+            "    return True  # epochless-nonzero-needs-run\n",
+            "test_review_conductor_userland.ReceiptAndJobPageMutationTarget."
+            "test_epochless_bundle_does_not_own_a_reopened_omitted_run_id",
+        ),
+        (
+            "tools/review_conductor_userland.py",
+            "    if epoch > 9_999_999_999:  # dispatch-epoch-digit-bound\n",
+            "    if epoch >= 2**63:  # dispatch-epoch-digit-bound\n",
+            "test_review_conductor_userland.ReceiptAndJobPageMutationTarget."
+            "test_overlong_dispatch_epoch_stays_pending_and_collection_continues",
+        ),
+    )
+    for relative, old, new, test_id in mutants:
+        with tempfile.TemporaryDirectory() as temporary:
+            copy_root = Path(temporary) / "copy"
+            for name in ("tools", "tests", "contracts", "examples"):
+                shutil.copytree(ROOT / name, copy_root / name, ignore=shutil.ignore_patterns("__pycache__"))
+            target = copy_root / relative
+            source = target.read_text()
+            assert source.count(old) == 1, relative
+            target.write_text(source.replace(old, new, 1))
+            completed = subprocess.run(
+                [sys.executable, "-m", "unittest", "-q", test_id],
+                cwd=copy_root / "tests",
+                capture_output=True,
+                text=True,
+                timeout=180,
+                env={"PATH": "/usr/bin:/bin", "HOME": temporary, "PYTHONDONTWRITEBYTECODE": "1"},
+            )
+            assert completed.returncode != 0, completed.stderr
+            assert "Ran 1 test" in completed.stderr, completed.stderr
+            assert f"FAIL: {test_id.rsplit('.', 1)[1]}" in completed.stderr or (
+                f"ERROR: {test_id.rsplit('.', 1)[1]}" in completed.stderr
+            ), completed.stderr
+
+
+def test_unproven_no_artifact_failure_does_not_choose_a_pull_request() -> None:
+    cases = (
+        {"review_epoch": 1, "head_sha": HEAD},
+        {"review_epoch": 0, "head_sha": "7" * 40},
+        {"review_epoch": True, "head_sha": HEAD},
+    )
+    for index, override in enumerate(cases):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = config_fixture(Path(temporary))
+            pr, run_id = 80 + index, 3000 + index
+            prepare_openclaw(config, Path(temporary), pr)
+            dispatched = action(config, pr, "clawsweeper.dispatch")
+            mark_dispatched(config, dispatched["action_id"])
+            if index == 2:
+                connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+                try:
+                    payload = json.loads(dispatched["payload_json"])
+                    payload["previous_workflow_run_id"] = str(run_id)
+                    connection.execute(
+                        "UPDATE actions SET payload_json = ? WHERE action_id = ?",
+                        (core.canonical_json(payload), dispatched["action_id"]),
+                    )
+                    connection.commit()
+                finally:
+                    connection.close()
+            ingress(
+                config,
+                "workflow_run",
+                f"unproven-{run_id}",
+                claw_workflow_payload(run_id, conclusion="failure"),
+            )
+            identity = {
+                "repository": "dinkuskit/blocks",
+                "pr_number": pr,
+                "base_sha": BASE,
+                "head_sha": override["head_sha"],
+                "review_epoch": override["review_epoch"],
+            }
+            if index == 2:
+                identity["review_epoch"] = 0
+                identity["head_sha"] = HEAD
+            client = HistoricalThenCurrentGitHub(1, run_id, b"", None, identity)
+            outcomes = userland.collect_clawsweeper_terminals(config, client, dry_run=False)
+            assert outcomes[0]["result"] == "rail_failure_alerted"
+            assert current(config, pr)["state"] == "clawsweeper_queued"
+
+
+def test_stored_dispatch_run_id_fails_queued_execution_without_a_log() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        config = config_fixture(Path(temporary))
+        pr, run_id = 84, 3084
+        prepare_openclaw(config, Path(temporary), pr)
+        dispatched = action(config, pr, "clawsweeper.dispatch")
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            connection.execute(
+                "UPDATE actions SET status = 'dispatched', receipt_json = ? WHERE action_id = ?",
+                (
+                    core.canonical_json({"result": "dispatched", "workflow_run_id": run_id}),
+                    dispatched["action_id"],
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        ingress(config, "workflow_run", "stored-run", claw_workflow_payload(run_id, conclusion="failure"))
+        outcomes = userland.collect_clawsweeper_terminals(config, EmptyGitHub(), dry_run=False)
+        assert outcomes[0]["result"] == "bound_execution_failed"
+        row = current(config, pr)
+        assert row["state"] == "clawsweeper_failed"
+        assert row["review_request_id"] == str(run_id)
+        assert core.state_projection(dict(row))["checks"]["ClawSweeper Review Rail"] == "failure"
+
+
+def test_dispatch_identity_transport_failure_leaves_the_run_pending() -> None:
+    class UnavailableIdentity:
+        def list_run_artifacts(self, _run_id: int) -> list[dict[str, Any]]:
+            return []
+
+        def clawsweeper_dispatch_identity(self, _run_id: int) -> dict[str, Any]:
+            raise runtime.GitHubTransientError("fixture transport")
+
+    with tempfile.TemporaryDirectory() as temporary:
+        config = config_fixture(Path(temporary))
+        pr, run_id = 85, 3085
+        prepare_openclaw(config, Path(temporary), pr)
+        mark_dispatched(config, action(config, pr, "clawsweeper.dispatch")["action_id"])
+        ingress(config, "workflow_run", "retry-identity", claw_workflow_payload(run_id, conclusion="failure"))
+        outcomes = userland.collect_clawsweeper_terminals(config, UnavailableIdentity(), dry_run=False)
+        assert outcomes == [{
+            "workflow_run_id": run_id,
+            "result": "dispatch_identity_unavailable",
+            "conclusion": "failure",
+        }]
+        assert current(config, pr)["state"] == "clawsweeper_queued"
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            receipt = connection.execute(
+                "SELECT status FROM rail_workflow_runs WHERE workflow_run_id = ?", (str(run_id),)
+            ).fetchone()
+            assert receipt["status"] == "terminal_pending_verdict_bridge"
+        finally:
+            connection.close()
+
+
+def test_parse_clawsweeper_dispatch_log_accepts_one_consistent_tuple() -> None:
+    head = "c" * 40
+    base = "d" * 40
+    text = "\n".join([
+        "2026-09-24T14:03:00.4561187Z   pr_number: 48",
+        "2026-09-24T14:03:00.4562649Z   expected_base_sha: " + base,
+        "2026-09-24T14:03:00.4564365Z   expected_head_sha: " + head,
+        "2026-09-24T14:03:00.4565654Z   review_epoch: 0",
+        "other line",
+        "PR_NUMBER: 48",
+        "EXPECTED_BASE_SHA: " + base,
+        "EXPECTED_HEAD_SHA: " + head,
+        "REVIEW_EPOCH: 0",
+    ])
+    assert runtime.parse_clawsweeper_dispatch_log(text) == {
+        "pr_number": 48,
+        "expected_base_sha": base,
+        "expected_head_sha": head,
+        "review_epoch": 0,
+    }
+    conflict = text + "\npr_number: 49\nexpected_base_sha: " + base + "\nexpected_head_sha: " + ("e" * 40) + "\nreview_epoch: 0\n"
+    assert runtime.parse_clawsweeper_dispatch_log(conflict) is None
+    assert runtime.parse_clawsweeper_dispatch_log("pr_number: 48\nreview_epoch: 0\n") is None
+    assert runtime.parse_clawsweeper_dispatch_log("pr_number: 0\nexpected_base_sha: " + base + "\nexpected_head_sha: " + head + "\nreview_epoch: 0\n") is None
+    echoed = text + "\npr_number: 48\nexpected_base_sha: " + base
+    assert runtime.parse_clawsweeper_dispatch_log(echoed)["pr_number"] == 48
+    partial_conflict = text + "\npr_number: 49\n"
+    assert runtime.parse_clawsweeper_dispatch_log(partial_conflict) is None
+    leading_conflict = "pr_number: 49\nnoise\n" + text
+    assert runtime.parse_clawsweeper_dispatch_log(leading_conflict) is None
+
+
+def _is_jobs_url(url: str) -> bool:
+    return url.split("?", 1)[0].endswith("/jobs")
+
+
+def _jobs_page_number(url: str) -> int:
+    query = url.split("?", 1)[1] if "?" in url else ""
+    for part in query.split("&"):
+        if part.startswith("page="):
+            return int(part.split("=", 1)[1])
+    return 1
+
+
+def test_admission_job_log_is_the_only_dispatch_identity_source() -> None:
+    head = "a" * 40
+    base = "b" * 40
+    log = "\n".join([
+        "pr_number: 48",
+        "expected_base_sha: " + base,
+        "expected_head_sha: " + head,
+        "review_epoch: 2",
+    ]).encode()
+    calls: list[str] = []
+
+    def transport(method: str, url: str, _headers: dict[str, str], body: bytes | None, _timeout: float):
+        calls.append(url)
+        if _is_jobs_url(url):
+            assert url.endswith("/jobs?per_page=100")
+            payload = {"jobs": [
+                {"id": 7, "name": "Run pinned exact-tuple ClawSweeper / Admit exact-tuple PR"},
+                {"id": 8, "name": "Run pinned exact-tuple ClawSweeper / Native ClawSweeper review"},
+            ]}
+            return 200, {}, json.dumps(payload).encode()
+        if url.endswith("/logs"):
+            return 200, {}, log
+        if body and b"return_run_details" in body:
+            return 200, {}, json.dumps({"workflow_run_id": 99}).encode()
+        return 204, {}, b""
+
+    with tempfile.TemporaryDirectory() as temporary:
+        config = config_fixture(Path(temporary))
+        client = runtime.GitHubAppClient(config, "fixture-key", transport=transport)
+        client._token = "fixture-token"
+        client._token_expires = 9999999999
+        assert client.clawsweeper_dispatch_identity(36009939846) == {
+            "repository": "dinkuskit/blocks",
+            "pr_number": 48,
+            "base_sha": base,
+            "head_sha": head,
+            "review_epoch": 2,
+        }
+        assert any(_is_jobs_url(url) and url.endswith("?per_page=100") for url in calls)
+        assert any(url.endswith("/logs") for url in calls)
+        run_id = client.dispatch_clawsweeper(
+            pr_number=48, base_sha=base, head_sha=head, publish=True
+        )
+        assert run_id == 99
+        calls.clear()
+
+        def no_admission(method: str, url: str, _headers: dict[str, str], _body: bytes | None, _timeout: float):
+            calls.append(url)
+            assert _is_jobs_url(url) and url.endswith("?per_page=100")
+            return 200, {}, json.dumps({"jobs": [{"id": 8, "name": "Native ClawSweeper review"}]}).encode()
+
+        client._transport = no_admission
+        assert client.clawsweeper_dispatch_identity(36009939846) is None
+        assert len(calls) == 1 and _is_jobs_url(calls[0])
+
+
+def _dispatch_tuple_text(pr: int, base: str, head: str, epoch: int) -> str:
+    return "\n".join([
+        f"pr_number: {pr}",
+        f"expected_base_sha: {base}",
+        f"expected_head_sha: {head}",
+        f"review_epoch: {epoch}",
+    ]) + "\n"
+
+
+def _admission_log_client(
+    config: dict[str, Any],
+    request_once: runtime.ArtifactRequest,
+) -> runtime.GitHubAppClient:
+    def transport(
+        method: str, url: str, _headers: dict[str, str], body: bytes | None, _timeout: float
+    ):
+        if _is_jobs_url(url):
+            payload = {"jobs": [{"id": 7, "name": "Run pinned exact-tuple ClawSweeper / Admit exact-tuple PR"}]}
+            return 200, {}, json.dumps(payload).encode()
+        if url.endswith("/artifacts"):
+            return 200, {}, b'{"artifacts":[]}'
+        if body and b"return_run_details" in body:
+            return 200, {}, json.dumps({"workflow_run_id": 99}).encode()
+        raise AssertionError(url)
+
+    def artifact_transport(url: str, headers: dict[str, str], timeout: float) -> tuple[int, bytes]:
+        return runtime.urllib_artifact_transport(url, headers, timeout, request_once=request_once)
+
+    client = runtime.GitHubAppClient(
+        config, "fixture-key", transport=transport, artifact_transport=artifact_transport
+    )
+    client._token = "fixture-token"
+    client._token_expires = 9999999999
+    return client
+
+
+def test_oversize_admission_log_with_conflicting_suffix_is_not_an_identity() -> None:
+    other = "e" * 40
+    pr, run_id = 86, 3086
+    prefix = _dispatch_tuple_text(pr, BASE, HEAD, 0).encode()
+    limit = runtime.CLAWSWEEPER_DISPATCH_LOG_LIMIT
+    assert len(prefix) < limit
+    padding = b"x" * (limit - len(prefix))
+    suffix = _dispatch_tuple_text(pr + 1, BASE, other, 1).encode()
+    raw = prefix + padding + suffix
+    assert len(raw) == limit + len(suffix)
+    assert runtime.parse_clawsweeper_dispatch_log(raw[:limit].decode()) == {
+        "pr_number": pr,
+        "expected_base_sha": BASE,
+        "expected_head_sha": HEAD,
+        "review_epoch": 0,
+    }
+    calls: list[str] = []
+
+    def request_once(url: str, headers: dict[str, str], _timeout: float):
+        calls.append(url)
+        if url.endswith("/logs"):
+            assert headers["Authorization"] == "Bearer fixture-token"
+            return 302, {
+                "Location": (
+                    "https://productionresultssa12.blob.core.windows.net/"
+                    "actions-results/admission.log?sig=fixture"
+                )
+            }, b""
+        assert "Authorization" not in headers
+        return 200, {}, raw
+
+    with tempfile.TemporaryDirectory() as temporary:
+        config = config_fixture(Path(temporary))
+        prepare_openclaw(config, Path(temporary), pr)
+        assert current(config, pr)["review_epoch"] == 0
+        mark_dispatched(config, action(config, pr, "clawsweeper.dispatch")["action_id"])
+        ingress(
+            config, "workflow_run", "oversize-log",
+            claw_workflow_payload(run_id, conclusion="failure"),
+        )
+        client = _admission_log_client(config, request_once)
+        assert client.clawsweeper_dispatch_identity(run_id) is None
+        outcomes = userland.collect_clawsweeper_terminals(config, client, dry_run=False)
+        assert outcomes[0]["result"] == "rail_failure_alerted"
+        assert current(config, pr)["state"] == "clawsweeper_queued"
+        assert calls[0].endswith("/logs")
+        assert "productionresultssa12.blob.core.windows.net" in calls[1]
+
+
+def test_admission_log_redirect_stays_on_the_artifact_allowlist() -> None:
+    head = "a" * 40
+    base = "b" * 40
+    log = _dispatch_tuple_text(48, base, head, 2).encode()
+    blob = (
+        "https://productionresultssa7.blob.core.windows.net/"
+        "actions-results/admission.log?sig=fixture"
+    )
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    def allowlisted(url: str, headers: dict[str, str], _timeout: float):
+        calls.append((url, dict(headers)))
+        if url.endswith("/logs"):
+            return 302, {"Location": blob}, b""
+        return 200, {}, log
+
+    with tempfile.TemporaryDirectory() as temporary:
+        config = config_fixture(Path(temporary))
+        client = _admission_log_client(config, allowlisted)
+        assert client.clawsweeper_dispatch_identity(36009939846) == {
+            "repository": "dinkuskit/blocks",
+            "pr_number": 48,
+            "base_sha": base,
+            "head_sha": head,
+            "review_epoch": 2,
+        }
+    assert calls[0][0].endswith("/logs")
+    assert calls[0][1]["Authorization"] == "Bearer fixture-token"
+    assert calls[1] == (blob, {
+        "Accept": "application/octet-stream",
+        "User-Agent": "smoky-review-conductor/1",
+    })
+
+    forbidden = (
+        "https://results-receiver.actions.githubusercontent.com/logs/job?sig=fixture",
+        "https://pipelinesghubeus25.actions.githubusercontent.com/signedlogcontent/4?sig=fixture",
+    )
+    for location in forbidden:
+        seen: list[str] = []
+
+        def denied(url: str, _headers: dict[str, str], _timeout: float, bound: str = location) -> tuple[int, dict[str, str], bytes]:
+            seen.append(url)
+            return 302, {"Location": bound}, b""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            config = config_fixture(Path(temporary))
+            client = _admission_log_client(config, denied)
+            assert client.clawsweeper_dispatch_identity(36009939846) is None
+        assert len(seen) == 1 and seen[0].endswith("/logs")
+
+
+def _github_client(config: dict[str, Any], transport: Any) -> runtime.GitHubAppClient:
+    client = runtime.GitHubAppClient(config, "fixture-key", transport=transport)
+    client._token = "fixture-token"
+    client._token_expires = 9999999999
+    return client
+
+
+def test_malformed_receipt_does_not_own_a_current_bundle() -> None:
+    for index, receipt in enumerate(([], None)):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = config_fixture(root)
+            pr, run_id = 93, 4093
+            prepare_openclaw(config, root, pr)
+            claw_action = action(config, pr, "clawsweeper.dispatch")
+            _set_action_status(config, claw_action["action_id"], "dispatched", receipt)
+            ingress(config, "workflow_run", f"malformed-{index}", claw_workflow_payload(run_id))
+            client = HistoricalThenCurrentGitHub(
+                1, run_id, b"", claw_bundle(run_id=run_id, pr=pr), None
+            )
+            collected = userland.collect_clawsweeper_terminals(config, client, dry_run=False)
+            assert collected == [
+                {
+                    "workflow_run_id": run_id,
+                    "result": "historical_bundle_retired",
+                    "conclusion": "success",
+                }
+            ]
+            assert current(config, pr)["state"] == "clawsweeper_queued"
+            connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+            try:
+                stored = connection.execute(
+                    "SELECT status, verdict FROM rail_workflow_runs WHERE workflow_run_id = ?",
+                    (str(run_id),),
+                ).fetchone()
+                assert stored["status"] == "terminal_attention_required"
+                assert stored["verdict"] is None
+            finally:
+                connection.close()
+
+
+def test_inflight_no_artifact_failure_stays_pending() -> None:
+    cases: list[tuple[str, Any]] = [
+        (status, {}) for status in userland.IN_FLIGHT_CLAWSWEEPER_STATUSES
+    ]
+    cases.append(("dispatching", None))
+    for status, receipt in cases:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = config_fixture(root)
+            pr, run_id = 94, 4094
+            prepare_openclaw(config, root, pr)
+            claw_action = action(config, pr, "clawsweeper.dispatch")
+            epoch = int(current(config, pr)["review_epoch"])
+            _set_action_status(config, claw_action["action_id"], status, receipt)
+            ingress(
+                config, "workflow_run", f"inflight-failure-{status}",
+                claw_workflow_payload(run_id, conclusion="failure"),
+            )
+            identity = {
+                "repository": "dinkuskit/blocks",
+                "pr_number": pr,
+                "base_sha": BASE,
+                "head_sha": HEAD,
+                "review_epoch": epoch,
+            }
+
+            class ProvenFailure:
+                def list_run_artifacts(self, _run_id: int) -> list[dict[str, Any]]:
+                    return []
+
+                def clawsweeper_dispatch_identity(self, _run_id: int) -> dict[str, Any]:
+                    return identity
+
+            collected = userland.collect_clawsweeper_terminals(
+                config, ProvenFailure(), dry_run=False
+            )
+            assert collected == [
+                {
+                    "workflow_run_id": run_id,
+                    "result": "current_dispatch_pending",
+                    "conclusion": "failure",
+                }
+            ]
+            assert current(config, pr)["state"] == "clawsweeper_queued"
+            connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+            try:
+                stored = connection.execute(
+                    "SELECT status, verdict, bound_pr_number FROM rail_workflow_runs WHERE workflow_run_id = ?",
+                    (str(run_id),),
+                ).fetchone()
+                assert stored["status"] == "terminal_pending_verdict_bridge"
+                assert stored["verdict"] is None and stored["bound_pr_number"] is None
+            finally:
+                connection.close()
+            notifier = FakeNotifier()
+            userland.deliver_notifications(config, notifier, dry_run=False)
+            assert notifier.sent == []
+            mark_dispatched(config, claw_action["action_id"])
+            again = userland.collect_clawsweeper_terminals(config, ProvenFailure(), dry_run=False)
+            assert again[0]["result"] == "bound_execution_failed"
+            assert current(config, pr)["state"] == "clawsweeper_failed"
+
+
+def test_inflight_receipt_for_a_different_run_still_retires() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config = config_fixture(root)
+        pr, run_id = 95, 4095
+        prepare_openclaw(config, root, pr)
+        claw_action = action(config, pr, "clawsweeper.dispatch")
+        epoch = int(current(config, pr)["review_epoch"])
+        _set_action_status(
+            config, claw_action["action_id"], "dispatching", {"workflow_run_id": run_id + 9}
+        )
+        ingress(
+            config, "workflow_run", "other-run",
+            claw_workflow_payload(run_id, conclusion="failure"),
+        )
+        identity = {
+            "repository": "dinkuskit/blocks",
+            "pr_number": pr,
+            "base_sha": BASE,
+            "head_sha": HEAD,
+            "review_epoch": epoch,
+        }
+
+        class ProvenFailure:
+            def list_run_artifacts(self, _run_id: int) -> list[dict[str, Any]]:
+                return []
+
+            def clawsweeper_dispatch_identity(self, _run_id: int) -> dict[str, Any]:
+                return identity
+
+        collected = userland.collect_clawsweeper_terminals(config, ProvenFailure(), dry_run=False)
+        assert collected[0]["result"] == "rail_failure_alerted"
+        assert current(config, pr)["state"] == "clawsweeper_queued"
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            stored = connection.execute(
+                "SELECT status, bound_pr_number FROM rail_workflow_runs WHERE workflow_run_id = ?",
+                (str(run_id),),
+            ).fetchone()
+            assert stored["status"] == "terminal_attention_required"
+            assert stored["bound_pr_number"] is None
+        finally:
+            connection.close()
+
+
+def _jobs_page_transport(pages: dict[int, tuple[dict[str, Any], str | None]], log: bytes):
+    def transport(
+        _method: str, url: str, _headers: dict[str, str], _body: bytes | None, _timeout: float
+    ):
+        if _is_jobs_url(url):
+            payload, nxt = pages[_jobs_page_number(url)]
+            headers = {}
+            if nxt is not None:
+                headers["Link"] = f'<{nxt}>; rel="next"'
+            return 200, headers, json.dumps(payload).encode()
+        if url.endswith("/logs"):
+            return 200, {}, log
+        raise AssertionError(url)
+
+    return transport
+
+
+def test_admission_job_on_a_later_page_is_the_dispatch_identity() -> None:
+    head = "a" * 40
+    base = "b" * 40
+    log = _dispatch_tuple_text(48, base, head, 2).encode()
+    admission = {"id": 7, "name": "Run pinned exact-tuple ClawSweeper / Admit exact-tuple PR"}
+    other = {"id": 8, "name": "Native ClawSweeper review"}
+    with tempfile.TemporaryDirectory() as temporary:
+        config = config_fixture(Path(temporary))
+        run_url = (
+            "https://api.github.com/repos/dinkuskit/blocks/actions/runs/36009939846/jobs"
+        )
+        page2 = run_url + "?per_page=100&page=2"
+        client = _github_client(
+            config,
+            _jobs_page_transport(
+                {
+                    1: ({"total_count": 2, "jobs": [other]}, page2),
+                    2: ({"total_count": 2, "jobs": [admission]}, None),
+                },
+                log,
+            ),
+        )
+        assert client.clawsweeper_dispatch_identity(36009939846) == {
+            "repository": "dinkuskit/blocks",
+            "pr_number": 48,
+            "base_sha": base,
+            "head_sha": head,
+            "review_epoch": 2,
+        }
+        duplicate = _github_client(
+            config,
+            _jobs_page_transport(
+                {
+                    1: ({"total_count": 2, "jobs": [admission]}, page2),
+                    2: ({"total_count": 2, "jobs": [admission]}, None),
+                },
+                log,
+            ),
+        )
+        assert duplicate.clawsweeper_dispatch_identity(36009939846) is None
+
+
+def test_admission_job_lookup_does_not_read_past_the_page_cap() -> None:
+    fetched: list[int] = []
+
+    def transport(
+        _method: str, url: str, _headers: dict[str, str], _body: bytes | None, _timeout: float
+    ):
+        assert _is_jobs_url(url)
+        page = _jobs_page_number(url)
+        fetched.append(page)
+        base = url.split("?", 1)[0]
+        if page <= runtime.MAX_LIST_PAGES:
+            nxt = f"{base}?per_page=100&page={page + 1}"
+            payload = {"total_count": runtime.MAX_LIST_PAGES + 1, "jobs": [{"id": page, "name": "other"}]}
+            return 200, {"Link": f'<{nxt}>; rel="next"'}, json.dumps(payload).encode()
+        payload = {
+            "total_count": runtime.MAX_LIST_PAGES + 1,
+            "jobs": [{"id": 7, "name": "Admit exact-tuple"}],
+        }
+        return 200, {}, json.dumps(payload).encode()
+
+    with tempfile.TemporaryDirectory() as temporary:
+        config = config_fixture(Path(temporary))
+        client = _github_client(config, transport)
+        try:
+            client.clawsweeper_dispatch_identity(36009939846)
+        except runtime.GitHubApiError as exc:
+            assert "bounded page count" in str(exc)
+        else:
+            raise AssertionError("job lookup read past the page cap")
+        assert fetched == list(range(1, runtime.MAX_LIST_PAGES + 1))
+
+
+def test_string_receipt_run_id_is_not_a_stored_identity() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config = config_fixture(root)
+        pr, run_id = 96, 4096
+        prepare_openclaw(config, root, pr)
+        claw_action = action(config, pr, "clawsweeper.dispatch")
+        _set_action_status(
+            config, claw_action["action_id"], "dispatched", {"workflow_run_id": str(run_id)}
+        )
+        ingress(
+            config, "workflow_run", "string-run",
+            claw_workflow_payload(run_id, conclusion="failure"),
+        )
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            rail_run = connection.execute(
+                "SELECT * FROM rail_workflow_runs WHERE workflow_run_id = ?",
+                (str(run_id),),
+            ).fetchone()
+        finally:
+            connection.close()
+        assert userland.proven_no_artifact_dispatch_identity(
+            config, EmptyGitHub(), rail_run
+        ) is None
+
+
+def test_string_receipt_run_id_does_not_pass_the_admission_fence() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config = config_fixture(root)
+        pr, run_id = 97, 4097
+        prepare_openclaw(config, root, pr)
+        claw_action = action(config, pr, "clawsweeper.dispatch")
+        epoch = int(current(config, pr)["review_epoch"])
+        _set_action_status(
+            config, claw_action["action_id"], "dispatched", {"workflow_run_id": str(run_id)}
+        )
+        ingress(
+            config, "workflow_run", "string-fence",
+            claw_workflow_payload(run_id, conclusion="failure"),
+        )
+        identity = {
+            "repository": "dinkuskit/blocks",
+            "pr_number": pr,
+            "base_sha": BASE,
+            "head_sha": HEAD,
+            "review_epoch": epoch,
+        }
+
+        class ProvenFailure:
+            def list_run_artifacts(self, _run_id: int) -> list[dict[str, Any]]:
+                return []
+
+            def clawsweeper_dispatch_identity(self, _run_id: int) -> dict[str, Any]:
+                return identity
+
+        collected = userland.collect_clawsweeper_terminals(config, ProvenFailure(), dry_run=False)
+        assert collected[0]["result"] == "rail_failure_alerted"
+        assert current(config, pr)["state"] == "clawsweeper_queued"
+
+
+def test_malformed_admission_job_id_stays_pending_and_collection_continues() -> None:
+    bad_run, later_run = 4098, 4099
+
+    def transport(
+        _method: str, url: str, _headers: dict[str, str], _body: bytes | None, _timeout: float
+    ):
+        if url.endswith("/artifacts"):
+            return 200, {}, b'{"artifacts":[]}'
+        if _is_jobs_url(url):
+            if f"/runs/{bad_run}/" in url:
+                payload = {"jobs": [{"id": None, "name": "Admit exact-tuple"}]}
+            else:
+                payload = {"jobs": [{"id": 8, "name": "Native ClawSweeper review"}]}
+            return 200, {}, json.dumps(payload).encode()
+        raise AssertionError(url)
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config = config_fixture(root)
+        pr = 98
+        prepare_openclaw(config, root, pr)
+        mark_dispatched(config, action(config, pr, "clawsweeper.dispatch")["action_id"])
+        first = claw_workflow_payload(bad_run, conclusion="failure")
+        first["workflow_run"]["created_at"] = "2026-09-24T14:00:00Z"
+        second = claw_workflow_payload(later_run, conclusion="failure")
+        second["workflow_run"]["created_at"] = "2026-09-24T14:05:00Z"
+        ingress(config, "workflow_run", "bad-job-id", first)
+        ingress(config, "workflow_run", "later-failure", second)
+        client = _github_client(config, transport)
+        try:
+            client.clawsweeper_dispatch_identity(bad_run)
+        except runtime.GitHubApiError as exc:
+            assert "admission job id" in str(exc)
+        else:
+            raise AssertionError("malformed admission job id was treated as absent")
+        collected = userland.collect_clawsweeper_terminals(config, client, dry_run=False)
+        assert [item["result"] for item in collected] == [
+            "dispatch_identity_unavailable",
+            "rail_failure_alerted",
+        ]
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            pending = connection.execute(
+                "SELECT status FROM rail_workflow_runs WHERE workflow_run_id = ?",
+                (str(bad_run),),
+            ).fetchone()
+            later = connection.execute(
+                "SELECT status FROM rail_workflow_runs WHERE workflow_run_id = ?",
+                (str(later_run),),
+            ).fetchone()
+            assert pending["status"] == "terminal_pending_verdict_bridge"
+            assert later["status"] == "terminal_attention_required"
+        finally:
+            connection.close()
+        assert current(config, pr)["state"] == "clawsweeper_queued"
+
+
+def test_overlong_bundle_epoch_does_not_abort_later_collection() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config = config_fixture(root)
+        pr = 99
+        bad_run, good_run = 4100, 4101
+        prepare_openclaw(config, root, pr)
+        mark_dispatched(config, action(config, pr, "clawsweeper.dispatch")["action_id"])
+        bad_payload = claw_workflow_payload(bad_run)
+        bad_payload["workflow_run"]["created_at"] = "2026-09-24T14:00:00Z"
+        good_payload = claw_workflow_payload(good_run)
+        good_payload["workflow_run"]["created_at"] = "2026-09-24T14:05:00Z"
+        ingress(config, "workflow_run", "overlong-epoch", bad_payload)
+        ingress(config, "workflow_run", "current-clean", good_payload)
+
+        class TwoBundles:
+            def list_run_artifacts(self, run_id: int) -> list[dict[str, Any]]:
+                return [{
+                    "id": run_id,
+                    "name": f"dinkuskit-native-review-{run_id}-1",
+                    "expired": False,
+                }]
+
+            def download_artifact(self, artifact_id: int) -> bytes:
+                if artifact_id == bad_run:
+                    # One past SQLite's signed 64-bit integer. An unbounded
+                    # digit check would bind this and abort the later receipt.
+                    return claw_bundle(run_id=bad_run, pr=pr, review_epoch=2**63)
+                return claw_bundle(run_id=good_run, pr=pr)
+
+        collected = userland.collect_clawsweeper_terminals(config, TwoBundles(), dry_run=False)
+        assert [item["result"] for item in collected] == [
+            "bundle_identity_unavailable",
+            "terminal_materialized",
+        ]
+        assert collected[1]["verdict"] == "clean"
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            pending = connection.execute(
+                "SELECT status FROM rail_workflow_runs WHERE workflow_run_id = ?",
+                (str(bad_run),),
+            ).fetchone()
+            assert pending["status"] == "terminal_pending_verdict_bridge"
+        finally:
+            connection.close()
+
+
+def test_jobs_next_link_must_stay_on_the_requested_run() -> None:
+    run_id = 36009939846
+    other = run_id + 1
+    fetched: list[str] = []
+    foreign = (
+        "https://api.github.com/repos/dinkuskit/blocks/actions/runs/"
+        f"{other}/jobs?per_page=100"
+    )
+
+    def transport(
+        _method: str, url: str, _headers: dict[str, str], _body: bytes | None, _timeout: float
+    ):
+        fetched.append(url)
+        if f"/runs/{other}/" in url:
+            payload = {"jobs": [{"id": 7, "name": "Admit exact-tuple"}]}
+            return 200, {}, json.dumps(payload).encode()
+        if f"/runs/{run_id}/" in url:
+            return 200, {"Link": f'<{foreign}>; rel="next"'}, json.dumps(
+                {"jobs": [{"id": 8, "name": "Native ClawSweeper review"}]}
+            ).encode()
+        if url.endswith("/logs"):
+            return 200, {}, _dispatch_tuple_text(49, "b" * 40, "a" * 40, 2).encode()
+        raise AssertionError(url)
+
+    with tempfile.TemporaryDirectory() as temporary:
+        config = config_fixture(Path(temporary))
+        client = _github_client(config, transport)
+        try:
+            client.clawsweeper_dispatch_identity(run_id)
+        except runtime.GitHubApiError as exc:
+            assert "requested run" in str(exc)
+        else:
+            raise AssertionError("cross-run jobs page was followed")
+        assert all(f"/runs/{other}/" not in url for url in fetched)
+
+
+def _store_receipt_bytes(config: dict[str, Any], action_id: str, raw: str | None) -> None:
+    connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+    try:
+        connection.execute(
+            "UPDATE actions SET status = 'dispatched', receipt_json = ? WHERE action_id = ?",
+            (raw, action_id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def test_empty_receipt_does_not_own_a_current_bundle() -> None:
+    for index, raw in enumerate((None, "")):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = config_fixture(root)
+            pr, run_id = 100 + index, 4102 + index
+            prepare_openclaw(config, root, pr)
+            claw_action = action(config, pr, "clawsweeper.dispatch")
+            _store_receipt_bytes(config, claw_action["action_id"], raw)
+            ingress(config, "workflow_run", f"empty-receipt-{index}", claw_workflow_payload(run_id))
+            client = HistoricalThenCurrentGitHub(
+                1, run_id, b"", claw_bundle(run_id=run_id, pr=pr), None
+            )
+            collected = userland.collect_clawsweeper_terminals(config, client, dry_run=False)
+            assert collected == [
+                {
+                    "workflow_run_id": run_id,
+                    "result": "historical_bundle_retired",
+                    "conclusion": "success",
+                }
+            ]
+            assert current(config, pr)["state"] == "clawsweeper_queued"
+
+
+def test_empty_receipt_does_not_pass_the_admission_fence() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config = config_fixture(root)
+        pr, run_id = 102, 4104
+        prepare_openclaw(config, root, pr)
+        claw_action = action(config, pr, "clawsweeper.dispatch")
+        epoch = int(current(config, pr)["review_epoch"])
+        _store_receipt_bytes(config, claw_action["action_id"], None)
+        ingress(
+            config, "workflow_run", "empty-fence",
+            claw_workflow_payload(run_id, conclusion="failure"),
+        )
+        identity = {
+            "repository": "dinkuskit/blocks",
+            "pr_number": pr,
+            "base_sha": BASE,
+            "head_sha": HEAD,
+            "review_epoch": epoch,
+        }
+
+        class ProvenFailure:
+            def list_run_artifacts(self, _run_id: int) -> list[dict[str, Any]]:
+                return []
+
+            def clawsweeper_dispatch_identity(self, _run_id: int) -> dict[str, Any]:
+                return identity
+
+        collected = userland.collect_clawsweeper_terminals(config, ProvenFailure(), dry_run=False)
+        assert collected[0]["result"] == "rail_failure_alerted"
+        assert current(config, pr)["state"] == "clawsweeper_queued"
+
+
+def _reopen_clawsweeper_without_bundle_epoch(
+    config: dict[str, Any], pr: int, receipt: dict[str, Any]
+) -> str:
+    previous = action(config, pr, "clawsweeper.dispatch")
+    _set_action_status(
+        config, previous["action_id"], "dispatched", {"result": "dispatched", "workflow_run_id": 1}
+    )
+    connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+    try:
+        connection.execute(
+            "UPDATE heads SET review_epoch = 1 WHERE pr_number = ? AND is_current = 1",
+            (pr,),
+        )
+        payload = json.loads(previous["payload_json"])
+        payload["review_epoch"] = 1
+        core.insert_action(
+            connection,
+            kind="clawsweeper.dispatch",
+            repository="dinkuskit/blocks",
+            pr_number=pr,
+            base_sha=BASE,
+            head_sha=HEAD,
+            payload=payload,
+            suffix="reopen",
+            review_epoch=1,
+        )
+        connection.commit()
+        inserted = connection.execute(
+            """
+            SELECT action_id FROM actions
+            WHERE pr_number = ? AND kind = 'clawsweeper.dispatch' AND review_epoch = 1
+            """,
+            (pr,),
+        ).fetchone()
+        assert inserted is not None
+        action_id = inserted["action_id"]
+    finally:
+        connection.close()
+    _set_action_status(config, action_id, "dispatched", receipt)
+    return action_id
+
+
+def test_epochless_bundle_does_not_own_a_reopened_omitted_run_id() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config = config_fixture(root)
+        assert not config.get("review_policy")
+        pr, old_run = 103, 4105
+        prepare_openclaw(config, root, pr)
+        _reopen_clawsweeper_without_bundle_epoch(
+            config, pr, {"result": "dispatched"}
+        )
+        ingress(config, "workflow_run", "epochless-old", claw_workflow_payload(old_run))
+        client = HistoricalThenCurrentGitHub(
+            old_run, old_run + 1, claw_bundle(run_id=old_run, pr=pr), None, None
+        )
+        collected = userland.collect_clawsweeper_terminals(config, client, dry_run=False)
+        assert collected[0]["result"] == "historical_bundle_retired"
+        assert current(config, pr)["state"] == "clawsweeper_queued"
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'clawsweeper_quality'"
+            ).fetchone()
+            assert table is None
+        finally:
+            connection.close()
+
+
+def test_epochless_bundle_with_exact_run_id_still_materializes() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config = config_fixture(root)
+        pr, old_run = 104, 4106
+        prepare_openclaw(config, root, pr)
+        _reopen_clawsweeper_without_bundle_epoch(
+            config, pr, {"result": "dispatched", "workflow_run_id": old_run}
+        )
+        ingress(config, "workflow_run", "epochless-exact", claw_workflow_payload(old_run))
+        client = HistoricalThenCurrentGitHub(
+            old_run, old_run + 1, claw_bundle(run_id=old_run, pr=pr), None, None
+        )
+        collected = userland.collect_clawsweeper_terminals(config, client, dry_run=False)
+        assert collected[0]["result"] == "terminal_materialized"
+        assert collected[0]["verdict"] == "clean"
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM clawsweeper_quality WHERE review_epoch = 1"
+            ).fetchone()[0] == 1
+        finally:
+            connection.close()
+
+
+def test_overlong_dispatch_epoch_stays_pending_and_collection_continues() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config = config_fixture(root)
+        pr = 105
+        bad_run, good_run = 4107, 4108
+        prepare_openclaw(config, root, pr)
+        mark_dispatched(config, action(config, pr, "clawsweeper.dispatch")["action_id"])
+        head = current(config, pr)
+        accepted = userland._dispatch_identity_from_report(config, {
+            "repository": head["repository"],
+            "pr_number": pr,
+            "base_sha": head["base_sha"],
+            "head_sha": head["head_sha"],
+            "review_epoch": 10**10 - 1,
+        })
+        assert accepted is not None
+        assert accepted["review_epoch"] == 10**10 - 1
+        bad_payload = claw_workflow_payload(bad_run, conclusion="failure")
+        bad_payload["workflow_run"]["created_at"] = "2026-09-24T14:00:00Z"
+        good_payload = claw_workflow_payload(good_run)
+        good_payload["workflow_run"]["created_at"] = "2026-09-24T14:05:00Z"
+        ingress(config, "workflow_run", "overlong-dispatch-epoch", bad_payload)
+        ingress(config, "workflow_run", "current-clean-after-dispatch-epoch", good_payload)
+
+        class OverlongDispatchEpoch:
+            def list_run_artifacts(self, run_id: int) -> list[dict[str, Any]]:
+                if run_id == bad_run:
+                    return []
+                return [{
+                    "id": good_run,
+                    "name": f"dinkuskit-native-review-{good_run}-1",
+                    "expired": False,
+                }]
+
+            def download_artifact(self, artifact_id: int) -> bytes:
+                assert artifact_id == good_run
+                return claw_bundle(run_id=good_run, pr=pr)
+
+            def clawsweeper_dispatch_identity(self, run_id: int) -> dict[str, Any]:
+                assert run_id == bad_run
+                return {
+                    "repository": head["repository"],
+                    "pr_number": pr,
+                    "base_sha": head["base_sha"],
+                    "head_sha": head["head_sha"],
+                    # Eleven digits. This fits in SQLite and is past the
+                    # admission tuple's ten-digit bound. A sqlite-range-only
+                    # guard would query it and retire the receipt.
+                    "review_epoch": 10**10,
+                }
+
+        collected = userland.collect_clawsweeper_terminals(
+            config, OverlongDispatchEpoch(), dry_run=False
+        )
+        assert [item["result"] for item in collected] == [
+            "dispatch_identity_unavailable",
+            "terminal_materialized",
+        ]
+        assert collected[1]["verdict"] == "clean"
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            pending = connection.execute(
+                "SELECT status FROM rail_workflow_runs WHERE workflow_run_id = ?",
+                (str(bad_run),),
+            ).fetchone()
+            assert pending["status"] == "terminal_pending_verdict_bridge"
+        finally:
+            connection.close()
+
+
+def test_dispatch_stores_only_documented_workflow_run_id() -> None:
+    head = "a" * 40
+    base = "b" * 40
+    recorded: list[dict[str, Any]] = []
+    scripted: list[tuple[int, bytes]] = [
+        (200, json.dumps({
+            "workflow_run_id": 99,
+            "run_url": "https://api.github.com/repos/dinkuskit/blocks/actions/runs/99",
+            "html_url": "https://github.com/dinkuskit/blocks/actions/runs/99",
+        }).encode()),
+        (204, b""),
+        (200, json.dumps({
+            "id": 99,
+            "run_url": "https://api.github.com/repos/dinkuskit/blocks/actions/runs/99",
+            "html_url": "https://github.com/dinkuskit/blocks/actions/runs/99",
+        }).encode()),
+    ]
+
+    def transport(
+        _method: str, url: str, _headers: dict[str, str], body: bytes | None, _timeout: float
+    ):
+        assert url.endswith("/dispatches")
+        assert body is not None
+        payload = json.loads(body)
+        recorded.append(payload)
+        status, raw = scripted.pop(0)
+        return status, {}, raw
+
+    with tempfile.TemporaryDirectory() as temporary:
+        config = config_fixture(Path(temporary))
+        client = runtime.GitHubAppClient(config, "fixture-key", transport=transport)
+        client._token = "fixture-token"
+        client._token_expires = 9999999999
+        assert client.dispatch_clawsweeper(
+            pr_number=48, base_sha=base, head_sha=head, publish=True
+        ) == 99
+        assert client.dispatch_clawsweeper(
+            pr_number=48, base_sha=base, head_sha=head, publish=True
+        ) is None
+        assert client.dispatch_clawsweeper(
+            pr_number=48, base_sha=base, head_sha=head, publish=True
+        ) is None
+    assert scripted == []
+    assert len(recorded) == 3
+    for payload in recorded:
+        assert payload["return_run_details"] is True
+        assert payload["inputs"]["expected_base_sha"] == base
+        assert payload["inputs"]["expected_head_sha"] == head
+
+
 def test_failed_clawsweeper_publisher_binds_exact_artifact_and_fails_pr() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
@@ -2947,6 +4556,35 @@ def main() -> None:
         test_completed_clawsweeper_human_gate_owner_adjudication_projects_ready,
         test_unbound_clawsweeper_workflow_failure_alerts_without_guessing_a_pr,
         test_bound_failed_workflow_without_bundle_is_execution_failure,
+        test_historical_bundle_does_not_block_current_no_artifact_failure,
+        test_historical_success_bundle_still_allows_the_current_clean_terminal,
+        test_inflight_dispatch_bundle_stays_pending,
+        test_reopened_epoch_retires_previous_run_and_keeps_current_bundle,
+        test_ambiguous_current_dispatches_stay_pending,
+        test_bundle_retirement_mutants_fail_their_intended_tests,
+        test_unproven_no_artifact_failure_does_not_choose_a_pull_request,
+        test_stored_dispatch_run_id_fails_queued_execution_without_a_log,
+        test_dispatch_identity_transport_failure_leaves_the_run_pending,
+        test_parse_clawsweeper_dispatch_log_accepts_one_consistent_tuple,
+        test_admission_job_log_is_the_only_dispatch_identity_source,
+        test_malformed_receipt_does_not_own_a_current_bundle,
+        test_inflight_no_artifact_failure_stays_pending,
+        test_inflight_receipt_for_a_different_run_still_retires,
+        test_admission_job_on_a_later_page_is_the_dispatch_identity,
+        test_admission_job_lookup_does_not_read_past_the_page_cap,
+        test_string_receipt_run_id_is_not_a_stored_identity,
+        test_string_receipt_run_id_does_not_pass_the_admission_fence,
+        test_malformed_admission_job_id_stays_pending_and_collection_continues,
+        test_overlong_bundle_epoch_does_not_abort_later_collection,
+        test_jobs_next_link_must_stay_on_the_requested_run,
+        test_empty_receipt_does_not_own_a_current_bundle,
+        test_empty_receipt_does_not_pass_the_admission_fence,
+        test_epochless_bundle_does_not_own_a_reopened_omitted_run_id,
+        test_epochless_bundle_with_exact_run_id_still_materializes,
+        test_overlong_dispatch_epoch_stays_pending_and_collection_continues,
+        test_oversize_admission_log_with_conflicting_suffix_is_not_an_identity,
+        test_admission_log_redirect_stays_on_the_artifact_allowlist,
+        test_dispatch_stores_only_documented_workflow_run_id,
         test_failed_clawsweeper_publisher_binds_exact_artifact_and_fails_pr,
         test_notification_commands_use_gateway_without_secret_flags,
         test_pretty_multiline_notification_receipt_and_explicit_reconciliation,

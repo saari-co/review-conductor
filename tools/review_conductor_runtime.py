@@ -89,6 +89,14 @@ class GitHubApiError(RuntimeError):
     """A fixed GitHub API operation failed without exposing response material."""
 
 
+class ArtifactRedirectDenied(GitHubApiError):
+    """The signed redirect host is outside the fixed artifact allowlist.
+
+    Admission-log collection treats this as no identity. Widening the
+    allowlist for private runner logs requires a separate approval.
+    """
+
+
 class GitHubTransientError(GitHubApiError):
     """The transport or GitHub itself failed transiently; the same call may be retried."""
 
@@ -203,6 +211,21 @@ ARTIFACT_MAX_BYTES = 1024 * 1024
 ARTIFACT_BLOB_HOST_RE = re.compile(
     r"^productionresultssa[0-9]+\.blob\.core\.windows\.net$", re.IGNORECASE
 )
+CLAWSWEEPER_ADMISSION_JOB_MARK = "Admit exact-tuple"
+# Bytes above this bound are not an identity. A prefix parse would hide a
+# conflicting tuple that begins later in the same admission log.
+CLAWSWEEPER_DISPATCH_LOG_LIMIT = 64 * 1024
+_DISPATCH_LOG_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+_DISPATCH_LOG_TIMESTAMP = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+"
+)
+_DISPATCH_LOG_FIELD = re.compile(
+    r"^(pr_number|expected_base_sha|expected_head_sha|review_epoch):\s*(\S+)\s*$",
+    re.IGNORECASE,
+)
+_DISPATCH_LOG_FIELDS = frozenset(
+    {"pr_number", "expected_base_sha", "expected_head_sha", "review_epoch"}
+)
 
 
 def urllib_transport(
@@ -281,7 +304,6 @@ def validate_artifact_redirect(api_url: str, location: str) -> str:
     if (
         target.scheme != "https"
         or target.hostname is None
-        or ARTIFACT_BLOB_HOST_RE.fullmatch(target.hostname) is None
         or target.username is not None
         or target.password is not None
         or target_port not in {None, 443}
@@ -290,6 +312,10 @@ def validate_artifact_redirect(api_url: str, location: str) -> str:
         or target.fragment
     ):
         raise GitHubApiError("GitHub artifact redirect target is outside the fixed allowlist")
+    if ARTIFACT_BLOB_HOST_RE.fullmatch(target.hostname) is None:
+        raise ArtifactRedirectDenied(
+            "GitHub artifact redirect target is outside the fixed allowlist"
+        )
     return location
 
 
@@ -315,6 +341,70 @@ def urllib_artifact_transport(
     if not raw or len(raw) > ARTIFACT_MAX_BYTES:
         raise GitHubApiError("ClawSweeper artifact download has an invalid bounded size")
     return final_status, raw
+
+
+def parse_clawsweeper_dispatch_log(text: str) -> dict[str, Any] | None:
+    """Return one consistent dispatch tuple echoed by the admission job.
+
+    Repeated identical complete blocks are one identity. An incomplete block
+    is not an identity by itself. A partial block that only repeats the
+    complete tuple is ignored. A different value in any partial or complete
+    block is not an identity.
+    """
+    if not isinstance(text, str):
+        return None
+    complete: list[tuple[tuple[str, Any], ...]] = []
+    partials: list[dict[str, Any]] = []
+    current: dict[str, Any] = {}
+
+    def parse_field(key: str, value: str) -> Any:
+        if key in {"pr_number", "review_epoch"}:
+            if not re.fullmatch(r"[0-9]{1,10}", value):
+                return None
+            if key == "pr_number" and value == "0":
+                return None
+            return int(value)
+        if not re.fullmatch(r"[0-9a-f]{40}", value):
+            return None
+        return value
+
+    def close_block() -> None:
+        nonlocal current
+        if not current:
+            return
+        if set(current) == _DISPATCH_LOG_FIELDS:
+            complete.append(tuple(sorted(current.items())))
+        else:
+            partials.append(current)
+        current = {}
+
+    for raw_line in text.splitlines():
+        line = _DISPATCH_LOG_ANSI.sub("", raw_line).strip()
+        line = _DISPATCH_LOG_TIMESTAMP.sub("", line).strip()
+        match = _DISPATCH_LOG_FIELD.fullmatch(line)
+        if match is None:
+            close_block()
+            continue
+        key = match.group(1).lower()
+        parsed = parse_field(key, match.group(2))
+        if parsed is None:
+            return None
+        prior = current.get(key)
+        if prior is not None and prior != parsed:
+            return None
+        current[key] = parsed
+        if set(current) == _DISPATCH_LOG_FIELDS:
+            complete.append(tuple(sorted(current.items())))
+            current = {}
+    close_block()
+    if len(set(complete)) != 1:
+        return None
+    identity = dict(complete[0])
+    for partial in partials:
+        for key, value in partial.items():
+            if identity[key] != value:
+                return None
+    return identity
 
 
 class GitHubAppClient:
@@ -441,6 +531,16 @@ class GitHubAppClient:
                 "GET",
                 rf"/repos/{repository}/actions/artifacts/[1-9][0-9]*/zip",
                 "clawsweeper-artifact-download",
+            ),
+            (
+                "GET",
+                rf"/repos/{repository}/actions/runs/[1-9][0-9]*/jobs(?:\?per_page=100(?:&page=[1-9][0-9]*)?)?",
+                "clawsweeper-job-list",
+            ),
+            (
+                "GET",
+                rf"/repos/{repository}/actions/jobs/[1-9][0-9]*/logs",
+                "clawsweeper-admission-log",
             ),
         )
         for allowed_method, pattern, operation in rules:
@@ -982,7 +1082,7 @@ class GitHubAppClient:
         self, *, pr_number: int, base_sha: str, head_sha: str, publish: bool,
         review_epoch: int | None = None,
         authority: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> int | None:
         core.require_sha(base_sha, "ClawSweeper dispatch base_sha")
         core.require_sha(head_sha, "ClawSweeper dispatch head_sha")
         if publish is not True:
@@ -991,7 +1091,10 @@ class GitHubAppClient:
         if self._strict_adapter:
             require_review_epoch(review_epoch, "dispatch review epoch")
             extra = {"review_epoch": str(review_epoch), "repository": self.repository, "review_scope": "comprehensive"}
-        self._call(
+        # Changelog 2026-02-19: return_run_details true yields HTTP 200 with
+        # workflow_run_id. Omitting the flag yields 204. A 204 host still
+        # dispatches; the collector then has no stored run id for that attempt.
+        response = self._call(
             "POST",
             f"/repos/{self.repository}/actions/workflows/{self._clawsweeper['workflow_id']}/dispatches",
             {
@@ -1003,10 +1106,15 @@ class GitHubAppClient:
                     "expected_head_sha": head_sha,
                     "publish": "true",
                 },
+                "return_run_details": True,
             },
-            expected={204},
+            expected={200, 204},
             authority=authority,
         )
+        raw_run_id = response.get("workflow_run_id")
+        if raw_run_id is None:
+            return None
+        return core.require_positive_int(raw_run_id, "dispatched ClawSweeper workflow run id")
 
     def list_run_artifacts(self, workflow_run_id: int) -> list[dict[str, Any]]:
         run_id = core.require_positive_int(workflow_run_id, "ClawSweeper workflow run id")
@@ -1039,6 +1147,117 @@ class GitHubAppClient:
         if not raw or len(raw) > 1024 * 1024:
             raise GitHubApiError("ClawSweeper artifact download has an invalid bounded size")
         return raw
+
+    def _list_clawsweeper_run_jobs(self, run_id: int) -> list[Any]:
+        """Read every jobs page, or fail closed before calling the list complete.
+
+        The first page is not the whole run. ``per_page=100`` and allowlisted
+        ``Link`` rel=next pages stay inside ``MAX_LIST_PAGES`` and on this
+        run's jobs path. A loop, a disallowed next URL, a next URL for another
+        run, a full page with no next link and no matching ``total_count``,
+        or a page past the cap is an incomplete listing.
+        """
+        current = f"/repos/{self.repository}/actions/runs/{run_id}/jobs?per_page=100"
+        jobs: list[Any] = []
+        seen: set[str] = set()
+        reported_total: int | None = None
+        for page_index in range(MAX_LIST_PAGES + 1):
+            if current in seen:
+                raise GitHubApiError("GitHub list pagination looped")
+            seen.add(current)
+            _operation, response_headers, raw = self._call_raw_response(
+                "GET", current, None, expected={200}
+            )
+            try:
+                decoded = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise GitHubApiError("GitHub API returned malformed JSON") from exc
+            if not isinstance(decoded, dict):
+                raise GitHubApiError("ClawSweeper jobs listing has an invalid shape")
+            if "total_count" in decoded:
+                total = decoded["total_count"]
+                if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+                    raise GitHubApiError("ClawSweeper jobs listing has an invalid shape")
+                if reported_total is not None and reported_total != total:
+                    raise GitHubApiError("ClawSweeper jobs listing is incomplete")
+                reported_total = total
+            page_jobs = decoded.get("jobs")
+            if not isinstance(page_jobs, list) or len(page_jobs) > 100:
+                raise GitHubApiError("ClawSweeper jobs listing has an invalid shape")
+            jobs.extend(page_jobs)
+            nxt = self._next_list_path(current, response_headers)
+            if nxt is None:
+                if reported_total is not None and reported_total != len(jobs):
+                    raise GitHubApiError("ClawSweeper jobs listing is incomplete")
+                if reported_total is None and len(page_jobs) == 100:
+                    raise GitHubApiError("ClawSweeper jobs listing is incomplete")
+                return jobs
+            if page_index == MAX_LIST_PAGES - 1:  # clawsweeper-job-page-cap
+                raise GitHubApiError("ClawSweeper jobs listing exceeded the bounded page count")
+            same_run = f"/repos/{self.repository}/actions/runs/{run_id}/jobs"
+            if nxt.split("?", 1)[0] != same_run:  # clawsweeper-job-same-run
+                raise GitHubApiError("ClawSweeper jobs listing left the requested run")
+            current = nxt  # clawsweeper-job-pages
+        raise GitHubApiError("ClawSweeper jobs listing exceeded the bounded page count")
+
+    def clawsweeper_dispatch_identity(self, workflow_run_id: int) -> dict[str, Any] | None:
+        """Read one admission-job log for the dispatch inputs this client sent.
+
+        GitHub's workflow run resource does not return workflow_dispatch inputs.
+        The admission job log is the only retained exact tuple for a run whose
+        dispatch receipt predates stored run ids. Download reuses the artifact
+        redirect transport and its productionresultssa blob allowlist. Private
+        runner log hosts stay unfetched until a separate approval. A missing,
+        conflicting, oversize, non-admission, or disallowed-redirect log is no
+        identity. Job lookup walks bounded allowlisted pages before deciding
+        that the admission job is absent.
+        """
+        run_id = core.require_positive_int(workflow_run_id, "ClawSweeper workflow run id")
+        jobs = self._list_clawsweeper_run_jobs(run_id)
+        admission = [
+            job for job in jobs
+            if isinstance(job, dict)
+            and isinstance(job.get("name"), str)
+            and CLAWSWEEPER_ADMISSION_JOB_MARK in job["name"]
+        ]
+        if len(admission) != 1:
+            return None
+        try:
+            job_id = core.require_positive_int(
+                admission[0].get("id"), "ClawSweeper admission job id"
+            )
+        except core.ContractError as exc:  # admission-job-id-shape
+            raise GitHubApiError("ClawSweeper admission job id is invalid") from exc
+        path = f"/repos/{self.repository}/actions/jobs/{job_id}/logs"
+        operation = self._allow("GET", path)
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {self._installation_token()}",
+            "X-GitHub-Api-Version": API_VERSION,
+            "User-Agent": "smoky-review-conductor/1",
+        }
+        try:
+            status, raw = self._artifact_transport(self._app["api_base"] + path, headers, 15.0)
+        except ArtifactRedirectDenied:
+            return None
+        if status != 200:
+            raise GitHubApiError(f"allowlisted GitHub API operation failed ({operation})")
+        if len(raw) > CLAWSWEEPER_DISPATCH_LOG_LIMIT:
+            return None
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeError:
+            return None
+        parsed = parse_clawsweeper_dispatch_log(text)
+        if parsed is None:
+            return None
+        return {
+            "repository": self.repository,
+            "pr_number": parsed["pr_number"],
+            "base_sha": parsed["expected_base_sha"],
+            "head_sha": parsed["expected_head_sha"],
+            "review_epoch": parsed["review_epoch"],
+        }
 
 
 def check_payload(
@@ -2346,7 +2565,7 @@ def dispatch_clawsweeper_action(
             return {"action_id": action_id, "result": "not_claimed", "merge_dispatched": False}
         payload = json.loads(action["payload_json"])
         try:
-            client.dispatch_clawsweeper(
+            dispatched_run_id = client.dispatch_clawsweeper(
                 pr_number=payload["pr_number"],
                 base_sha=payload["base_sha"],
                 head_sha=payload["head_sha"],
@@ -2390,6 +2609,8 @@ def dispatch_clawsweeper_action(
             "terminal_verdict_received": False,
             "merge_dispatched": False,
         }
+        if dispatched_run_id is not None:
+            receipt["workflow_run_id"] = dispatched_run_id
         connection.execute("BEGIN IMMEDIATE")
         updated = connection.execute(
             """
