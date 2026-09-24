@@ -92,7 +92,19 @@ A non-success run with no exact verdict bundle fails the current head only when
 that run is the already-started request, the dispatch receipt stores that
 workflow run id, or the single admission job log shows one consistent
 `pr_number`, `expected_base_sha`, `expected_head_sha`, and `review_epoch` for
-the current dispatched tuple. Repeated identical complete blocks are one
+the current dispatched tuple. The same `pending`, `preparing`, `dispatching`,
+and `reconcile_required` statuses leave that failure receipt pending when a
+current-epoch dispatch has not stored a different `workflow_run_id`. A fast
+failed run can finish before dispatch commits the receipt; retiring it in
+that window would drop the later bind. A non-object dispatch receipt,
+including JSON `null` or `[]`, owns no run. A JSON object that omits
+`workflow_run_id` still owns the run. The jobs request uses `per_page=100`
+and follows `Link` rel=next only while the next URL stays on the allowlisted
+API origin and jobs route, and only through the existing ten-page cap. A
+loop, a disallowed next URL, a `total_count` that does not match the jobs
+already read, a full page with no next link and no `total_count`, or a page
+past the cap is an incomplete listing, not proof that the admission job is
+absent. Repeated identical complete blocks are one
 identity. An incomplete block that only repeats those values is ignored. A
 different value in a partial block or a second complete block is no identity.
 A log larger than 64KiB is no identity, including when the first 64KiB already

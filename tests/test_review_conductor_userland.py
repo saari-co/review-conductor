@@ -2985,6 +2985,20 @@ class BundleRetirementMutationTarget(unittest.TestCase):
         test_reopened_epoch_retires_previous_run_and_keeps_current_bundle()
 
 
+class ReceiptAndJobPageMutationTarget(unittest.TestCase):
+    def test_malformed_receipt_does_not_own_a_current_bundle(self) -> None:
+        test_malformed_receipt_does_not_own_a_current_bundle()
+
+    def test_inflight_no_artifact_failure_stays_pending(self) -> None:
+        test_inflight_no_artifact_failure_stays_pending()
+
+    def test_admission_job_on_a_later_page_is_the_dispatch_identity(self) -> None:
+        test_admission_job_on_a_later_page_is_the_dispatch_identity()
+
+    def test_admission_job_lookup_does_not_read_past_the_page_cap(self) -> None:
+        test_admission_job_lookup_does_not_read_past_the_page_cap()
+
+
 def test_bundle_retirement_mutants_fail_their_intended_tests() -> None:
     mutants = (
         (
@@ -3000,6 +3014,35 @@ def test_bundle_retirement_mutants_fail_their_intended_tests() -> None:
             'IN_FLIGHT_CLAWSWEEPER_STATUSES = ("pending", "preparing", "reconcile_required")\n',
             "test_review_conductor_userland.BundleRetirementMutationTarget."
             "test_inflight_dispatch_bundle_stays_pending",
+        ),
+        (
+            "tools/review_conductor_userland.py",
+            "    if not isinstance(receipt, dict):  # malformed-receipt-owns-nothing\n"
+            "        return False\n",
+            "",
+            "test_review_conductor_userland.ReceiptAndJobPageMutationTarget."
+            "test_malformed_receipt_does_not_own_a_current_bundle",
+        ),
+        (
+            "tools/review_conductor_userland.py",
+            "                if bound_failure is None and _no_artifact_failure_awaits_current_dispatch(\n",
+            "                if False and bound_failure is None and _no_artifact_failure_awaits_current_dispatch(\n",
+            "test_review_conductor_userland.ReceiptAndJobPageMutationTarget."
+            "test_inflight_no_artifact_failure_stays_pending",
+        ),
+        (
+            "tools/review_conductor_runtime.py",
+            "            current = nxt  # clawsweeper-job-pages\n",
+            "            return jobs  # clawsweeper-job-pages\n",
+            "test_review_conductor_userland.ReceiptAndJobPageMutationTarget."
+            "test_admission_job_on_a_later_page_is_the_dispatch_identity",
+        ),
+        (
+            "tools/review_conductor_runtime.py",
+            "            if page_index == MAX_LIST_PAGES - 1:  # clawsweeper-job-page-cap\n",
+            "            if page_index == MAX_LIST_PAGES + 99:  # clawsweeper-job-page-cap\n",
+            "test_review_conductor_userland.ReceiptAndJobPageMutationTarget."
+            "test_admission_job_lookup_does_not_read_past_the_page_cap",
         ),
     )
     for relative, old, new, test_id in mutants:
@@ -3163,6 +3206,18 @@ def test_parse_clawsweeper_dispatch_log_accepts_one_consistent_tuple() -> None:
     assert runtime.parse_clawsweeper_dispatch_log(leading_conflict) is None
 
 
+def _is_jobs_url(url: str) -> bool:
+    return url.split("?", 1)[0].endswith("/jobs")
+
+
+def _jobs_page_number(url: str) -> int:
+    query = url.split("?", 1)[1] if "?" in url else ""
+    for part in query.split("&"):
+        if part.startswith("page="):
+            return int(part.split("=", 1)[1])
+    return 1
+
+
 def test_admission_job_log_is_the_only_dispatch_identity_source() -> None:
     head = "a" * 40
     base = "b" * 40
@@ -3176,7 +3231,8 @@ def test_admission_job_log_is_the_only_dispatch_identity_source() -> None:
 
     def transport(method: str, url: str, _headers: dict[str, str], body: bytes | None, _timeout: float):
         calls.append(url)
-        if url.endswith("/jobs"):
+        if _is_jobs_url(url):
+            assert url.endswith("/jobs?per_page=100")
             payload = {"jobs": [
                 {"id": 7, "name": "Run pinned exact-tuple ClawSweeper / Admit exact-tuple PR"},
                 {"id": 8, "name": "Run pinned exact-tuple ClawSweeper / Native ClawSweeper review"},
@@ -3200,7 +3256,7 @@ def test_admission_job_log_is_the_only_dispatch_identity_source() -> None:
             "head_sha": head,
             "review_epoch": 2,
         }
-        assert any(url.endswith("/jobs") for url in calls)
+        assert any(_is_jobs_url(url) and url.endswith("?per_page=100") for url in calls)
         assert any(url.endswith("/logs") for url in calls)
         run_id = client.dispatch_clawsweeper(
             pr_number=48, base_sha=base, head_sha=head, publish=True
@@ -3210,11 +3266,12 @@ def test_admission_job_log_is_the_only_dispatch_identity_source() -> None:
 
         def no_admission(method: str, url: str, _headers: dict[str, str], _body: bytes | None, _timeout: float):
             calls.append(url)
+            assert _is_jobs_url(url) and url.endswith("?per_page=100")
             return 200, {}, json.dumps({"jobs": [{"id": 8, "name": "Native ClawSweeper review"}]}).encode()
 
         client._transport = no_admission
         assert client.clawsweeper_dispatch_identity(36009939846) is None
-        assert len(calls) == 1 and calls[0].endswith("/jobs")
+        assert len(calls) == 1 and _is_jobs_url(calls[0])
 
 
 def _dispatch_tuple_text(pr: int, base: str, head: str, epoch: int) -> str:
@@ -3233,7 +3290,7 @@ def _admission_log_client(
     def transport(
         method: str, url: str, _headers: dict[str, str], body: bytes | None, _timeout: float
     ):
-        if url.endswith("/jobs"):
+        if _is_jobs_url(url):
             payload = {"jobs": [{"id": 7, "name": "Run pinned exact-tuple ClawSweeper / Admit exact-tuple PR"}]}
             return 200, {}, json.dumps(payload).encode()
         if url.endswith("/artifacts"):
@@ -3351,6 +3408,246 @@ def test_admission_log_redirect_stays_on_the_artifact_allowlist() -> None:
             client = _admission_log_client(config, denied)
             assert client.clawsweeper_dispatch_identity(36009939846) is None
         assert len(seen) == 1 and seen[0].endswith("/logs")
+
+
+def _github_client(config: dict[str, Any], transport: Any) -> runtime.GitHubAppClient:
+    client = runtime.GitHubAppClient(config, "fixture-key", transport=transport)
+    client._token = "fixture-token"
+    client._token_expires = 9999999999
+    return client
+
+
+def test_malformed_receipt_does_not_own_a_current_bundle() -> None:
+    for index, receipt in enumerate(([], None)):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = config_fixture(root)
+            pr, run_id = 93, 4093
+            prepare_openclaw(config, root, pr)
+            claw_action = action(config, pr, "clawsweeper.dispatch")
+            _set_action_status(config, claw_action["action_id"], "dispatched", receipt)
+            ingress(config, "workflow_run", f"malformed-{index}", claw_workflow_payload(run_id))
+            client = HistoricalThenCurrentGitHub(
+                1, run_id, b"", claw_bundle(run_id=run_id, pr=pr), None
+            )
+            collected = userland.collect_clawsweeper_terminals(config, client, dry_run=False)
+            assert collected == [
+                {
+                    "workflow_run_id": run_id,
+                    "result": "historical_bundle_retired",
+                    "conclusion": "success",
+                }
+            ]
+            assert current(config, pr)["state"] == "clawsweeper_queued"
+            connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+            try:
+                stored = connection.execute(
+                    "SELECT status, verdict FROM rail_workflow_runs WHERE workflow_run_id = ?",
+                    (str(run_id),),
+                ).fetchone()
+                assert stored["status"] == "terminal_attention_required"
+                assert stored["verdict"] is None
+            finally:
+                connection.close()
+
+
+def test_inflight_no_artifact_failure_stays_pending() -> None:
+    cases: list[tuple[str, Any]] = [
+        (status, {}) for status in userland.IN_FLIGHT_CLAWSWEEPER_STATUSES
+    ]
+    cases.append(("dispatching", None))
+    for status, receipt in cases:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = config_fixture(root)
+            pr, run_id = 94, 4094
+            prepare_openclaw(config, root, pr)
+            claw_action = action(config, pr, "clawsweeper.dispatch")
+            epoch = int(current(config, pr)["review_epoch"])
+            _set_action_status(config, claw_action["action_id"], status, receipt)
+            ingress(
+                config, "workflow_run", f"inflight-failure-{status}",
+                claw_workflow_payload(run_id, conclusion="failure"),
+            )
+            identity = {
+                "repository": "dinkuskit/blocks",
+                "pr_number": pr,
+                "base_sha": BASE,
+                "head_sha": HEAD,
+                "review_epoch": epoch,
+            }
+
+            class ProvenFailure:
+                def list_run_artifacts(self, _run_id: int) -> list[dict[str, Any]]:
+                    return []
+
+                def clawsweeper_dispatch_identity(self, _run_id: int) -> dict[str, Any]:
+                    return identity
+
+            collected = userland.collect_clawsweeper_terminals(
+                config, ProvenFailure(), dry_run=False
+            )
+            assert collected == [
+                {
+                    "workflow_run_id": run_id,
+                    "result": "current_dispatch_pending",
+                    "conclusion": "failure",
+                }
+            ]
+            assert current(config, pr)["state"] == "clawsweeper_queued"
+            connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+            try:
+                stored = connection.execute(
+                    "SELECT status, verdict, bound_pr_number FROM rail_workflow_runs WHERE workflow_run_id = ?",
+                    (str(run_id),),
+                ).fetchone()
+                assert stored["status"] == "terminal_pending_verdict_bridge"
+                assert stored["verdict"] is None and stored["bound_pr_number"] is None
+            finally:
+                connection.close()
+            notifier = FakeNotifier()
+            userland.deliver_notifications(config, notifier, dry_run=False)
+            assert notifier.sent == []
+            mark_dispatched(config, claw_action["action_id"])
+            again = userland.collect_clawsweeper_terminals(config, ProvenFailure(), dry_run=False)
+            assert again[0]["result"] == "bound_execution_failed"
+            assert current(config, pr)["state"] == "clawsweeper_failed"
+
+
+def test_inflight_receipt_for_a_different_run_still_retires() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config = config_fixture(root)
+        pr, run_id = 95, 4095
+        prepare_openclaw(config, root, pr)
+        claw_action = action(config, pr, "clawsweeper.dispatch")
+        epoch = int(current(config, pr)["review_epoch"])
+        _set_action_status(
+            config, claw_action["action_id"], "dispatching", {"workflow_run_id": run_id + 9}
+        )
+        ingress(
+            config, "workflow_run", "other-run",
+            claw_workflow_payload(run_id, conclusion="failure"),
+        )
+        identity = {
+            "repository": "dinkuskit/blocks",
+            "pr_number": pr,
+            "base_sha": BASE,
+            "head_sha": HEAD,
+            "review_epoch": epoch,
+        }
+
+        class ProvenFailure:
+            def list_run_artifacts(self, _run_id: int) -> list[dict[str, Any]]:
+                return []
+
+            def clawsweeper_dispatch_identity(self, _run_id: int) -> dict[str, Any]:
+                return identity
+
+        collected = userland.collect_clawsweeper_terminals(config, ProvenFailure(), dry_run=False)
+        assert collected[0]["result"] == "rail_failure_alerted"
+        assert current(config, pr)["state"] == "clawsweeper_queued"
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            stored = connection.execute(
+                "SELECT status, bound_pr_number FROM rail_workflow_runs WHERE workflow_run_id = ?",
+                (str(run_id),),
+            ).fetchone()
+            assert stored["status"] == "terminal_attention_required"
+            assert stored["bound_pr_number"] is None
+        finally:
+            connection.close()
+
+
+def _jobs_page_transport(pages: dict[int, tuple[dict[str, Any], str | None]], log: bytes):
+    def transport(
+        _method: str, url: str, _headers: dict[str, str], _body: bytes | None, _timeout: float
+    ):
+        if _is_jobs_url(url):
+            payload, nxt = pages[_jobs_page_number(url)]
+            headers = {}
+            if nxt is not None:
+                headers["Link"] = f'<{nxt}>; rel="next"'
+            return 200, headers, json.dumps(payload).encode()
+        if url.endswith("/logs"):
+            return 200, {}, log
+        raise AssertionError(url)
+
+    return transport
+
+
+def test_admission_job_on_a_later_page_is_the_dispatch_identity() -> None:
+    head = "a" * 40
+    base = "b" * 40
+    log = _dispatch_tuple_text(48, base, head, 2).encode()
+    admission = {"id": 7, "name": "Run pinned exact-tuple ClawSweeper / Admit exact-tuple PR"}
+    other = {"id": 8, "name": "Native ClawSweeper review"}
+    with tempfile.TemporaryDirectory() as temporary:
+        config = config_fixture(Path(temporary))
+        run_url = (
+            "https://api.github.com/repos/dinkuskit/blocks/actions/runs/36009939846/jobs"
+        )
+        page2 = run_url + "?per_page=100&page=2"
+        client = _github_client(
+            config,
+            _jobs_page_transport(
+                {
+                    1: ({"total_count": 2, "jobs": [other]}, page2),
+                    2: ({"total_count": 2, "jobs": [admission]}, None),
+                },
+                log,
+            ),
+        )
+        assert client.clawsweeper_dispatch_identity(36009939846) == {
+            "repository": "dinkuskit/blocks",
+            "pr_number": 48,
+            "base_sha": base,
+            "head_sha": head,
+            "review_epoch": 2,
+        }
+        duplicate = _github_client(
+            config,
+            _jobs_page_transport(
+                {
+                    1: ({"total_count": 2, "jobs": [admission]}, page2),
+                    2: ({"total_count": 2, "jobs": [admission]}, None),
+                },
+                log,
+            ),
+        )
+        assert duplicate.clawsweeper_dispatch_identity(36009939846) is None
+
+
+def test_admission_job_lookup_does_not_read_past_the_page_cap() -> None:
+    fetched: list[int] = []
+
+    def transport(
+        _method: str, url: str, _headers: dict[str, str], _body: bytes | None, _timeout: float
+    ):
+        assert _is_jobs_url(url)
+        page = _jobs_page_number(url)
+        fetched.append(page)
+        base = url.split("?", 1)[0]
+        if page <= runtime.MAX_LIST_PAGES:
+            nxt = f"{base}?per_page=100&page={page + 1}"
+            payload = {"total_count": runtime.MAX_LIST_PAGES + 1, "jobs": [{"id": page, "name": "other"}]}
+            return 200, {"Link": f'<{nxt}>; rel="next"'}, json.dumps(payload).encode()
+        payload = {
+            "total_count": runtime.MAX_LIST_PAGES + 1,
+            "jobs": [{"id": 7, "name": "Admit exact-tuple"}],
+        }
+        return 200, {}, json.dumps(payload).encode()
+
+    with tempfile.TemporaryDirectory() as temporary:
+        config = config_fixture(Path(temporary))
+        client = _github_client(config, transport)
+        try:
+            client.clawsweeper_dispatch_identity(36009939846)
+        except runtime.GitHubApiError as exc:
+            assert "bounded page count" in str(exc)
+        else:
+            raise AssertionError("job lookup read past the page cap")
+        assert fetched == list(range(1, runtime.MAX_LIST_PAGES + 1))
 
 
 def test_dispatch_stores_only_documented_workflow_run_id() -> None:
@@ -3743,6 +4040,11 @@ def main() -> None:
         test_dispatch_identity_transport_failure_leaves_the_run_pending,
         test_parse_clawsweeper_dispatch_log_accepts_one_consistent_tuple,
         test_admission_job_log_is_the_only_dispatch_identity_source,
+        test_malformed_receipt_does_not_own_a_current_bundle,
+        test_inflight_no_artifact_failure_stays_pending,
+        test_inflight_receipt_for_a_different_run_still_retires,
+        test_admission_job_on_a_later_page_is_the_dispatch_identity,
+        test_admission_job_lookup_does_not_read_past_the_page_cap,
         test_oversize_admission_log_with_conflicting_suffix_is_not_an_identity,
         test_admission_log_redirect_stays_on_the_artifact_allowlist,
         test_dispatch_stores_only_documented_workflow_run_id,

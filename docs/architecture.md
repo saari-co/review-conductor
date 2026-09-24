@@ -45,9 +45,13 @@ or projection of a different current action. An in-flight current-epoch
 dispatch keeps that receipt pending, and an earlier epoch's dispatched action
 is not the current owner. A no-artifact producer failure
 becomes `clawsweeper_failed` only for the exact current dispatched tuple, and
-that failure is not review PASS. An admission log larger than 64KiB, a
-conflicting partial block, or a private-runner log redirect is not that
-identity. See [ClawSweeper rereview](clawsweeper-rereview.md).
+that failure is not review PASS. Those same in-flight statuses leave that
+failure receipt pending when the current epoch has not stored a different run
+id. A non-object dispatch receipt owns no run. Admission-job lookup reads
+bounded `per_page=100` pages and does not treat a later page as absent. An
+admission log larger than 64KiB, a conflicting partial block, or a
+private-runner log redirect is not that identity. See
+[ClawSweeper rereview](clawsweeper-rereview.md).
 
 Enrollment and terminal notification eligibility are one Conductor-owned
 decision, [`decide_orchestration_outcome`](../tools/orchestration_outcome.py)

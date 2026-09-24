@@ -1140,18 +1140,35 @@ def _receipt_owns_run(row: sqlite3.Row, workflow_run_id: int) -> bool:
 
     A missing ``workflow_run_id`` still owns the run. Dispatch stores that
     integer only when GitHub returns it; a 204 response leaves it unset.
+    A non-object receipt, including JSON ``null`` or ``[]``, owns nothing.
     A present but non-integer value owns nothing.
     """
     try:
         receipt = json.loads(row["receipt_json"] or "{}")
     except json.JSONDecodeError:
         return False
-    if not isinstance(receipt, dict) or "workflow_run_id" not in receipt:
+    if not isinstance(receipt, dict):  # malformed-receipt-owns-nothing
+        return False
+    if "workflow_run_id" not in receipt:
         return True
     recorded = receipt["workflow_run_id"]
     if isinstance(recorded, bool) or not isinstance(recorded, int):
         return False
     return recorded == int(workflow_run_id)
+
+
+def _receipt_excludes_run(row: sqlite3.Row, workflow_run_id: int) -> bool:
+    """True only when the receipt stored a different integer run id."""
+    try:
+        receipt = json.loads(row["receipt_json"] or "{}")
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(receipt, dict) or "workflow_run_id" not in receipt:
+        return False
+    recorded = receipt["workflow_run_id"]
+    if isinstance(recorded, bool) or not isinstance(recorded, int):
+        return False
+    return recorded != int(workflow_run_id)
 
 
 def current_epoch_clawsweeper_actions(
@@ -1192,6 +1209,50 @@ def current_epoch_clawsweeper_actions(
             parameters,
         ).fetchall()
     )
+
+
+def _current_epoch_dispatch_rows(
+    connection: sqlite3.Connection, identity: dict[str, Any] | None
+) -> list[sqlite3.Row]:
+    if identity is not None:
+        return current_epoch_clawsweeper_actions(connection, identity)
+    return list(
+        connection.execute(
+            """
+            SELECT actions.* FROM actions
+            JOIN heads
+              ON heads.repository = actions.repository
+             AND heads.pr_number = actions.pr_number
+             AND heads.base_sha = actions.base_sha
+             AND heads.head_sha = actions.head_sha
+             AND heads.review_epoch = actions.review_epoch
+             AND heads.is_current = 1
+            WHERE actions.kind = 'clawsweeper.dispatch'
+              AND heads.state IN ('clawsweeper_queued', 'clawsweeper_running')
+            """
+        ).fetchall()
+    )
+
+
+def _no_artifact_failure_awaits_current_dispatch(
+    connection: sqlite3.Connection,
+    rail_run: sqlite3.Row,
+    identity: dict[str, Any] | None,
+) -> bool:
+    """True when a current-epoch dispatch can still commit this failed run.
+
+    ``pending``, ``preparing``, ``dispatching``, and ``reconcile_required``
+    have not finished recording the run id. A receipt that already stores a
+    different integer run id does not keep this failure pending. Without a
+    proven tuple, any such current-epoch dispatch is still a possible owner.
+    """
+    run_id = int(rail_run["workflow_run_id"])
+    for row in _current_epoch_dispatch_rows(connection, identity):
+        if row["status"] not in IN_FLIGHT_CLAWSWEEPER_STATUSES:
+            continue
+        if not _receipt_excludes_run(row, run_id):
+            return True
+    return False
 
 
 def clawsweeper_action(
@@ -1595,16 +1656,6 @@ def collect_clawsweeper_terminals(
                     }
                 )
                 continue
-            queue_operator_alert(
-                config,
-                f"clawsweeper-workflow-{run_id}-{rail_run['conclusion']}",
-                (
-                    f"Review Conductor needs Bobby: ClawSweeper workflow run {run_id} "
-                    f"concluded {rail_run['conclusion']} before an exact PR verdict bundle was available. "
-                    "No PR was marked ready. No merge was attempted. "
-                    f"https://github.com/{config['github_app']['repository']}/actions/runs/{run_id}"
-                ),
-            )
             connection = core.open_database(Path(config["paths"]["state_root"]), config["github_app"]["repository"])
             try:
                 connection.execute("BEGIN IMMEDIATE")
@@ -1613,6 +1664,18 @@ def collect_clawsweeper_terminals(
                     bound_failure = fail_proven_clawsweeper_execution(
                         connection, rail_run, proven
                     )
+                if bound_failure is None and _no_artifact_failure_awaits_current_dispatch(
+                    connection, rail_run, proven
+                ):
+                    connection.rollback()
+                    outcomes.append(
+                        {
+                            "workflow_run_id": run_id,
+                            "result": "current_dispatch_pending",
+                            "conclusion": rail_run["conclusion"],
+                        }
+                    )
+                    continue
                 connection.execute(
                     """
                     UPDATE rail_workflow_runs SET status = 'terminal_attention_required'
@@ -1624,6 +1687,16 @@ def collect_clawsweeper_terminals(
                 connection.commit()
             finally:
                 connection.close()
+            queue_operator_alert(
+                config,
+                f"clawsweeper-workflow-{run_id}-{rail_run['conclusion']}",
+                (
+                    f"Review Conductor needs Bobby: ClawSweeper workflow run {run_id} "
+                    f"concluded {rail_run['conclusion']} before an exact PR verdict bundle was available. "
+                    "No PR was marked ready. No merge was attempted. "
+                    f"https://github.com/{config['github_app']['repository']}/actions/runs/{run_id}"
+                ),
+            )
             outcomes.append(
                 {
                     "workflow_run_id": run_id,

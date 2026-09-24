@@ -534,7 +534,7 @@ class GitHubAppClient:
             ),
             (
                 "GET",
-                rf"/repos/{repository}/actions/runs/[1-9][0-9]*/jobs",
+                rf"/repos/{repository}/actions/runs/[1-9][0-9]*/jobs(?:\?per_page=100(?:&page=[1-9][0-9]*)?)?",
                 "clawsweeper-job-list",
             ),
             (
@@ -1148,6 +1148,54 @@ class GitHubAppClient:
             raise GitHubApiError("ClawSweeper artifact download has an invalid bounded size")
         return raw
 
+    def _list_clawsweeper_run_jobs(self, run_id: int) -> list[Any]:
+        """Read every jobs page, or fail closed before calling the list complete.
+
+        The first page is not the whole run. ``per_page=100`` and allowlisted
+        ``Link`` rel=next pages stay inside ``MAX_LIST_PAGES``. A loop, a
+        disallowed next URL, a full page with no next link and no matching
+        ``total_count``, or a page past the cap is an incomplete listing.
+        """
+        current = f"/repos/{self.repository}/actions/runs/{run_id}/jobs?per_page=100"
+        jobs: list[Any] = []
+        seen: set[str] = set()
+        reported_total: int | None = None
+        for page_index in range(MAX_LIST_PAGES + 1):
+            if current in seen:
+                raise GitHubApiError("GitHub list pagination looped")
+            seen.add(current)
+            _operation, response_headers, raw = self._call_raw_response(
+                "GET", current, None, expected={200}
+            )
+            try:
+                decoded = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise GitHubApiError("GitHub API returned malformed JSON") from exc
+            if not isinstance(decoded, dict):
+                raise GitHubApiError("ClawSweeper jobs listing has an invalid shape")
+            if "total_count" in decoded:
+                total = decoded["total_count"]
+                if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+                    raise GitHubApiError("ClawSweeper jobs listing has an invalid shape")
+                if reported_total is not None and reported_total != total:
+                    raise GitHubApiError("ClawSweeper jobs listing is incomplete")
+                reported_total = total
+            page_jobs = decoded.get("jobs")
+            if not isinstance(page_jobs, list) or len(page_jobs) > 100:
+                raise GitHubApiError("ClawSweeper jobs listing has an invalid shape")
+            jobs.extend(page_jobs)
+            nxt = self._next_list_path(current, response_headers)
+            if nxt is None:
+                if reported_total is not None and reported_total != len(jobs):
+                    raise GitHubApiError("ClawSweeper jobs listing is incomplete")
+                if reported_total is None and len(page_jobs) == 100:
+                    raise GitHubApiError("ClawSweeper jobs listing is incomplete")
+                return jobs
+            if page_index == MAX_LIST_PAGES - 1:  # clawsweeper-job-page-cap
+                raise GitHubApiError("ClawSweeper jobs listing exceeded the bounded page count")
+            current = nxt  # clawsweeper-job-pages
+        raise GitHubApiError("ClawSweeper jobs listing exceeded the bounded page count")
+
     def clawsweeper_dispatch_identity(self, workflow_run_id: int) -> dict[str, Any] | None:
         """Read one admission-job log for the dispatch inputs this client sent.
 
@@ -1157,18 +1205,11 @@ class GitHubAppClient:
         redirect transport and its productionresultssa blob allowlist. Private
         runner log hosts stay unfetched until a separate approval. A missing,
         conflicting, oversize, non-admission, or disallowed-redirect log is no
-        identity.
+        identity. Job lookup walks bounded allowlisted pages before deciding
+        that the admission job is absent.
         """
         run_id = core.require_positive_int(workflow_run_id, "ClawSweeper workflow run id")
-        response = self._call(
-            "GET",
-            f"/repos/{self.repository}/actions/runs/{run_id}/jobs",
-            None,
-            expected={200},
-        )
-        jobs = response.get("jobs")
-        if not isinstance(jobs, list) or len(jobs) > 100:
-            raise GitHubApiError("ClawSweeper jobs listing has an invalid shape")
+        jobs = self._list_clawsweeper_run_jobs(run_id)
         admission = [
             job for job in jobs
             if isinstance(job, dict)
