@@ -97,8 +97,13 @@ and `reconcile_required` statuses leave that failure receipt pending when a
 current-epoch dispatch has not stored a different `workflow_run_id`. A fast
 failed run can finish before dispatch commits the receipt; retiring it in
 that window would drop the later bind. A non-object dispatch receipt,
-including JSON `null` or `[]`, owns no run. A JSON object that omits
-`workflow_run_id` still owns the run. The jobs request uses `per_page=100`
+including JSON `null` or `[]`, owns no run. A present `workflow_run_id` must
+be a non-boolean integer; a string or other JSON type is not that run. A
+JSON object that omits `workflow_run_id` still owns the run. A report epoch
+is at most ten digits, the same bound as the admission-log tuple, and an
+out-of-bound epoch leaves that receipt pending instead of aborting later
+collection. A matching admission job whose id is not a positive integer is
+an incomplete lookup, not a missing job. The jobs request uses `per_page=100`
 and follows `Link` rel=next only while the next URL stays on the allowlisted
 API origin and jobs route, and only through the existing ten-page cap. A
 loop, a disallowed next URL, a `total_count` that does not match the jobs

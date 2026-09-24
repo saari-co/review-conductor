@@ -1218,7 +1218,12 @@ class GitHubAppClient:
         ]
         if len(admission) != 1:
             return None
-        job_id = core.require_positive_int(admission[0].get("id"), "ClawSweeper admission job id")
+        try:
+            job_id = core.require_positive_int(
+                admission[0].get("id"), "ClawSweeper admission job id"
+            )
+        except core.ContractError as exc:  # admission-job-id-shape
+            raise GitHubApiError("ClawSweeper admission job id is invalid") from exc
         path = f"/repos/{self.repository}/actions/jobs/{job_id}/logs"
         operation = self._allow("GET", path)
         headers = {

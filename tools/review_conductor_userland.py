@@ -1129,7 +1129,7 @@ def clawsweeper_bundle_identity(raw: bytes) -> dict[str, Any]:
     }
     if "review_epoch" in frontmatter:
         epoch = frontmatter["review_epoch"]
-        if re.fullmatch(r"[0-9]+", epoch) is None:
+        if re.fullmatch(r"[0-9]{1,10}", epoch) is None:  # bundle-epoch-digit-bound
             raise UserlandError("ClawSweeper report review epoch is invalid")
         identity["review_epoch"] = int(epoch)
     return identity
@@ -1446,9 +1446,13 @@ def proven_no_artifact_dispatch_identity(
             continue
         if not isinstance(receipt, dict):
             continue
-        recorded = receipt.get("workflow_run_id")
-        if recorded is not None and str(recorded) == run_id:
-            hits.append(row)
+        if "workflow_run_id" not in receipt:
+            continue
+        recorded = receipt["workflow_run_id"]
+        if (isinstance(recorded, bool) or not isinstance(recorded, int)
+                or recorded != int(run_id)):  # integer-receipt-hit
+            continue
+        hits.append(row)
     if len(hits) > 1:
         return None
     if len(hits) == 1:
@@ -1511,10 +1515,14 @@ def fail_proven_clawsweeper_execution(
     try:
         receipt = json.loads(row["receipt_json"] or "{}")
     except json.JSONDecodeError:
-        receipt = {}
-    recorded = receipt.get("workflow_run_id") if isinstance(receipt, dict) else None
-    if recorded is not None and str(recorded) != run_id:
         return None
+    if not isinstance(receipt, dict):
+        return None
+    if "workflow_run_id" in receipt:
+        recorded = receipt["workflow_run_id"]
+        if (isinstance(recorded, bool) or not isinstance(recorded, int)
+                or recorded != int(rail_run["workflow_run_id"])):  # integer-receipt-fence
+            return None
     head_identity = {key: row[key] for key in ("repository", "pr_number", "base_sha", "head_sha")}
     reason = (
         f"ClawSweeper execution {rail_run['conclusion']}; "
@@ -1716,6 +1724,15 @@ def collect_clawsweeper_terminals(
             identity = clawsweeper_bundle_identity(raw_bundle)
             action = clawsweeper_action(config, identity, workflow_run_id=run_id)
         except UserlandError as exc:
+            if str(exc) == "ClawSweeper report review epoch is invalid":
+                outcomes.append(
+                    {
+                        "workflow_run_id": run_id,
+                        "result": "bundle_identity_unavailable",
+                        "conclusion": rail_run["conclusion"],
+                    }
+                )
+                continue
             if str(exc) != CLAWSWEEPER_BUNDLE_MISMATCH:
                 raise
             outcomes.append(

@@ -2998,6 +2998,18 @@ class ReceiptAndJobPageMutationTarget(unittest.TestCase):
     def test_admission_job_lookup_does_not_read_past_the_page_cap(self) -> None:
         test_admission_job_lookup_does_not_read_past_the_page_cap()
 
+    def test_string_receipt_run_id_is_not_a_stored_identity(self) -> None:
+        test_string_receipt_run_id_is_not_a_stored_identity()
+
+    def test_string_receipt_run_id_does_not_pass_the_admission_fence(self) -> None:
+        test_string_receipt_run_id_does_not_pass_the_admission_fence()
+
+    def test_malformed_admission_job_id_stays_pending_and_collection_continues(self) -> None:
+        test_malformed_admission_job_id_stays_pending_and_collection_continues()
+
+    def test_overlong_bundle_epoch_does_not_abort_later_collection(self) -> None:
+        test_overlong_bundle_epoch_does_not_abort_later_collection()
+
 
 def test_bundle_retirement_mutants_fail_their_intended_tests() -> None:
     mutants = (
@@ -3043,6 +3055,36 @@ def test_bundle_retirement_mutants_fail_their_intended_tests() -> None:
             "            if page_index == MAX_LIST_PAGES + 99:  # clawsweeper-job-page-cap\n",
             "test_review_conductor_userland.ReceiptAndJobPageMutationTarget."
             "test_admission_job_lookup_does_not_read_past_the_page_cap",
+        ),
+        (
+            "tools/review_conductor_userland.py",
+            "        if (isinstance(recorded, bool) or not isinstance(recorded, int)\n"
+            "                or recorded != int(run_id)):  # integer-receipt-hit\n",
+            "        if recorded is None or str(recorded) != run_id:  # integer-receipt-hit\n",
+            "test_review_conductor_userland.ReceiptAndJobPageMutationTarget."
+            "test_string_receipt_run_id_is_not_a_stored_identity",
+        ),
+        (
+            "tools/review_conductor_userland.py",
+            "        if (isinstance(recorded, bool) or not isinstance(recorded, int)\n"
+            "                or recorded != int(rail_run[\"workflow_run_id\"])):  # integer-receipt-fence\n",
+            "        if recorded is not None and str(recorded) != str(rail_run[\"workflow_run_id\"]):  # integer-receipt-fence\n",
+            "test_review_conductor_userland.ReceiptAndJobPageMutationTarget."
+            "test_string_receipt_run_id_does_not_pass_the_admission_fence",
+        ),
+        (
+            "tools/review_conductor_runtime.py",
+            "            raise GitHubApiError(\"ClawSweeper admission job id is invalid\") from exc\n",
+            "            return None\n",
+            "test_review_conductor_userland.ReceiptAndJobPageMutationTarget."
+            "test_malformed_admission_job_id_stays_pending_and_collection_continues",
+        ),
+        (
+            "tools/review_conductor_userland.py",
+            "        if re.fullmatch(r\"[0-9]{1,10}\", epoch) is None:  # bundle-epoch-digit-bound\n",
+            "        if re.fullmatch(r\"[0-9]+\", epoch) is None:  # bundle-epoch-digit-bound\n",
+            "test_review_conductor_userland.ReceiptAndJobPageMutationTarget."
+            "test_overlong_bundle_epoch_does_not_abort_later_collection",
         ),
     )
     for relative, old, new, test_id in mutants:
@@ -3650,6 +3692,172 @@ def test_admission_job_lookup_does_not_read_past_the_page_cap() -> None:
         assert fetched == list(range(1, runtime.MAX_LIST_PAGES + 1))
 
 
+def test_string_receipt_run_id_is_not_a_stored_identity() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config = config_fixture(root)
+        pr, run_id = 96, 4096
+        prepare_openclaw(config, root, pr)
+        claw_action = action(config, pr, "clawsweeper.dispatch")
+        _set_action_status(
+            config, claw_action["action_id"], "dispatched", {"workflow_run_id": str(run_id)}
+        )
+        ingress(
+            config, "workflow_run", "string-run",
+            claw_workflow_payload(run_id, conclusion="failure"),
+        )
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            rail_run = connection.execute(
+                "SELECT * FROM rail_workflow_runs WHERE workflow_run_id = ?",
+                (str(run_id),),
+            ).fetchone()
+        finally:
+            connection.close()
+        assert userland.proven_no_artifact_dispatch_identity(
+            config, EmptyGitHub(), rail_run
+        ) is None
+
+
+def test_string_receipt_run_id_does_not_pass_the_admission_fence() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config = config_fixture(root)
+        pr, run_id = 97, 4097
+        prepare_openclaw(config, root, pr)
+        claw_action = action(config, pr, "clawsweeper.dispatch")
+        epoch = int(current(config, pr)["review_epoch"])
+        _set_action_status(
+            config, claw_action["action_id"], "dispatched", {"workflow_run_id": str(run_id)}
+        )
+        ingress(
+            config, "workflow_run", "string-fence",
+            claw_workflow_payload(run_id, conclusion="failure"),
+        )
+        identity = {
+            "repository": "dinkuskit/blocks",
+            "pr_number": pr,
+            "base_sha": BASE,
+            "head_sha": HEAD,
+            "review_epoch": epoch,
+        }
+
+        class ProvenFailure:
+            def list_run_artifacts(self, _run_id: int) -> list[dict[str, Any]]:
+                return []
+
+            def clawsweeper_dispatch_identity(self, _run_id: int) -> dict[str, Any]:
+                return identity
+
+        collected = userland.collect_clawsweeper_terminals(config, ProvenFailure(), dry_run=False)
+        assert collected[0]["result"] == "rail_failure_alerted"
+        assert current(config, pr)["state"] == "clawsweeper_queued"
+
+
+def test_malformed_admission_job_id_stays_pending_and_collection_continues() -> None:
+    bad_run, later_run = 4098, 4099
+
+    def transport(
+        _method: str, url: str, _headers: dict[str, str], _body: bytes | None, _timeout: float
+    ):
+        if url.endswith("/artifacts"):
+            return 200, {}, b'{"artifacts":[]}'
+        if _is_jobs_url(url):
+            if f"/runs/{bad_run}/" in url:
+                payload = {"jobs": [{"id": None, "name": "Admit exact-tuple"}]}
+            else:
+                payload = {"jobs": [{"id": 8, "name": "Native ClawSweeper review"}]}
+            return 200, {}, json.dumps(payload).encode()
+        raise AssertionError(url)
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config = config_fixture(root)
+        pr = 98
+        prepare_openclaw(config, root, pr)
+        mark_dispatched(config, action(config, pr, "clawsweeper.dispatch")["action_id"])
+        first = claw_workflow_payload(bad_run, conclusion="failure")
+        first["workflow_run"]["created_at"] = "2026-09-24T14:00:00Z"
+        second = claw_workflow_payload(later_run, conclusion="failure")
+        second["workflow_run"]["created_at"] = "2026-09-24T14:05:00Z"
+        ingress(config, "workflow_run", "bad-job-id", first)
+        ingress(config, "workflow_run", "later-failure", second)
+        client = _github_client(config, transport)
+        try:
+            client.clawsweeper_dispatch_identity(bad_run)
+        except runtime.GitHubApiError as exc:
+            assert "admission job id" in str(exc)
+        else:
+            raise AssertionError("malformed admission job id was treated as absent")
+        collected = userland.collect_clawsweeper_terminals(config, client, dry_run=False)
+        assert [item["result"] for item in collected] == [
+            "dispatch_identity_unavailable",
+            "rail_failure_alerted",
+        ]
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            pending = connection.execute(
+                "SELECT status FROM rail_workflow_runs WHERE workflow_run_id = ?",
+                (str(bad_run),),
+            ).fetchone()
+            later = connection.execute(
+                "SELECT status FROM rail_workflow_runs WHERE workflow_run_id = ?",
+                (str(later_run),),
+            ).fetchone()
+            assert pending["status"] == "terminal_pending_verdict_bridge"
+            assert later["status"] == "terminal_attention_required"
+        finally:
+            connection.close()
+        assert current(config, pr)["state"] == "clawsweeper_queued"
+
+
+def test_overlong_bundle_epoch_does_not_abort_later_collection() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config = config_fixture(root)
+        pr = 99
+        bad_run, good_run = 4100, 4101
+        prepare_openclaw(config, root, pr)
+        mark_dispatched(config, action(config, pr, "clawsweeper.dispatch")["action_id"])
+        bad_payload = claw_workflow_payload(bad_run)
+        bad_payload["workflow_run"]["created_at"] = "2026-09-24T14:00:00Z"
+        good_payload = claw_workflow_payload(good_run)
+        good_payload["workflow_run"]["created_at"] = "2026-09-24T14:05:00Z"
+        ingress(config, "workflow_run", "overlong-epoch", bad_payload)
+        ingress(config, "workflow_run", "current-clean", good_payload)
+
+        class TwoBundles:
+            def list_run_artifacts(self, run_id: int) -> list[dict[str, Any]]:
+                return [{
+                    "id": run_id,
+                    "name": f"dinkuskit-native-review-{run_id}-1",
+                    "expired": False,
+                }]
+
+            def download_artifact(self, artifact_id: int) -> bytes:
+                if artifact_id == bad_run:
+                    # One past SQLite's signed 64-bit integer. An unbounded
+                    # digit check would bind this and abort the later receipt.
+                    return claw_bundle(run_id=bad_run, pr=pr, review_epoch=2**63)
+                return claw_bundle(run_id=good_run, pr=pr)
+
+        collected = userland.collect_clawsweeper_terminals(config, TwoBundles(), dry_run=False)
+        assert [item["result"] for item in collected] == [
+            "bundle_identity_unavailable",
+            "terminal_materialized",
+        ]
+        assert collected[1]["verdict"] == "clean"
+        connection = core.open_database(Path(config["paths"]["state_root"]), "dinkuskit/blocks")
+        try:
+            pending = connection.execute(
+                "SELECT status FROM rail_workflow_runs WHERE workflow_run_id = ?",
+                (str(bad_run),),
+            ).fetchone()
+            assert pending["status"] == "terminal_pending_verdict_bridge"
+        finally:
+            connection.close()
+
+
 def test_dispatch_stores_only_documented_workflow_run_id() -> None:
     head = "a" * 40
     base = "b" * 40
@@ -4045,6 +4253,10 @@ def main() -> None:
         test_inflight_receipt_for_a_different_run_still_retires,
         test_admission_job_on_a_later_page_is_the_dispatch_identity,
         test_admission_job_lookup_does_not_read_past_the_page_cap,
+        test_string_receipt_run_id_is_not_a_stored_identity,
+        test_string_receipt_run_id_does_not_pass_the_admission_fence,
+        test_malformed_admission_job_id_stays_pending_and_collection_continues,
+        test_overlong_bundle_epoch_does_not_abort_later_collection,
         test_oversize_admission_log_with_conflicting_suffix_is_not_an_identity,
         test_admission_log_redirect_stays_on_the_artifact_allowlist,
         test_dispatch_stores_only_documented_workflow_run_id,
